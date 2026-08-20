@@ -1,0 +1,425 @@
+"""Reading a recorded take back for review.
+
+Synchronisation policy
+----------------------
+Playback position is driven by **frame index**, and every frame carries the
+camera timestamp it was captured with. Timing is therefore never reconstructed
+as ``index / fps``: that assumption silently hides a dropped frame, which is
+exactly the failure this application exists to make visible.
+
+:class:`TakeReader` exposes both, so the review timeline can show real elapsed
+time while gaps in the frame sequence stay visible as gaps.
+
+Memory policy
+-------------
+The skeleton stream is small (a five-minute 34-joint take is a few megabytes as
+float32) and is loaded fully so scrubbing is instant. Video is *not*: the proxy
+MP4 is read frame by frame through OpenCV and seeked on demand.
+"""
+
+from __future__ import annotations
+
+import os
+import threading
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Optional, Sequence
+
+import numpy as np
+
+from kinecapture.core.errors import StorageError
+from kinecapture.core.jsonio import read_jsonl
+from kinecapture.core.logging import get_logger
+from kinecapture.core.paths import (
+    is_too_long_for_external_tools,
+    long_path,
+    path_exists,
+    safe_external_path,
+)
+from kinecapture.dataset.workspace import ProjectWorkspace, TakePaths
+from kinecapture.domain.models import BodyPose
+from kinecapture.domain.project import Take
+from kinecapture.visualization.skeleton_spec import SkeletonSpec, try_get_skeleton_spec
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class SkeletonFrame:
+    """One frame of the recorded pose stream."""
+
+    frame_index: int
+    host_timestamp_ns: int
+    camera_timestamp_ns: int
+    bodies: tuple[BodyPose, ...] = ()
+    active_body_id: Optional[int] = None
+
+    def body(self, tracking_id: Optional[int]) -> Optional[BodyPose]:
+        """The requested body, the recorded active one, or the best available."""
+        if tracking_id is not None:
+            for body in self.bodies:
+                if body.tracking_id == tracking_id:
+                    return body
+        if self.active_body_id is not None:
+            for body in self.bodies:
+                if body.tracking_id == self.active_body_id:
+                    return body
+        if not self.bodies:
+            return None
+        return max(self.bodies, key=lambda b: b.valid_joint_ratio)
+
+
+@dataclass
+class SkeletonStream:
+    """The whole pose stream of one take, plus what the header said about it."""
+
+    header: dict[str, Any] = field(default_factory=dict)
+    frames: list[SkeletonFrame] = field(default_factory=list)
+    markers: list[dict[str, Any]] = field(default_factory=list)
+    body_id_changes: list[dict[str, Any]] = field(default_factory=list)
+    truncated: bool = False
+
+    @property
+    def frame_count(self) -> int:
+        return len(self.frames)
+
+    @property
+    def skeleton_format(self) -> str:
+        return str(self.header.get("skeleton_format", ""))
+
+    @property
+    def duration_s(self) -> float:
+        """Elapsed time from the camera timestamps, not from a frame count."""
+        stamps = [f.camera_timestamp_ns for f in self.frames if f.camera_timestamp_ns]
+        if len(stamps) < 2:
+            return 0.0
+        return max(0.0, (stamps[-1] - stamps[0]) / 1e9)
+
+    @property
+    def tracking_ids(self) -> tuple[int, ...]:
+        ids: set[int] = set()
+        for frame in self.frames:
+            ids.update(body.tracking_id for body in frame.bodies)
+        return tuple(sorted(ids))
+
+    def frame_at(self, position: int) -> Optional[SkeletonFrame]:
+        """Frame at a 0-based playback position (not the recorded frame index)."""
+        if 0 <= position < len(self.frames):
+            return self.frames[position]
+        return None
+
+    def position_of_frame_index(self, frame_index: int) -> int:
+        """Nearest playback position for a recorded frame index."""
+        indices = [f.frame_index for f in self.frames]
+        if not indices:
+            return 0
+        return int(np.clip(np.searchsorted(indices, frame_index), 0, len(indices) - 1))
+
+    def timestamp_gaps(self, *, target_fps: float) -> list[tuple[int, float]]:
+        """Positions where the inter-frame gap exceeds 1.5 frame intervals.
+
+        These are the moments where data is genuinely missing. The review
+        timeline marks them so a gap is never mistaken for a slow movement.
+        """
+        if target_fps <= 0 or len(self.frames) < 2:
+            return []
+        threshold_ms = 1.5 * (1000.0 / target_fps)
+        gaps: list[tuple[int, float]] = []
+        for position in range(1, len(self.frames)):
+            previous = self.frames[position - 1].camera_timestamp_ns
+            current = self.frames[position].camera_timestamp_ns
+            if not previous or not current:
+                continue
+            gap_ms = (current - previous) / 1e6
+            if gap_ms > threshold_ms:
+                gaps.append((position, gap_ms))
+        return gaps
+
+    def joint_array(
+        self, tracking_id: Optional[int], *, start: int = 0, end: Optional[int] = None
+    ) -> np.ndarray:
+        """``float32 [T, J, 3]`` for one body over a playback range.
+
+        Frames where the body is absent become all-NaN rows: a gap in tracking
+        stays a gap rather than being interpolated away.
+        """
+        stop = len(self.frames) if end is None else min(end + 1, len(self.frames))
+        window = self.frames[start:stop]
+        if not window:
+            return np.zeros((0, 0, 3), dtype=np.float32)
+
+        num_joints = 0
+        for frame in window:
+            body = frame.body(tracking_id)
+            if body is not None:
+                num_joints = body.num_joints
+                break
+        if num_joints == 0:
+            return np.zeros((len(window), 0, 3), dtype=np.float32)
+
+        result = np.full((len(window), num_joints, 3), np.nan, dtype=np.float32)
+        for offset, frame in enumerate(window):
+            body = frame.body(tracking_id)
+            if body is not None and body.num_joints == num_joints:
+                result[offset] = body.joint_positions_xyz
+        return result
+
+    def confidence_array(
+        self, tracking_id: Optional[int], *, start: int = 0, end: Optional[int] = None
+    ) -> np.ndarray:
+        """``float32 [T, J]`` confidences aligned with :meth:`joint_array`."""
+        stop = len(self.frames) if end is None else min(end + 1, len(self.frames))
+        window = self.frames[start:stop]
+        if not window:
+            return np.zeros((0, 0), dtype=np.float32)
+        num_joints = 0
+        for frame in window:
+            body = frame.body(tracking_id)
+            if body is not None:
+                num_joints = body.num_joints
+                break
+        result = np.full((len(window), num_joints), np.nan, dtype=np.float32)
+        for offset, frame in enumerate(window):
+            body = frame.body(tracking_id)
+            if body is not None and body.num_joints == num_joints:
+                result[offset] = body.joint_confidences
+        return result
+
+    def coverage_curve(self, tracking_id: Optional[int]) -> np.ndarray:
+        """``float32 [T]`` fraction of usable joints per frame, for the timeline."""
+        values = np.zeros(len(self.frames), dtype=np.float32)
+        for position, frame in enumerate(self.frames):
+            body = frame.body(tracking_id)
+            values[position] = body.valid_joint_ratio if body is not None else 0.0
+        return values
+
+
+def load_skeleton_stream(path: Path) -> SkeletonStream:
+    """Read a ``skeleton.jsonl`` sidecar.
+
+    A truncated final line (interrupted recording) is tolerated and reported via
+    :attr:`SkeletonStream.truncated` rather than making the file unreadable.
+    """
+    path = Path(path)
+    if not path_exists(path):
+        raise StorageError(
+            f"İskelet akışı bulunamadı: {path.name}",
+            code="skeleton_stream_missing",
+            remedy="Kayıt yarım kalmış olabilir; kurtarma ekranını kullanın.",
+            details={"path": str(path)},
+        )
+
+    stream = SkeletonStream()
+    byte_size = os.stat(long_path(path)).st_size
+    consumed = 0
+    for record in read_jsonl(path):
+        consumed += 1
+        kind = record.get("record")
+        if kind == "header":
+            stream.header = dict(record)
+        elif kind == "frame":
+            bodies = tuple(
+                BodyPose.from_record(entry) for entry in record.get("bodies") or []
+            )
+            stream.frames.append(
+                SkeletonFrame(
+                    frame_index=int(record.get("i", 0)),
+                    host_timestamp_ns=int(record.get("host_ns", 0)),
+                    camera_timestamp_ns=int(record.get("cam_ns", 0)),
+                    bodies=bodies,
+                    active_body_id=record.get("active_id"),
+                )
+            )
+        elif kind == "marker":
+            stream.markers.append(dict(record))
+        elif kind == "body_id_change":
+            stream.body_id_changes.append(dict(record))
+
+    if byte_size and consumed:
+        # A file whose last line has no newline terminator was cut off mid-write.
+        with open(long_path(path), "rb") as handle:
+            handle.seek(max(0, byte_size - 1))
+            stream.truncated = handle.read(1) != b"\n"
+    return stream
+
+
+class ProxyVideoReader:
+    """Random-access reader over the review proxy video.
+
+    Thread-safe: the GUI thread seeks it while a timer advances playback. All
+    access is serialised on one lock because ``cv2.VideoCapture`` is not
+    re-entrant.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self.path = Path(path)
+        self._capture: Any = None
+        self._lock = threading.RLock()
+        self._frame_count = 0
+        self._position = -1
+        self.unavailable_reason = ""
+        self._open()
+
+    def _open(self) -> None:
+        if not path_exists(self.path):
+            self.unavailable_reason = "Proxy video dosyası yok."
+            return
+        if is_too_long_for_external_tools(self.path):
+            # OpenCV cannot open an extended-length path; scrubbing degrades
+            # while the pose stream - the actual data - stays fully readable.
+            self.unavailable_reason = (
+                "Dosya yolu Windows uzunluk sınırını aşıyor; proxy video okunamıyor."
+            )
+            return
+        try:
+            import cv2  # noqa: PLC0415 - optional at runtime
+        except ImportError as exc:
+            self.unavailable_reason = f"opencv-python bulunamadı: {exc}"
+            return
+        capture = cv2.VideoCapture(safe_external_path(self.path))
+        if not capture.isOpened():
+            self.unavailable_reason = "Proxy video açılamadı."
+            return
+        self._capture = capture
+        self._frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+
+    @property
+    def is_available(self) -> bool:
+        return self._capture is not None
+
+    @property
+    def frame_count(self) -> int:
+        return self._frame_count
+
+    def read_at(self, position: int) -> Optional[np.ndarray]:
+        """Return frame ``position`` as contiguous RGB uint8, or ``None``."""
+        if self._capture is None:
+            return None
+        import cv2  # noqa: PLC0415 - proven importable in _open
+
+        with self._lock:
+            if position != self._position + 1:
+                self._capture.set(cv2.CAP_PROP_POS_FRAMES, int(position))
+            ok, frame = self._capture.read()
+            self._position = position if ok else -1
+            if not ok or frame is None:
+                return None
+            return np.ascontiguousarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    def close(self) -> None:
+        with self._lock:
+            capture, self._capture = self._capture, None
+            if capture is not None:
+                capture.release()
+
+    def __enter__(self) -> "ProxyVideoReader":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+
+@dataclass
+class LoadedTake:
+    """Everything the review screen needs for one take."""
+
+    take: Take
+    paths: TakePaths
+    stream: SkeletonStream
+    video: Optional[ProxyVideoReader] = None
+    spec: Optional[SkeletonSpec] = None
+
+    @property
+    def frame_count(self) -> int:
+        return self.stream.frame_count
+
+    @property
+    def target_fps(self) -> float:
+        return float(self.take.capture_profile.fps or 30)
+
+    @property
+    def has_video(self) -> bool:
+        return self.video is not None and self.video.is_available
+
+    def video_position_for(self, position: int) -> int:
+        """Map a skeleton position onto a proxy-video frame.
+
+        They are written from the same frames, so the mapping is normally the
+        identity. When the proxy is shorter (a codec dropped the tail) the
+        position is clamped instead of drifting silently out of sync.
+        """
+        if self.video is None or self.video.frame_count <= 0:
+            return position
+        return int(np.clip(position, 0, self.video.frame_count - 1))
+
+    def close(self) -> None:
+        if self.video is not None:
+            self.video.close()
+            self.video = None
+
+
+def load_take(
+    workspace: ProjectWorkspace, take: Take, *, with_video: bool = True
+) -> LoadedTake:
+    """Load a take's pose stream and (optionally) open its proxy video."""
+    paths = workspace.take_paths(take)
+    stream = load_skeleton_stream(paths.skeleton_stream)
+    spec = try_get_skeleton_spec(
+        take.skeleton_format or stream.skeleton_format
+    )
+    if spec is None and stream.skeleton_format:
+        logger.warning(
+            "Kayıt bilinmeyen iskelet biçimi kullanıyor: %s", stream.skeleton_format
+        )
+    video = ProxyVideoReader(paths.proxy_video) if with_video else None
+    if video is not None and not video.is_available:
+        logger.info(
+            "Proxy video kullanılamıyor (%s): %s", take.take_id, video.unavailable_reason
+        )
+    return LoadedTake(take=take, paths=paths, stream=stream, video=video, spec=spec)
+
+
+def recover_partial_take(
+    workspace: ProjectWorkspace, take: Take
+) -> tuple[Take, int]:
+    """Re-derive a partial take's frame count from what is actually on disk.
+
+    Returns the updated take and the number of recoverable frames. Nothing is
+    deleted and no frame data is rewritten: only the take's own metadata is
+    corrected so it stops claiming to be mid-recording.
+    """
+    from kinecapture.domain.enums import TakeState  # local: avoids a cycle at import
+
+    paths = workspace.take_paths(take)
+    if not path_exists(paths.skeleton_stream):
+        take.state = TakeState.FAILED
+        take.notes = f"{take.notes}\n[Kurtarma: iskelet akışı bulunamadı]".strip()
+        workspace.save_take(take)
+        return take, 0
+
+    stream = load_skeleton_stream(paths.skeleton_stream)
+    take.metrics.frames_written = stream.frame_count
+    take.metrics.duration_s = stream.duration_s
+    if stream.frame_count > 1 and stream.duration_s > 0:
+        take.metrics.measured_fps = (stream.frame_count - 1) / stream.duration_s
+    take.state = TakeState.PARTIAL
+    note = f"[Kurtarıldı: {stream.frame_count} kare"
+    if stream.truncated:
+        note += ", son satır yarım"
+    take.notes = f"{take.notes}\n{note}]".strip()
+    workspace.save_take(take)
+    logger.info(
+        "Yarım kayıt kurtarıldı: %s (%d kare)", take.take_id, stream.frame_count
+    )
+    return take, stream.frame_count
+
+
+__all__ = [
+    "LoadedTake",
+    "ProxyVideoReader",
+    "SkeletonFrame",
+    "SkeletonStream",
+    "load_skeleton_stream",
+    "load_take",
+    "recover_partial_take",
+]

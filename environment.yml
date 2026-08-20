@@ -1,0 +1,23 @@
+# Project-specific, isolated Conda environment for KineCapture Studio.
+#
+# Rules:
+#   * Never install this project into `base`, `Kinesynth` or any pre-existing env.
+#   * Create with:   conda env create -f environment.yml
+#   * Then install:  conda run -n KineCaptureStudio python -m pip install -e ".[dev]"
+#
+# Python 3.10 is pinned because the Stereolabs ZED SDK 4.x Python binding
+# (`pyzed`) publishes wheels for CPython 3.8-3.11 and 3.10 is the safest
+# common denominator on Windows. This pin is an ASSUMPTION: it has not been
+# verified against a local ZED SDK installation yet. Re-check with
+# `python -m kinecapture --diagnose` and the SDK's own get_python_api.py
+# before treating it as final.
+name: KineCaptureStudio
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  # All Python packages are installed through pip / the editable install so
+  # that Windows and CI resolve exactly the same versions:
+  #   PySide6, numpy, PyYAML  (runtime)
+  #   pytest, pytest-qt       (dev extra)

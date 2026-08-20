@@ -1,0 +1,70 @@
+# KineCapture Studio - shipped default configuration.
+#
+# These are starting-point defaults and are safe to change. Per-user overrides
+# are written to ~/.kinecapture/user_state.yaml and take precedence over this
+# file; edit this file to change the defaults for a fresh install.
+#
+# Paths may use ~ and are resolved with pathlib.
+
+app_name: "KineCapture Studio"
+
+# Default camera backend: "mock" or "zed".
+# "mock" is the hardware-free development and test path.
+backend: "mock"
+
+# "dark" or "light".
+theme: "dark"
+
+# GUI language. Code identifiers and schema fields stay English regardless.
+language: "tr"
+
+# Preview throttle. The GUI repaints at most this often; the acquisition thread
+# runs at the camera's own rate and is measured separately.
+preview_fps: 30
+
+# DEBUG | INFO | WARNING | ERROR
+log_level: "INFO"
+
+# Annotation autosave.
+autosave_enabled: true
+autosave_delay_ms: 800
+
+# Runtime roots. Never inside the source tree.
+dataset_root: "~/KineCapture/datasets"
+log_dir: "~/KineCapture/logs"
+
+# Capture provenance defaults. These are copied into each take at record time,
+# so changing them later never rewrites an existing recording's description.
+capture:
+  name: "zed2i_hd720_30"
+  resolution: "HD720"          # HD720 | HD1080 | HD1200 | SVGA | VGA ...
+  fps: 30
+  depth_mode: "NEURAL_LIGHT"   # NEURAL_LIGHT | NEURAL | NEURAL_PLUS | ULTRA ...
+  enable_depth: true
+  enable_body_tracking: true
+  body_format: "BODY_34"       # BODY_18 | BODY_34 | BODY_38
+  body_tracking_model: "HUMAN_BODY_MEDIUM"
+  enable_body_fitting: true
+  detection_confidence: 40
+  coordinate_system: "RIGHT_HANDED_Y_UP"
+  length_unit: "METER"
+  # SVO2 keeps the raw stream so depth can be regenerated; storing depth frames
+  # a second time would duplicate gigabytes for no gain.
+  store_native_recording: true
+  store_depth_frames: false
+  # Width of the review proxy video. The proxy exists for scrubbing; the SVO2
+  # remains the immutable raw record.
+  proxy_video_width: 640
+
+# Synthetic backend. Deterministic by construction: same seed, same frames.
+mock:
+  width: 960
+  height: 540
+  fps: 30
+  seed: 1234
+  num_bodies: 1
+  enable_depth: true
+  # Scripted degradations, in frames. 0 disables. Used to rehearse the quality
+  # panel and the tests without hardware.
+  tracking_loss_every: 0
+  low_confidence_every: 0
