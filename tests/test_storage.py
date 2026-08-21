@@ -242,8 +242,8 @@ def test_annotation_edits_never_touch_take_metadata(workspace, session) -> None:
     before = paths.metadata.read_bytes()
 
     repository = AnnotationRepository(workspace, take, frame_count=20)
-    segment = repository.create_segment(2, 15)
-    repository.annotate(segment.segment_id, exercise="squat")
+    sample = repository.create_sample(2, 15)
+    repository.label_sample(sample.sample_id, exercise="squat")
     repository.save()
 
     assert paths.segments.is_file()

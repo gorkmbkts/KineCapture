@@ -51,10 +51,12 @@ def take_row_summary(row: TakeRow) -> str:
     parts = [
         f"{row.participant_code} · Kayıt {take.index_in_session}",
         format_duration(take.metrics.duration_s),
-        f"{row.repetition_count} tekrar",
+        f"{row.movement_count} hareket",
     ]
-    if row.repetition_count:
-        parts.append(f"{row.labelled_count} etiketli")
+    if row.movement_count:
+        parts.append(f"{row.labelled_count} hazır")
+    if row.error_interval_count:
+        parts.append(f"{row.error_interval_count} hata aralığı")
     if take.is_synthetic:
         parts.append("SENTETİK")
     if take.is_recoverable_partial:
@@ -123,9 +125,9 @@ class DashboardPage(Page):
             ("participants", "Katılımcı", "participants"),
             ("sessions", "Oturum", "clock"),
             ("takes", "Kayıt", "capture"),
-            ("repetitions", "Tekrar", "list"),
-            ("labelled", "Etiketli tekrar", "check"),
-            ("pending", "Etiket bekleyen", "review"),
+            ("movements", "Hareket", "list"),
+            ("labelled", "Hazır etiket", "check"),
+            ("pending", "Eksik etiket", "review"),
         ]
         for position, (key, caption, icon) in enumerate(specs):
             tile = MetricTile(caption, "0", theme=theme, icon=icon)
@@ -230,12 +232,15 @@ class DashboardPage(Page):
         self._tiles["takes"].set_detail(
             f"{summary.finalized_takes} tamamlandı · {summary.partial_takes} yarım"
         )
-        self._tiles["repetitions"].set_value(str(summary.repetitions))
-        self._tiles["labelled"].set_value(
-            str(summary.labelled_repetitions),
-            colour=self.theme.success if summary.labelled_repetitions else None,
+        self._tiles["movements"].set_value(str(summary.movement_samples))
+        self._tiles["movements"].set_detail(
+            f"{summary.error_intervals} hata aralığı"
         )
-        pending = summary.unlabelled_repetitions
+        self._tiles["labelled"].set_value(
+            str(summary.ready_samples),
+            colour=self.theme.success if summary.ready_samples else None,
+        )
+        pending = summary.unready_samples
         self._tiles["pending"].set_value(
             str(pending), colour=self.theme.warning if pending else self.theme.success
         )

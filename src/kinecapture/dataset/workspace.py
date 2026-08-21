@@ -40,6 +40,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
 
+from kinecapture import ANNOTATION_SCHEMA_VERSION
 from kinecapture.core.errors import StorageError, ValidationError
 from kinecapture.core.ids import is_safe_id, participant_code, utc_now_iso
 from kinecapture.core.jsonio import read_json_mapping, write_json
@@ -49,9 +50,10 @@ from kinecapture.domain.enums import TakeState
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.domain.project import (
     CaptureProfile,
+    MovementSample,
     Participant,
     Project,
-    RepetitionSegment,
+    RepetitionSegment,  # noqa: F401  (legacy alias re-export)
     Session,
     Take,
 )
@@ -466,39 +468,67 @@ class ProjectWorkspace:
         shutil.rmtree(long_path(paths.root))
 
     # ----------------------------------------------------------- annotations
-    def load_segments(self, take: Take) -> list[RepetitionSegment]:
-        """Load a take's repetition segments; an unlabelled take returns ``[]``."""
+    #
+    # The label sidecar keeps its file name across schema versions so existing
+    # takes stay discoverable. Version 2 stores movement samples under
+    # ``samples``; version 1 stored repetition segments under ``segments``.
+    # Reading accepts both and never rewrites the file - a v1 document is only
+    # converted on disk when the user actually saves an edit, so merely opening
+    # a project can never destroy an older annotation.
+
+    def load_samples(self, take: Take) -> list[MovementSample]:
+        """Load a take's movement samples; an unlabelled take returns ``[]``."""
         path = self.take_paths(take).segments
         if not path_exists(path):
             return []
         payload = read_json_mapping(path)
-        segments: list[RepetitionSegment] = []
-        for entry in payload.get("segments") or []:
-            try:
-                segments.append(RepetitionSegment.from_dict(entry))
-            except (ValidationError, KeyError, TypeError) as exc:
-                logger.warning(
-                    "Geçersiz tekrar aralığı atlandı (%s): %s", take.take_id, exc
+        entries = payload.get("samples")
+        if entries is None:
+            entries = payload.get("segments") or []
+            if entries:
+                logger.info(
+                    "Etiket dosyası v1 biçiminde okundu (%s); kaydedilene kadar "
+                    "diskte değiştirilmiyor.",
+                    take.take_id,
                 )
-        return sorted(segments, key=lambda s: (s.start_frame, s.end_frame))
+        samples: list[MovementSample] = []
+        for entry in entries:
+            try:
+                samples.append(MovementSample.from_dict(entry))
+            except (ValidationError, KeyError, TypeError, ValueError) as exc:
+                # A single unreadable entry must not cost the user the rest of
+                # the file, but it is never dropped quietly either.
+                logger.warning(
+                    "Geçersiz hareket aralığı atlandı (%s): %s", take.take_id, exc
+                )
+        return sorted(samples, key=lambda s: (s.start_frame, s.end_frame))
 
-    def save_segments(
-        self, take: Take, segments: Iterable[RepetitionSegment]
-    ) -> list[RepetitionSegment]:
+    def save_samples(
+        self, take: Take, samples: Iterable[MovementSample]
+    ) -> list[MovementSample]:
         """Write the annotation sidecar. Never touches ``take.json``."""
-        ordered = sorted(segments, key=lambda s: (s.start_frame, s.end_frame))
+        ordered = sorted(samples, key=lambda s: (s.start_frame, s.end_frame))
         paths = self.take_paths(take)
         ensure_dir(paths.annotations_dir)
         write_json(
             paths.segments,
             {
+                "schema_version": ANNOTATION_SCHEMA_VERSION,
                 "take_id": take.take_id,
                 "updated_at": utc_now_iso(),
-                "segments": [segment.to_dict() for segment in ordered],
+                "boundary_convention": (
+                    "start_frame ve end_frame, derived/skeleton.jsonl kare "
+                    "listesindeki 0 tabanlı konumlardır ve her iki uç dahildir."
+                ),
+                "samples": [sample.to_dict() for sample in ordered],
             },
             overwrite=True,
         )
         return ordered
+
+    #: Pre-redesign names, kept so older call sites keep working.
+    load_segments = load_samples
+    save_segments = save_samples
 
     # --------------------------------------------------------------- quality
     def load_quality(self, take: Take) -> dict[str, Any]:
@@ -510,14 +540,14 @@ class ProjectWorkspace:
         participants = self.list_participants()
         sessions = self.list_sessions()
         takes = self.list_takes()
-        repetitions = sum(len(self.load_segments(take)) for take in takes)
+        movement_samples = sum(len(self.load_samples(take)) for take in takes)
         return {
             "participants": len(participants),
             "sessions": len(sessions),
             "takes": len(takes),
             "finalized_takes": sum(1 for t in takes if t.is_finalized),
             "partial_takes": sum(1 for t in takes if t.is_recoverable_partial),
-            "repetitions": repetitions,
+            "movement_samples": movement_samples,
         }
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

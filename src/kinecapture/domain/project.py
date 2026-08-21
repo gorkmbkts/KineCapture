@@ -1,4 +1,4 @@
-"""Persistent dataset entities: Project, Participant, Session, Take, Repetition.
+"""Persistent dataset entities: Project, Participant, Session, Take, labels.
 
 These are the documents that live on disk. Every one of them:
 
@@ -8,9 +8,19 @@ These are the documents that live on disk. Every one of them:
 * contains no personal information in any field that becomes a file name.
 
 Raw capture metadata and human curation are deliberately separate objects.
-:class:`Take` describes what the camera produced; :class:`RepetitionSegment`
-and :class:`AnnotationRecord` describe what a person decided about it, and live
-in a separate sidecar file so that editing a label never rewrites a take.
+:class:`Take` describes what the camera produced. What a person decided about
+it lives in a two-level label hierarchy stored in a separate sidecar, so that
+editing a label never rewrites a take:
+
+``MovementSample``
+    One repetition inside the take. Carries the exercise and a **binary**
+    correct/incorrect verdict. A take may hold several, and each becomes one
+    exported sample.
+
+``ErrorInterval``
+    A sub-range *inside* one movement sample where a specific error class is
+    visible. Zero or more per sample; they may repeat and may overlap. These
+    are the temporal targets a future model would learn to localise.
 """
 
 from __future__ import annotations
@@ -29,11 +39,11 @@ from kinecapture import (
 from kinecapture.core.errors import ValidationError
 from kinecapture.core.ids import new_id, timestamped_id, utc_now_iso
 from kinecapture.domain.enums import (
-    AnnotationStatus,
     CaptureMode,
     ConsentStatus,
     Correctness,
     DataOrigin,
+    SampleReadiness,
     SegmentSource,
     SegmentStatus,
     TakeQuality,
@@ -565,171 +575,153 @@ class Take:
 
 
 # ---------------------------------------------------------------------------
-# Repetition + annotation
+# Movement samples and error intervals
 # ---------------------------------------------------------------------------
+#
+# Boundary convention, used identically by the timeline, the sidecar JSON and
+# the exporter:
+#
+#   * positions are 0-based indices into the take's recorded pose stream
+#     (``derived/skeleton.jsonl`` frame records), NOT the camera's own frame
+#     numbers, which skip whenever a frame is dropped;
+#   * ranges are INCLUSIVE at both ends, so ``frames[start:end + 1]`` is the
+#     span and ``end - start + 1`` is its length.
+#
+# The camera's identity for a span is never lost: samples and intervals carry
+# timestamps, and an exported sample additionally carries per-frame
+# ``frame_indices`` and ``camera_timestamps_ns`` arrays.
 
 
 @dataclass
-class EvidenceInterval:
-    """A sub-interval of a repetition where a specific error is visible.
+class ErrorInterval:
+    """A sub-range of one movement sample where a specific error is visible.
 
-    The ontology of ``error_type`` is defined by the project's label schema, not
-    by this class. Nothing here invents error categories.
+    **One interval carries exactly one error class.** Two different errors seen
+    at the same moment are expressed as two overlapping intervals rather than
+    one multi-class interval. That keeps a temporal-localisation target
+    unambiguous: every interval is a clean ``(class, start, end)`` triple, and
+    the same class may legitimately appear several times in one sample.
+
+    ``error_code`` refers to the project's label schema. Nothing here invents an
+    error vocabulary.
     """
 
     interval_id: str
-    start_frame: int
-    end_frame: int
-    error_type: str = ""
-    affected_joints: tuple[str, ...] = ()
-    severity: Optional[float] = None
+    error_code: str = ""
+    start_frame: int = 0
+    end_frame: int = 0
+    start_timestamp_ns: Optional[int] = None
+    end_timestamp_ns: Optional[int] = None
     note: str = ""
+    source: SegmentSource = SegmentSource.MANUAL
+    created_at: str = field(default_factory=utc_now_iso)
+    updated_at: str = field(default_factory=utc_now_iso)
+    #: Fields carried over from an older sidecar that the current model has no
+    #: place for. Preserved so a round trip never loses user data.
+    legacy: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.end_frame < self.start_frame:
-            raise ValidationError(
-                f"Kanıt aralığı geçersiz: bitiş ({self.end_frame}) < "
-                f"başlangıç ({self.start_frame})",
-                field="end_frame",
-                code="interval_reversed",
-            )
-        self.affected_joints = tuple(self.affected_joints)
+        self.source = _enum(self.source, SegmentSource, SegmentSource.MANUAL)
+        self.start_frame = int(self.start_frame)
+        self.end_frame = int(self.end_frame)
 
     @classmethod
-    def create(cls, start_frame: int, end_frame: int, **kwargs: Any) -> "EvidenceInterval":
+    def create(
+        cls, start_frame: int, end_frame: int, error_code: str = "", **kwargs: Any
+    ) -> "ErrorInterval":
+        start, end = sorted((int(start_frame), int(end_frame)))
         return cls(
-            interval_id=new_id("ev"),
-            start_frame=start_frame,
-            end_frame=end_frame,
+            interval_id=new_id("err"),
+            error_code=error_code,
+            start_frame=start,
+            end_frame=end,
             **kwargs,
         )
 
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "interval_id": self.interval_id,
-            "start_frame": self.start_frame,
-            "end_frame": self.end_frame,
-            "error_type": self.error_type,
-            "affected_joints": list(self.affected_joints),
-            "severity": self.severity,
-            "note": self.note,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "EvidenceInterval":
-        return cls(
-            interval_id=str(payload.get("interval_id") or new_id("ev")),
-            start_frame=int(payload["start_frame"]),
-            end_frame=int(payload["end_frame"]),
-            error_type=str(payload.get("error_type", "")),
-            affected_joints=tuple(payload.get("affected_joints") or ()),
-            severity=payload.get("severity"),
-            note=str(payload.get("note", "")),
-        )
-
-
-@dataclass
-class AnnotationRecord:
-    """The human judgement attached to one repetition.
-
-    ``source`` distinguishes a person's decision from a model's suggestion, and
-    a model suggestion never counts as ground truth: the dataset export only
-    accepts records whose ``status`` a human has moved past ``DRAFT``.
-    """
-
-    exercise: str = ""
-    correctness: Correctness = Correctness.UNKNOWN
-    error_types: tuple[str, ...] = ()
-    affected_joints: tuple[str, ...] = ()
-    movement_phase: str = ""
-    evidence_intervals: list[EvidenceInterval] = field(default_factory=list)
-    severity: Optional[float] = None
-    annotator_confidence: Optional[float] = None
-    note: str = ""
-    status: AnnotationStatus = AnnotationStatus.DRAFT
-    annotator: str = ""
-    created_at: str = field(default_factory=utc_now_iso)
-    updated_at: str = field(default_factory=utc_now_iso)
-    label_schema_version: str = LABEL_SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        self.correctness = _enum(self.correctness, Correctness, Correctness.UNKNOWN)
-        self.status = _enum(self.status, AnnotationStatus, AnnotationStatus.DRAFT)
-        self.error_types = tuple(self.error_types)
-        self.affected_joints = tuple(self.affected_joints)
+    @property
+    def frame_count(self) -> int:
+        return self.end_frame - self.start_frame + 1
 
     @property
-    def is_labelled(self) -> bool:
-        """True once the annotation carries a real decision, not just a stub."""
-        return bool(self.exercise) and self.correctness is not Correctness.UNKNOWN
+    def is_well_formed(self) -> bool:
+        """Ordered, non-empty and carrying an error class."""
+        return bool(self.error_code) and self.end_frame >= self.start_frame
+
+    def overlaps(self, other: "ErrorInterval") -> bool:
+        return not (
+            self.end_frame < other.start_frame or other.end_frame < self.start_frame
+        )
 
     def touch(self) -> None:
         self.updated_at = utc_now_iso()
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "label_schema_version": self.label_schema_version,
-            "exercise": self.exercise,
-            "correctness": self.correctness.value,
-            "error_types": list(self.error_types),
-            "affected_joints": list(self.affected_joints),
-            "movement_phase": self.movement_phase,
-            "evidence_intervals": [i.to_dict() for i in self.evidence_intervals],
-            "severity": self.severity,
-            "annotator_confidence": self.annotator_confidence,
+        payload: dict[str, Any] = {
+            "interval_id": self.interval_id,
+            "error_code": self.error_code,
+            "start_frame": self.start_frame,
+            "end_frame": self.end_frame,
+            "start_timestamp_ns": self.start_timestamp_ns,
+            "end_timestamp_ns": self.end_timestamp_ns,
             "note": self.note,
-            "status": self.status.value,
-            "annotator": self.annotator,
+            "source": self.source.value,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.legacy:
+            payload["legacy"] = dict(self.legacy)
+        return payload
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "AnnotationRecord":
+    def from_dict(cls, payload: Mapping[str, Any]) -> "ErrorInterval":
+        data = dict(payload)
+        legacy = dict(data.get("legacy") or {})
+
+        # A pre-2.0 EvidenceInterval carried `error_type` plus fields the new
+        # model does not keep at interval level.
+        code = data.get("error_code")
+        if not code:
+            code = data.get("error_type") or ""
+            if data.get("error_type"):
+                legacy.setdefault("error_type", data["error_type"])
+        for dropped in ("affected_joints", "severity"):
+            if data.get(dropped):
+                legacy.setdefault(dropped, data[dropped])
+
+        start = int(data.get("start_frame", 0))
+        end = int(data.get("end_frame", start))
+        if end < start:
+            legacy.setdefault("reversed_original", [start, end])
+            start, end = end, start
+
         return cls(
-            exercise=str(payload.get("exercise", "")),
-            correctness=_enum(
-                payload.get("correctness"), Correctness, Correctness.UNKNOWN
-            ),
-            error_types=tuple(payload.get("error_types") or ()),
-            affected_joints=tuple(payload.get("affected_joints") or ()),
-            movement_phase=str(payload.get("movement_phase", "")),
-            evidence_intervals=[
-                EvidenceInterval.from_dict(i)
-                for i in payload.get("evidence_intervals") or []
-            ],
-            severity=payload.get("severity"),
-            annotator_confidence=payload.get("annotator_confidence"),
-            note=str(payload.get("note", "")),
-            status=_enum(payload.get("status"), AnnotationStatus, AnnotationStatus.DRAFT),
-            annotator=str(payload.get("annotator", "")),
-            created_at=str(payload.get("created_at") or utc_now_iso()),
-            updated_at=str(payload.get("updated_at") or utc_now_iso()),
-            label_schema_version=str(
-                payload.get("label_schema_version") or LABEL_SCHEMA_VERSION
-            ),
+            interval_id=str(data.get("interval_id") or new_id("err")),
+            error_code=str(code or ""),
+            start_frame=start,
+            end_frame=end,
+            start_timestamp_ns=data.get("start_timestamp_ns"),
+            end_timestamp_ns=data.get("end_timestamp_ns"),
+            note=str(data.get("note", "")),
+            source=_enum(data.get("source"), SegmentSource, SegmentSource.MANUAL),
+            created_at=str(data.get("created_at") or utc_now_iso()),
+            updated_at=str(data.get("updated_at") or utc_now_iso()),
+            legacy=legacy,
         )
 
 
 @dataclass
-class RepetitionSegment:
-    """A frame interval of a take that contains one repetition.
+class MovementSample:
+    """One movement repetition inside a take - the unit that becomes a sample.
 
-    Coordinate system
-    -----------------
-    ``start_frame`` and ``end_frame`` are **positions in the take's recorded
-    pose stream** - 0-based indices into ``skeleton.jsonl``'s frame records,
-    inclusive on both ends. They are *not* the camera's own frame numbers,
-    which can skip when a frame is dropped.
+    A take may contain several of these. Each carries its own exercise and its
+    own binary correctness decision, and may localise zero or more
+    :class:`ErrorInterval` sub-ranges inside its own bounds.
 
-    That choice keeps the timeline, the player and the exporter working in one
-    unambiguous space. The camera's identity for those frames is not lost: each
-    segment also stores ``start_timestamp_ns`` / ``end_timestamp_ns``, and an
-    exported sample carries the per-frame ``frame_indices`` and
-    ``camera_timestamps_ns`` arrays alongside the poses.
+    Curation lives here, never in ``take.json``: labelling must not rewrite
+    capture provenance.
     """
 
-    segment_id: str
+    sample_id: str
     take_id: str
     start_frame: int
     end_frame: int
@@ -739,40 +731,56 @@ class RepetitionSegment:
     revision: int = 1
     source: SegmentSource = SegmentSource.MANUAL
     status: SegmentStatus = SegmentStatus.ACTIVE
-    annotation: AnnotationRecord = field(default_factory=AnnotationRecord)
+
+    # ---- the label itself -------------------------------------------------
+    exercise: str = ""
+    correctness: Correctness = Correctness.UNLABELLED
+    error_intervals: list[ErrorInterval] = field(default_factory=list)
+    note: str = ""
+    annotator: str = ""
+
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
+    label_schema_version: str = LABEL_SCHEMA_VERSION
     schema_version: str = ANNOTATION_SCHEMA_VERSION
+    #: Values from an older sidecar with no home in the current model (movement
+    #: phase, severity, affected joints, old review status, an ``uncertain``
+    #: verdict). Kept verbatim so nothing is destroyed.
+    legacy: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.source = _enum(self.source, SegmentSource, SegmentSource.MANUAL)
         self.status = _enum(self.status, SegmentStatus, SegmentStatus.ACTIVE)
+        self.correctness = Correctness.parse(self.correctness)
+        self.start_frame = int(self.start_frame)
+        self.end_frame = int(self.end_frame)
         if self.end_frame < self.start_frame:
             raise ValidationError(
-                f"Tekrar aralığı geçersiz: bitiş karesi ({self.end_frame}) "
+                f"Hareket aralığı geçersiz: bitiş karesi ({self.end_frame}) "
                 f"başlangıçtan ({self.start_frame}) küçük.",
                 field="end_frame",
-                code="segment_reversed",
+                code="sample_reversed",
             )
         if self.start_frame < 0:
             raise ValidationError(
-                "Tekrar aralığı negatif kareden başlayamaz.",
+                "Hareket aralığı negatif kareden başlayamaz.",
                 field="start_frame",
-                code="segment_negative",
+                code="sample_negative",
             )
 
     @classmethod
     def create(
         cls, take_id: str, start_frame: int, end_frame: int, **kwargs: Any
-    ) -> "RepetitionSegment":
+    ) -> "MovementSample":
         return cls(
-            segment_id=new_id("rep"),
+            sample_id=new_id("mov"),
             take_id=take_id,
-            start_frame=start_frame,
-            end_frame=end_frame,
+            start_frame=int(start_frame),
+            end_frame=int(end_frame),
             **kwargs,
         )
 
+    # ------------------------------------------------------------- geometry
     @property
     def frame_count(self) -> int:
         return self.end_frame - self.start_frame + 1
@@ -781,24 +789,57 @@ class RepetitionSegment:
     def is_active(self) -> bool:
         return self.status is SegmentStatus.ACTIVE
 
+    def contains(self, frame: int) -> bool:
+        return self.start_frame <= frame <= self.end_frame
+
+    def clamp(self, start: int, end: int) -> tuple[int, int]:
+        """Clip a candidate sub-range into this sample, keeping it ordered."""
+        low, high = sorted((int(start), int(end)))
+        low = max(self.start_frame, min(low, self.end_frame))
+        high = max(self.start_frame, min(high, self.end_frame))
+        return low, high
+
+    def overlaps(self, other: "MovementSample") -> bool:
+        return not (
+            self.end_frame < other.start_frame or other.end_frame < self.start_frame
+        )
+
+    # --------------------------------------------------------------- labels
     @property
     def is_human_confirmed(self) -> bool:
         """A model suggestion nobody has touched is not ground truth."""
         return self.source is not SegmentSource.MODEL_SUGGESTION or self.revision > 1
 
-    def overlaps(self, other: "RepetitionSegment") -> bool:
-        return not (
-            self.end_frame < other.start_frame or other.end_frame < self.start_frame
+    @property
+    def error_codes(self) -> tuple[str, ...]:
+        """Distinct error classes localised here, in first-seen order."""
+        seen: list[str] = []
+        for interval in self.error_intervals:
+            if interval.error_code and interval.error_code not in seen:
+                seen.append(interval.error_code)
+        return tuple(seen)
+
+    def interval(self, interval_id: str) -> Optional[ErrorInterval]:
+        return next(
+            (i for i in self.error_intervals if i.interval_id == interval_id), None
+        )
+
+    def sorted_intervals(self) -> list[ErrorInterval]:
+        return sorted(
+            self.error_intervals,
+            key=lambda i: (i.start_frame, i.end_frame, i.error_code),
         )
 
     def touch(self) -> None:
         self.revision += 1
         self.updated_at = utc_now_iso()
 
+    # ------------------------------------------------------------- transport
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "schema_version": self.schema_version,
-            "segment_id": self.segment_id,
+            "label_schema_version": self.label_schema_version,
+            "sample_id": self.sample_id,
             "take_id": self.take_id,
             "index": self.index,
             "start_frame": self.start_frame,
@@ -808,99 +849,331 @@ class RepetitionSegment:
             "revision": self.revision,
             "source": self.source.value,
             "status": self.status.value,
-            "annotation": self.annotation.to_dict(),
+            "exercise": self.exercise,
+            "correctness": self.correctness.value,
+            "error_intervals": [i.to_dict() for i in self.sorted_intervals()],
+            "note": self.note,
+            "annotator": self.annotator,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
+        if self.legacy:
+            payload["legacy"] = dict(self.legacy)
+        return payload
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "RepetitionSegment":
+    def from_dict(cls, payload: Mapping[str, Any]) -> "MovementSample":
+        """Read a v2 sample, or migrate a pre-2.0 ``RepetitionSegment``.
+
+        Migration never invents a decision: an ``uncertain`` verdict becomes
+        ``UNLABELLED`` and the original wording is kept under ``legacy`` so the
+        annotator can see what the old file claimed.
+        """
+        data = dict(payload)
+        legacy = dict(data.get("legacy") or {})
+
+        # Pre-2.0 files nested the label inside an "annotation" object.
+        annotation = data.get("annotation")
+        is_legacy = isinstance(annotation, Mapping)
+        label: Mapping[str, Any] = annotation if is_legacy else data
+
+        raw_correctness = label.get("correctness")
+        correctness = Correctness.parse(raw_correctness)
+        if raw_correctness is not None and not correctness.is_decided:
+            text = str(raw_correctness).strip().lower()
+            if text and text != Correctness.UNLABELLED.value:
+                legacy.setdefault("correctness", text)
+
+        # Fields the redesign removed. Preserved, never re-interpreted.
+        dropped_keys = ["movement_phase", "severity", "annotator_confidence",
+                        "affected_joints"]
+        if is_legacy:
+            # Only a v1 document has a review status *inside* the label. In v2
+            # the top-level `status` is the sample's own active/excluded state
+            # and must not be mistaken for it.
+            dropped_keys.append("status")
+        for key in dropped_keys:
+            value = label.get(key)
+            if value not in (None, "", [], {}):
+                legacy.setdefault(key, value)
+
+        intervals = [
+            ErrorInterval.from_dict(item)
+            for item in list(label.get("evidence_intervals") or [])
+            + list(label.get("error_intervals") or [])
+        ]
+
+        # A pre-2.0 sample carried error classes at movement level with no
+        # timing. They cannot become localised intervals without inventing
+        # boundaries, so they are recorded as unlocalised classes instead.
+        sample_level_errors = [
+            str(code) for code in (label.get("error_types") or []) if str(code)
+        ]
+        if sample_level_errors:
+            legacy.setdefault("unlocalised_error_types", sample_level_errors)
+
+        start = int(data["start_frame"])
+        end = int(data.get("end_frame", start))
+        if end < start:
+            legacy.setdefault("reversed_original", [start, end])
+            start, end = end, start
+
         return cls(
-            segment_id=str(payload.get("segment_id") or new_id("rep")),
-            take_id=str(payload.get("take_id", "")),
-            start_frame=int(payload["start_frame"]),
-            end_frame=int(payload["end_frame"]),
-            start_timestamp_ns=payload.get("start_timestamp_ns"),
-            end_timestamp_ns=payload.get("end_timestamp_ns"),
-            index=int(payload.get("index", 1)),
-            revision=int(payload.get("revision", 1)),
-            source=_enum(payload.get("source"), SegmentSource, SegmentSource.MANUAL),
-            status=_enum(payload.get("status"), SegmentStatus, SegmentStatus.ACTIVE),
-            annotation=AnnotationRecord.from_dict(payload.get("annotation") or {}),
-            created_at=str(payload.get("created_at") or utc_now_iso()),
-            updated_at=str(payload.get("updated_at") or utc_now_iso()),
-            schema_version=str(
-                payload.get("schema_version") or ANNOTATION_SCHEMA_VERSION
+            sample_id=str(
+                data.get("sample_id") or data.get("segment_id") or new_id("mov")
             ),
+            take_id=str(data.get("take_id", "")),
+            start_frame=start,
+            end_frame=end,
+            start_timestamp_ns=data.get("start_timestamp_ns"),
+            end_timestamp_ns=data.get("end_timestamp_ns"),
+            index=int(data.get("index", 1)),
+            revision=int(data.get("revision", 1)),
+            source=_enum(data.get("source"), SegmentSource, SegmentSource.MANUAL),
+            status=_enum(data.get("status"), SegmentStatus, SegmentStatus.ACTIVE),
+            exercise=str(label.get("exercise", "")),
+            correctness=correctness,
+            error_intervals=intervals,
+            note=str(label.get("note", "")),
+            annotator=str(label.get("annotator", "")),
+            created_at=str(data.get("created_at") or utc_now_iso()),
+            updated_at=str(data.get("updated_at") or utc_now_iso()),
+            label_schema_version=str(
+                label.get("label_schema_version") or LABEL_SCHEMA_VERSION
+            ),
+            schema_version=str(data.get("schema_version") or ANNOTATION_SCHEMA_VERSION),
+            legacy=legacy,
         )
 
 
-def validate_segments(
-    segments: Sequence[RepetitionSegment], *, frame_count: Optional[int] = None
+#: Backwards-compatible alias. The class was called ``RepetitionSegment`` before
+#: the two-level label redesign; the name survives so older imports keep working.
+RepetitionSegment = MovementSample
+
+
+# ---------------------------------------------------------------------------
+# Validation - one rule, shared by the screen and the exporter
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SampleProblem:
+    """One reason a sample is not ready, in a form the UI can render directly."""
+
+    code: str
+    message: str
+    interval_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "interval_id": self.interval_id,
+        }
+
+
+def evaluate_sample(
+    sample: MovementSample, *, known_error_codes: Optional[Sequence[str]] = None
+) -> tuple[SampleReadiness, list[SampleProblem]]:
+    """Decide whether one sample is export-ready, and say exactly why not.
+
+    This is the single definition of "labelled". The review screen shows its
+    verdict and the exporter obeys it, so a sample the user sees as finished is
+    precisely a sample that ends up in a release.
+
+    ``known_error_codes`` is the project's error vocabulary. Pass ``None`` to
+    skip vocabulary checking (useful while the schema is still being edited).
+    """
+    problems: list[SampleProblem] = []
+
+    if not sample.is_active:
+        return SampleReadiness.EXCLUDED, problems
+
+    # --- structural checks on the intervals themselves ---------------------
+    vocabulary = set(known_error_codes) if known_error_codes is not None else None
+    for interval in sample.error_intervals:
+        if not interval.error_code:
+            problems.append(
+                SampleProblem(
+                    "interval_without_class",
+                    "Hata aralığına bir hata türü seçilmedi.",
+                    interval.interval_id,
+                )
+            )
+        elif vocabulary is not None and interval.error_code not in vocabulary:
+            problems.append(
+                SampleProblem(
+                    "unknown_error_class",
+                    f"'{interval.error_code}' hata türü proje şemasında yok.",
+                    interval.interval_id,
+                )
+            )
+        if interval.end_frame < interval.start_frame:
+            problems.append(
+                SampleProblem(
+                    "interval_reversed",
+                    "Hata aralığının bitişi başlangıcından önce.",
+                    interval.interval_id,
+                )
+            )
+        elif not (
+            sample.start_frame <= interval.start_frame
+            and interval.end_frame <= sample.end_frame
+        ):
+            problems.append(
+                SampleProblem(
+                    "interval_outside_sample",
+                    (
+                        f"Hata aralığı ({interval.start_frame}-{interval.end_frame}) "
+                        f"hareketin dışında ({sample.start_frame}-{sample.end_frame})."
+                    ),
+                    interval.interval_id,
+                )
+            )
+
+    if problems:
+        return SampleReadiness.INVALID_INTERVAL, problems
+
+    # --- the label itself ---------------------------------------------------
+    if not sample.exercise:
+        problems.append(
+            SampleProblem("no_exercise", "Hareket türü seçilmedi.")
+        )
+    if not sample.correctness.is_decided:
+        problems.append(
+            SampleProblem("no_verdict", "Doğru/yanlış kararı verilmedi.")
+        )
+    if problems:
+        return SampleReadiness.UNLABELLED, problems
+
+    if sample.correctness is Correctness.CORRECT and sample.error_intervals:
+        problems.append(
+            SampleProblem(
+                "correct_with_errors",
+                (
+                    "Hareket doğru işaretlendi fakat "
+                    f"{len(sample.error_intervals)} hata aralığı içeriyor."
+                ),
+            )
+        )
+        return SampleReadiness.CONTRADICTION, problems
+
+    if sample.correctness is Correctness.INCORRECT and not sample.error_intervals:
+        problems.append(
+            SampleProblem(
+                "incorrect_without_interval",
+                "Hatalı hareket için en az bir hata aralığı işaretlenmeli.",
+            )
+        )
+        return SampleReadiness.NEEDS_ERROR_INTERVAL, problems
+
+    return SampleReadiness.READY, problems
+
+
+def sample_readiness(
+    sample: MovementSample, *, known_error_codes: Optional[Sequence[str]] = None
+) -> SampleReadiness:
+    return evaluate_sample(sample, known_error_codes=known_error_codes)[0]
+
+
+def is_export_ready(
+    sample: MovementSample, *, known_error_codes: Optional[Sequence[str]] = None
+) -> bool:
+    """The one predicate both the UI and the exporter use."""
+    return sample_readiness(sample, known_error_codes=known_error_codes).is_ready
+
+
+def validate_samples(
+    samples: Sequence[MovementSample], *, frame_count: Optional[int] = None
 ) -> list[dict[str, Any]]:
-    """Return every structural problem in a set of repetition intervals.
+    """Structural problems across a take's whole set of movement samples.
 
     Problems are returned rather than raised: the review screen shows all of
-    them at once so the user can fix them in one pass instead of one dialog at
-    a time.
+    them at once so the user fixes them in one pass.
     """
     problems: list[dict[str, Any]] = []
-    active = [s for s in segments if s.is_active]
+    active = [s for s in samples if s.is_active]
     ordered = sorted(active, key=lambda s: (s.start_frame, s.end_frame))
-    for index, segment in enumerate(ordered):
-        if frame_count is not None and segment.end_frame >= frame_count:
+    for position, sample in enumerate(ordered):
+        if frame_count is not None and sample.end_frame >= frame_count:
             problems.append(
                 {
-                    "segment_id": segment.segment_id,
+                    "sample_id": sample.sample_id,
                     "issue": "out_of_range",
                     "message": (
-                        f"Tekrar {segment.index}: bitiş karesi ({segment.end_frame}) "
+                        f"Hareket {sample.index}: bitiş karesi ({sample.end_frame}) "
                         f"kayıt uzunluğunun ({frame_count}) dışında."
                     ),
                 }
             )
-        if segment.frame_count < 2:
+        if sample.frame_count < 2:
             problems.append(
                 {
-                    "segment_id": segment.segment_id,
+                    "sample_id": sample.sample_id,
                     "issue": "too_short",
-                    "message": f"Tekrar {segment.index}: aralık en az 2 kare olmalı.",
+                    "message": f"Hareket {sample.index}: aralık en az 2 kare olmalı.",
                 }
             )
-        if index + 1 < len(ordered) and segment.overlaps(ordered[index + 1]):
+        if position + 1 < len(ordered) and sample.overlaps(ordered[position + 1]):
             problems.append(
                 {
-                    "segment_id": segment.segment_id,
+                    "sample_id": sample.sample_id,
                     "issue": "overlap",
                     "message": (
-                        f"Tekrar {segment.index} ile "
-                        f"{ordered[index + 1].index} çakışıyor."
+                        f"Hareket {sample.index} ile "
+                        f"{ordered[position + 1].index} çakışıyor."
                     ),
                 }
             )
+        for interval in sample.error_intervals:
+            if not (
+                sample.start_frame <= interval.start_frame
+                and interval.end_frame <= sample.end_frame
+            ):
+                problems.append(
+                    {
+                        "sample_id": sample.sample_id,
+                        "issue": "interval_outside_sample",
+                        "message": (
+                            f"Hareket {sample.index}: bir hata aralığı hareketin "
+                            "dışına taşıyor."
+                        ),
+                    }
+                )
     return problems
 
 
-def renumber_segments(segments: Iterable[RepetitionSegment]) -> list[RepetitionSegment]:
-    """Reassign ``index`` in chronological order, keeping excluded ones in place."""
-    ordered = sorted(segments, key=lambda s: (s.start_frame, s.end_frame))
-    for position, segment in enumerate(ordered, start=1):
-        segment.index = position
+def renumber_samples(samples: Iterable[MovementSample]) -> list[MovementSample]:
+    """Reassign ``index`` in chronological order."""
+    ordered = sorted(samples, key=lambda s: (s.start_frame, s.end_frame))
+    for position, sample in enumerate(ordered, start=1):
+        sample.index = position
     return ordered
 
 
+#: Legacy aliases kept so older call sites and tests keep working.
+validate_segments = validate_samples
+renumber_segments = renumber_samples
+
+
 __all__ = [
-    "AnnotationRecord",
     "CaptureProfile",
     "CaptureProtocol",
-    "EvidenceInterval",
+    "ErrorInterval",
+    "MovementSample",
     "Participant",
     "Project",
     "ProtocolTask",
     "RepetitionSegment",
+    "SampleProblem",
     "Session",
     "Take",
     "TakeQualityMetrics",
+    "evaluate_sample",
+    "is_export_ready",
+    "renumber_samples",
     "renumber_segments",
+    "sample_readiness",
+    "validate_samples",
     "validate_segments",
 ]

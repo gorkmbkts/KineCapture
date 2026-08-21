@@ -1,9 +1,13 @@
 """Dataset index: the queryable summary behind the dashboard and export.
 
-Reads *metadata only* - ``take.json``, ``segments.json``, ``quality.json``. It
+Reads *metadata only* - ``take.json``, the label sidecar, ``quality.json``. It
 never opens a skeleton stream or a video, so it stays fast as the dataset grows.
 The result is cached against the newest metadata modification time, so repeated
 dashboard refreshes are nearly free while an edit still invalidates the cache.
+
+"Labelled" here means exactly what the exporter means by "eligible": both ask
+:func:`kinecapture.domain.project.evaluate_sample`. There is no second rule that
+could drift.
 """
 
 from __future__ import annotations
@@ -16,14 +20,20 @@ from typing import Any, Iterable, Optional, Sequence
 from kinecapture.core.logging import get_logger
 from kinecapture.dataset.workspace import ProjectWorkspace
 from kinecapture.domain.enums import (
-    AnnotationStatus,
     Correctness,
     DataOrigin,
+    SampleReadiness,
     SegmentStatus,
     TakeQuality,
     TakeState,
 )
-from kinecapture.domain.project import Participant, RepetitionSegment, Session, Take
+from kinecapture.domain.project import (
+    MovementSample,
+    Participant,
+    Session,
+    Take,
+    evaluate_sample,
+)
 
 logger = get_logger(__name__)
 
@@ -35,21 +45,48 @@ class TakeRow:
     take: Take
     participant_code: str
     session_id: str
-    segments: list[RepetitionSegment] = field(default_factory=list)
+    samples: list[MovementSample] = field(default_factory=list)
+    #: The project's error vocabulary at the time the row was built, so
+    #: readiness can be judged without another disk read.
+    known_error_codes: tuple[str, ...] = ()
+
+    # Pre-redesign attribute name, kept so older call sites keep working.
+    @property
+    def segments(self) -> list[MovementSample]:
+        return self.samples
 
     @property
+    def active_samples(self) -> list[MovementSample]:
+        return [s for s in self.samples if s.is_active]
+
+    @property
+    def movement_count(self) -> int:
+        return len(self.active_samples)
+
+    #: Pre-redesign name.
+    @property
     def repetition_count(self) -> int:
-        return sum(1 for s in self.segments if s.is_active)
+        return self.movement_count
+
+    def readiness(self, sample: MovementSample) -> SampleReadiness:
+        return evaluate_sample(sample, known_error_codes=self.known_error_codes)[0]
+
+    @property
+    def ready_samples(self) -> list[MovementSample]:
+        """Samples that would actually be exported."""
+        return [s for s in self.active_samples if self.readiness(s).is_ready]
 
     @property
     def labelled_count(self) -> int:
-        return sum(
-            1 for s in self.segments if s.is_active and s.annotation.is_labelled
-        )
+        return len(self.ready_samples)
+
+    @property
+    def error_interval_count(self) -> int:
+        return sum(len(s.error_intervals) for s in self.active_samples)
 
     @property
     def is_fully_labelled(self) -> bool:
-        return self.repetition_count > 0 and self.labelled_count == self.repetition_count
+        return self.movement_count > 0 and self.labelled_count == self.movement_count
 
     @property
     def needs_review(self) -> bool:
@@ -58,9 +95,16 @@ class TakeRow:
 
     @property
     def exercises(self) -> tuple[str, ...]:
-        values = {s.annotation.exercise for s in self.segments if s.annotation.exercise}
+        values = {s.exercise for s in self.active_samples if s.exercise}
         if self.take.exercise:
             values.add(self.take.exercise)
+        return tuple(sorted(values))
+
+    @property
+    def error_codes(self) -> tuple[str, ...]:
+        values: set[str] = set()
+        for sample in self.active_samples:
+            values.update(sample.error_codes)
         return tuple(sorted(values))
 
     def matches(self, query: "DatasetQuery") -> bool:
@@ -75,12 +119,13 @@ class DatasetQuery:
     session_ids: tuple[str, ...] = ()
     exercises: tuple[str, ...] = ()
     correctness: tuple[Correctness, ...] = ()
-    annotation_status: tuple[AnnotationStatus, ...] = ()
+    error_codes: tuple[str, ...] = ()
+    readiness: tuple[SampleReadiness, ...] = ()
     take_quality: tuple[TakeQuality, ...] = ()
     take_states: tuple[TakeState, ...] = ()
     origin: Optional[DataOrigin] = None
-    only_labelled: bool = False
-    only_unlabelled: bool = False
+    only_ready: bool = False
+    only_unready: bool = False
 
     def matches(self, row: TakeRow) -> bool:
         take = row.take
@@ -94,21 +139,21 @@ class DatasetQuery:
             return False
         if self.origin is not None and take.origin is not self.origin:
             return False
-        if self.only_labelled and row.labelled_count == 0:
+        if self.only_ready and row.labelled_count == 0:
             return False
-        if self.only_unlabelled and row.labelled_count == row.repetition_count and row.repetition_count > 0:
+        if self.only_unready and row.is_fully_labelled:
             return False
         if self.exercises and not set(self.exercises) & set(row.exercises):
             return False
+        if self.error_codes and not set(self.error_codes) & set(row.error_codes):
+            return False
         if self.correctness:
-            values = {
-                s.annotation.correctness for s in row.segments if s.is_active
-            }
+            values = {s.correctness for s in row.active_samples}
             if not values & set(self.correctness):
                 return False
-        if self.annotation_status:
-            values = {s.annotation.status for s in row.segments if s.is_active}
-            if not values & set(self.annotation_status):
+        if self.readiness:
+            values = {row.readiness(s) for s in row.active_samples}
+            if not values & set(self.readiness):
                 return False
         return True
 
@@ -129,17 +174,35 @@ class DatasetSummary:
     excluded_takes: int = 0
     synthetic_takes: int = 0
     real_takes: int = 0
-    repetitions: int = 0
-    labelled_repetitions: int = 0
-    unlabelled_repetitions: int = 0
-    excluded_repetitions: int = 0
+
+    movement_samples: int = 0
+    ready_samples: int = 0
+    unready_samples: int = 0
+    excluded_samples: int = 0
+    error_intervals: int = 0
     takes_needing_review: int = 0
+
     correctness_counts: dict[str, int] = field(default_factory=dict)
     exercise_counts: dict[str, int] = field(default_factory=dict)
-    annotation_status_counts: dict[str, int] = field(default_factory=dict)
+    readiness_counts: dict[str, int] = field(default_factory=dict)
+    error_class_counts: dict[str, int] = field(default_factory=dict)
+
     total_duration_s: float = 0.0
     mean_tracking_coverage: float = 0.0
     takes_with_capture_loss: int = 0
+
+    # Pre-redesign aliases so older dashboards keep reading.
+    @property
+    def repetitions(self) -> int:
+        return self.movement_samples
+
+    @property
+    def labelled_repetitions(self) -> int:
+        return self.ready_samples
+
+    @property
+    def unlabelled_repetitions(self) -> int:
+        return self.unready_samples
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -170,6 +233,7 @@ class DatasetIndex:
         self._participants = self.workspace.list_participants()
         codes = {p.participant_id: p.code for p in self._participants}
         self._sessions = self.workspace.list_sessions()
+        error_codes = self.workspace.label_schema.error_type_codes()
 
         rows: list[TakeRow] = []
         for take in self.workspace.list_takes():
@@ -178,7 +242,8 @@ class DatasetIndex:
                     take=take,
                     participant_code=codes.get(take.participant_id, take.participant_id),
                     session_id=take.session_id,
-                    segments=self.workspace.load_segments(take),
+                    samples=self.workspace.load_samples(take),
+                    known_error_codes=error_codes,
                 )
             )
         self._rows = sorted(rows, key=lambda r: r.take.started_at, reverse=True)
@@ -192,13 +257,21 @@ class DatasetIndex:
         return self
 
     def _metadata_signature(self) -> tuple[int, float]:
-        """(file count, newest mtime) over the metadata files only."""
+        """(file count, newest mtime) over the metadata files only.
+
+        The project's own ``label_schema.json`` counts too: adding an error class
+        can change whether existing samples are considered ready.
+        """
         count = 0
         newest = 0.0
+        candidates: list = []
         base = self.workspace.participants_dir
-        if not base.is_dir():
-            return (0, 0.0)
-        for path in base.rglob("*.json"):
+        if base.is_dir():
+            candidates = list(base.rglob("*.json"))
+        schema_path = self.workspace.label_schema_file
+        if schema_path.is_file():
+            candidates.append(schema_path)
+        for path in candidates:
             try:
                 stat = path.stat()
             except OSError:  # pragma: no cover - file vanished mid-scan
@@ -245,6 +318,13 @@ class DatasetIndex:
             values.update(row.exercises)
         return tuple(sorted(values))
 
+    def used_error_codes(self) -> tuple[str, ...]:
+        """Error classes referenced anywhere in the project's labels."""
+        values: set[str] = set()
+        for row in self._rows:
+            values.update(row.error_codes)
+        return tuple(sorted(values))
+
     # -------------------------------------------------------------- summary
     def summary(self, rows: Optional[Sequence[TakeRow]] = None) -> DatasetSummary:
         """Aggregate ``rows`` (or everything) into dashboard counts."""
@@ -256,7 +336,8 @@ class DatasetIndex:
         )
         correctness: Counter[str] = Counter()
         exercises: Counter[str] = Counter()
-        statuses: Counter[str] = Counter()
+        readiness: Counter[str] = Counter()
+        error_classes: Counter[str] = Counter()
         coverage_total = 0.0
         coverage_count = 0
 
@@ -281,36 +362,43 @@ class DatasetIndex:
                 coverage_total += float(take.metrics.tracking_coverage)
                 coverage_count += 1
 
-            for segment in row.segments:
-                if segment.status is SegmentStatus.EXCLUDED:
-                    summary.excluded_repetitions += 1
+            for sample in row.samples:
+                if sample.status is SegmentStatus.EXCLUDED:
+                    summary.excluded_samples += 1
                     continue
-                summary.repetitions += 1
-                annotation = segment.annotation
-                if annotation.is_labelled:
-                    summary.labelled_repetitions += 1
+                summary.movement_samples += 1
+                state = row.readiness(sample)
+                readiness[state.value] += 1
+                if state.is_ready:
+                    summary.ready_samples += 1
                 else:
-                    summary.unlabelled_repetitions += 1
-                correctness[annotation.correctness.value] += 1
-                statuses[annotation.status.value] += 1
-                if annotation.exercise:
-                    exercises[annotation.exercise] += 1
+                    summary.unready_samples += 1
+                correctness[sample.correctness.value] += 1
+                if sample.exercise:
+                    exercises[sample.exercise] += 1
+                summary.error_intervals += len(sample.error_intervals)
+                for interval in sample.error_intervals:
+                    if interval.error_code:
+                        error_classes[interval.error_code] += 1
 
         summary.correctness_counts = dict(sorted(correctness.items()))
         summary.exercise_counts = dict(sorted(exercises.items()))
-        summary.annotation_status_counts = dict(sorted(statuses.items()))
+        summary.readiness_counts = dict(sorted(readiness.items()))
+        summary.error_class_counts = dict(sorted(error_classes.items()))
         summary.mean_tracking_coverage = (
             coverage_total / coverage_count if coverage_count else 0.0
         )
         return summary
 
     # ------------------------------------------------------------------- QA
-    def quality_issues(self, rows: Optional[Sequence[TakeRow]] = None) -> list[dict[str, Any]]:
+    def quality_issues(
+        self, rows: Optional[Sequence[TakeRow]] = None
+    ) -> list[dict[str, Any]]:
         """Problems worth a researcher's attention, most severe first.
 
-        Structural failures (missing files, capture loss) come before statistical
-        concerns (class imbalance), because one makes data unusable and the
-        other makes it awkward.
+        Structural failures (missing files, capture loss) come before label
+        problems, which come before statistical concerns (class imbalance),
+        because one makes data unusable and the others make it awkward.
         """
         selected = list(rows) if rows is not None else self._rows
         issues: list[dict[str, Any]] = []
@@ -318,16 +406,14 @@ class DatasetIndex:
         for row in selected:
             take = row.take
             paths = self.workspace.take_paths(take)
+            label = f"{row.participant_code} / kayıt {take.index_in_session}"
             if take.is_finalized and not paths.skeleton_stream.is_file():
                 issues.append(
                     {
                         "severity": "blocked",
                         "issue": "missing_skeleton_stream",
                         "take_id": take.take_id,
-                        "message": (
-                            f"{row.participant_code} / kayıt {take.index_in_session}: "
-                            "iskelet akışı dosyası yok."
-                        ),
+                        "message": f"{label}: iskelet akışı dosyası yok.",
                     }
                 )
             if take.is_recoverable_partial:
@@ -336,10 +422,7 @@ class DatasetIndex:
                         "severity": "warning",
                         "issue": "partial_take",
                         "take_id": take.take_id,
-                        "message": (
-                            f"{row.participant_code} / kayıt {take.index_in_session}: "
-                            "kayıt yarım kalmış, kurtarma bekliyor."
-                        ),
+                        "message": f"{label}: kayıt yarım kalmış, kurtarma bekliyor.",
                     }
                 )
             if take.metrics.has_capture_loss:
@@ -349,9 +432,9 @@ class DatasetIndex:
                         "issue": "capture_loss",
                         "take_id": take.take_id,
                         "message": (
-                            f"{row.participant_code} / kayıt {take.index_in_session}: "
-                            f"{take.metrics.frames_dropped_recording} kare diske "
-                            f"yazılamadı, {take.metrics.missing_frame_indices} kare eksik."
+                            f"{label}: {take.metrics.frames_dropped_recording} kare "
+                            f"diske yazılamadı, "
+                            f"{take.metrics.missing_frame_indices} kare eksik."
                         ),
                     }
                 )
@@ -362,8 +445,7 @@ class DatasetIndex:
                         "issue": "low_tracking_coverage",
                         "take_id": take.take_id,
                         "message": (
-                            f"{row.participant_code} / kayıt {take.index_in_session}: "
-                            f"takip kapsamı düşük "
+                            f"{label}: takip kapsamı düşük "
                             f"(%{take.metrics.tracking_coverage * 100:.0f})."
                         ),
                     }
@@ -380,9 +462,9 @@ class DatasetIndex:
                         "issue": "low_fps",
                         "take_id": take.take_id,
                         "message": (
-                            f"{row.participant_code} / kayıt {take.index_in_session}: "
-                            f"ölçülen FPS {take.metrics.measured_fps:.1f}, "
-                            f"hedef {take.metrics.target_fps:.0f}."
+                            f"{label}: ölçülen FPS "
+                            f"{take.metrics.measured_fps:.1f}, hedef "
+                            f"{take.metrics.target_fps:.0f}."
                         ),
                     }
                 )
@@ -393,8 +475,8 @@ class DatasetIndex:
                         "issue": "body_id_change",
                         "take_id": take.take_id,
                         "message": (
-                            f"{row.participant_code} / kayıt {take.index_in_session}: "
-                            f"takip kimliği {len(take.body_id_events)} kez değişti."
+                            f"{label}: takip kimliği "
+                            f"{len(take.body_id_events)} kez değişti."
                         ),
                     }
                 )
@@ -405,45 +487,55 @@ class DatasetIndex:
         return sorted(issues, key=lambda item: order.get(item["severity"], 3))
 
     def _label_issues(self, rows: Sequence[TakeRow]) -> list[dict[str, Any]]:
-        schema = self.workspace.label_schema
+        """Label problems, using the same rule the exporter applies."""
+        severity_by_readiness = {
+            SampleReadiness.CONTRADICTION: "warning",
+            SampleReadiness.INVALID_INTERVAL: "warning",
+            SampleReadiness.NEEDS_ERROR_INTERVAL: "info",
+            SampleReadiness.UNLABELLED: "info",
+        }
         issues: list[dict[str, Any]] = []
         for row in rows:
-            for segment in row.segments:
-                if not segment.is_active:
-                    continue
-                problems = schema.validate_annotation_values(
-                    exercise=segment.annotation.exercise,
-                    error_types=segment.annotation.error_types,
+            for sample in row.active_samples:
+                state, problems = evaluate_sample(
+                    sample, known_error_codes=row.known_error_codes
                 )
+                if state.is_ready:
+                    continue
+                severity = severity_by_readiness.get(state, "info")
                 for problem in problems:
                     issues.append(
                         {
-                            "severity": "warning",
-                            "issue": problem["issue"],
+                            "severity": severity,
+                            "issue": problem.code,
                             "take_id": row.take.take_id,
                             "message": (
-                                f"{row.participant_code} / tekrar {segment.index}: "
-                                f"{problem['message']}"
+                                f"{row.participant_code} / hareket {sample.index}: "
+                                f"{problem.message}"
                             ),
                         }
                     )
         return issues
 
     def _balance_issues(self, rows: Sequence[TakeRow]) -> list[dict[str, Any]]:
-        """Class imbalance and single-participant coverage warnings."""
+        """Class imbalance, coverage and error-class rarity warnings."""
         issues: list[dict[str, Any]] = []
         per_exercise_participants: dict[str, set[str]] = {}
         correctness: Counter[str] = Counter()
+        error_classes: Counter[str] = Counter()
+
         for row in rows:
-            for segment in row.segments:
-                if not segment.is_active or not segment.annotation.is_labelled:
+            for sample in row.active_samples:
+                if not row.readiness(sample).is_ready:
                     continue
-                exercise = segment.annotation.exercise
-                correctness[segment.annotation.correctness.value] += 1
-                if exercise:
-                    per_exercise_participants.setdefault(exercise, set()).add(
+                correctness[sample.correctness.value] += 1
+                if sample.exercise:
+                    per_exercise_participants.setdefault(sample.exercise, set()).add(
                         row.take.participant_id
                     )
+                for interval in sample.error_intervals:
+                    if interval.error_code:
+                        error_classes[interval.error_code] += 1
 
         for exercise, participants in sorted(per_exercise_participants.items()):
             if len(participants) < 2:
@@ -475,16 +567,30 @@ class DatasetIndex:
                         ),
                     }
                 )
+
+        schema = self.workspace.label_schema
+        for code, count in sorted(error_classes.items()):
+            if count < 3:
+                issues.append(
+                    {
+                        "severity": "info",
+                        "issue": "rare_error_class",
+                        "take_id": "",
+                        "message": (
+                            f"'{schema.label_for_error(code)}' yalnızca {count} "
+                            "aralıkta geçiyor; zamansal yerelleştirme için az olabilir."
+                        ),
+                    }
+                )
         return issues
 
 
 def exportable_rows(rows: Iterable[TakeRow]) -> list[TakeRow]:
-    """Takes eligible for a dataset release: finalised, not excluded, labelled."""
+    """Takes eligible for a dataset release: finalised, not excluded, ready."""
     return [
         row
         for row in rows
-        if row.take.usable_for_export
-        and any(s.is_active and s.annotation.is_labelled for s in row.segments)
+        if row.take.usable_for_export and row.ready_samples
     ]
 
 

@@ -165,17 +165,31 @@ class ExportPage(Page):
         self._include_synthetic.toggled.connect(self._refresh_preview)
         card.add_widget(self._include_synthetic)
 
-        self._include_unlabelled = QCheckBox("Etiketsiz tekrarları dahil et")
-        self._include_unlabelled.toggled.connect(self._refresh_preview)
-        card.add_widget(self._include_unlabelled)
+        self._include_unready = QCheckBox("Etiketi eksik hareketleri dahil et")
+        self._include_unready.setToolTip(
+            "Kapalıyken sürüm, ekranda \u201chazır\u201d görünen hareketlerle "
+            "birebir aynıdır."
+        )
+        self._include_unready.toggled.connect(self._refresh_preview)
+        card.add_widget(self._include_unready)
 
-        self._include_excluded = QCheckBox("Dışlanmış tekrarları dahil et")
+        self._include_excluded = QCheckBox("Dışlanmış hareketleri dahil et")
         self._include_excluded.toggled.connect(self._refresh_preview)
         card.add_widget(self._include_excluded)
 
         self._store_confidence = QCheckBox("Eklem güven değerlerini yaz")
         self._store_confidence.setChecked(True)
         card.add_widget(self._store_confidence)
+
+        self._store_targets = QCheckBox(
+            "Kare başına hata hedefi dizisi yaz (error_multi_hot)"
+        )
+        self._store_targets.setChecked(True)
+        self._store_targets.setToolTip(
+            "Zamansal yerelleştirme eğitimi için [T, sınıf] hedef dizisi. "
+            "Kapatılırsa yalnız aralık listesi yazılır."
+        )
+        card.add_widget(self._store_targets)
 
         self._min_frames = QSpinBox()
         self._min_frames.setRange(2, 500)
@@ -358,11 +372,12 @@ class ExportPage(Page):
         target = self._skeleton_selector.currentData()
         return ExportOptions(
             include_synthetic=self._include_synthetic.isChecked(),
-            include_unlabelled=self._include_unlabelled.isChecked(),
-            include_excluded_segments=self._include_excluded.isChecked(),
+            include_unready=self._include_unready.isChecked(),
+            include_excluded_samples=self._include_excluded.isChecked(),
             min_frames_per_sample=self._min_frames.value(),
             target_skeleton_format=None if target == _NATIVE else target,
             store_confidences=self._store_confidence.isChecked(),
+            store_error_target_arrays=self._store_targets.isChecked(),
             notes=self._notes.toPlainText().strip(),
         )
 
@@ -373,7 +388,11 @@ class ExportPage(Page):
             return
         builder = ReleaseBuilder(workspace, index, self._current_options())
         rows = builder.select_rows()
-        samples = sum(len(builder._selected_segments(row)) for row in rows)
+        selected = [builder._selected_samples(row) for row in rows]
+        samples = sum(len(group) for group in selected)
+        intervals = sum(
+            len(sample.error_intervals) for group in selected for sample in group
+        )
         participants = {row.take.participant_id for row in rows}
         synthetic = sum(1 for row in rows if row.take.is_synthetic)
 
@@ -381,7 +400,8 @@ class ExportPage(Page):
             [
                 ("Sonraki sürüm", next_release_name(workspace.releases_dir)),
                 ("Uygun kayıt", str(len(rows))),
-                ("Örnek (tekrar)", str(samples)),
+                ("Örnek (hareket)", str(samples)),
+                ("Hata aralığı", str(intervals)),
                 ("Katılımcı", str(len(participants))),
                 ("Sentetik kayıt", str(synthetic)),
                 ("Hedef klasör", str(workspace.releases_dir)),

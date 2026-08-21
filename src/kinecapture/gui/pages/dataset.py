@@ -17,7 +17,12 @@ from PySide6.QtWidgets import (
 )
 
 from kinecapture.dataset.index import DatasetQuery, TakeRow
-from kinecapture.domain.enums import AnnotationStatus, Correctness, DataOrigin, TakeState
+from kinecapture.domain.enums import (
+    Correctness,
+    DataOrigin,
+    SampleReadiness,
+    TakeState,
+)
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.gui.pages.base import Page
 from kinecapture.gui.pages.dashboard import format_duration
@@ -31,6 +36,7 @@ from kinecapture.gui.widgets.common import (
     make_button,
     make_label,
 )
+from kinecapture.gui.widgets.timeline import error_class_colour
 
 _ANY = "__any__"
 
@@ -39,6 +45,31 @@ _SEVERITY_LABELS = {
     "warning": ("Uyarı", "warning"),
     "info": ("Bilgi", "info"),
 }
+
+#: Short Turkish name for each readiness state, used in the filter and tiles.
+_READINESS_LABELS = {
+    SampleReadiness.READY: "Hazır",
+    SampleReadiness.UNLABELLED: "Etiketlenmedi",
+    SampleReadiness.NEEDS_ERROR_INTERVAL: "Hata aralığı bekliyor",
+    SampleReadiness.CONTRADICTION: "Çelişki",
+    SampleReadiness.INVALID_INTERVAL: "Geçersiz aralık",
+    SampleReadiness.EXCLUDED: "Dışlandı",
+}
+
+
+def _readiness_detail(counts: dict[str, int]) -> str:
+    """Why the unready samples are unready, most common reason first."""
+    parts = []
+    for state in (
+        SampleReadiness.NEEDS_ERROR_INTERVAL,
+        SampleReadiness.UNLABELLED,
+        SampleReadiness.CONTRADICTION,
+        SampleReadiness.INVALID_INTERVAL,
+    ):
+        count = counts.get(state.value, 0)
+        if count:
+            parts.append(f"{count} {_READINESS_LABELS[state].lower()}")
+    return " · ".join(parts)
 
 
 class DistributionBar(QWidget):
@@ -174,7 +205,8 @@ class DatasetPage(Page):
         self._session_filter = add("Oturum")
         self._exercise_filter = add("Egzersiz")
         self._correctness_filter = add("Değerlendirme")
-        self._status_filter = add("Etiket durumu")
+        self._readiness_filter = add("Etiket durumu")
+        self._error_filter = add("Hata türü")
         self._state_filter = add("Kayıt durumu")
         self._origin_filter = add("Kaynak")
 
@@ -198,10 +230,10 @@ class DatasetPage(Page):
         self._tiles: dict[str, MetricTile] = {}
         specs = [
             ("takes", "Kayıt", "capture"),
-            ("repetitions", "Tekrar", "list"),
-            ("labelled", "Etiketli", "check"),
-            ("unlabelled", "Etiketsiz", "review"),
-            ("excluded", "Dışlanan", "trash"),
+            ("movements", "Hareket", "list"),
+            ("ready", "Hazır etiket", "check"),
+            ("unready", "Eksik etiket", "review"),
+            ("intervals", "Hata aralığı", "target"),
             ("duration", "Toplam süre", "clock"),
             ("coverage", "Ort. takip kapsamı", "target"),
             ("synthetic", "Sentetik kayıt", "flask"),
@@ -226,8 +258,8 @@ class DatasetPage(Page):
                 "Süre",
                 "FPS",
                 "Kapsam",
-                "Tekrar",
-                "Etiketli",
+                "Hareket",
+                "Hazır",
                 "Durum",
             ]
         )
@@ -263,6 +295,16 @@ class DatasetPage(Page):
         self._correctness_bars = DistributionBar(theme)
         correctness_card.add_widget(self._correctness_bars)
         layout.addWidget(correctness_card)
+
+        error_card = Card(
+            "Hata türü dağılımı",
+            subtitle="Zamansal hata aralıklarının sınıf dağılımı.",
+            theme=theme,
+            icon="target",
+        )
+        self._error_bars = DistributionBar(theme)
+        error_card.add_widget(self._error_bars)
+        layout.addWidget(error_card)
 
         qa_card = Card(
             "Kalite bulguları",
@@ -345,8 +387,20 @@ class DatasetPage(Page):
             ],
         )
         fill(
-            self._status_filter,
-            [(status.value, status.value) for status in AnnotationStatus],
+            self._readiness_filter,
+            [
+                (_READINESS_LABELS[state], state.value)
+                for state in SampleReadiness
+            ],
+        )
+        fill(
+            self._error_filter,
+            [
+                (schema.label_for_error(code), code)
+                for code in sorted(
+                    set(index.used_error_codes()) | set(schema.error_type_codes())
+                )
+            ],
         )
         fill(self._state_filter, [(state.value, state.value) for state in TakeState])
         fill(
@@ -363,7 +417,8 @@ class DatasetPage(Page):
         session = value(self._session_filter)
         exercise = value(self._exercise_filter)
         correctness = value(self._correctness_filter)
-        status = value(self._status_filter)
+        readiness = value(self._readiness_filter)
+        error_code = value(self._error_filter)
         take_state = value(self._state_filter)
         origin = value(self._origin_filter)
 
@@ -372,7 +427,8 @@ class DatasetPage(Page):
             session_ids=(str(session),) if session else (),
             exercises=(str(exercise),) if exercise else (),
             correctness=(Correctness(correctness),) if correctness else (),
-            annotation_status=(AnnotationStatus(status),) if status else (),
+            readiness=(SampleReadiness(readiness),) if readiness else (),
+            error_codes=(str(error_code),) if error_code else (),
             take_states=(TakeState(take_state),) if take_state else (),
             origin=DataOrigin(origin) if origin else None,
         )
@@ -383,7 +439,8 @@ class DatasetPage(Page):
             self._session_filter,
             self._exercise_filter,
             self._correctness_filter,
-            self._status_filter,
+            self._readiness_filter,
+            self._error_filter,
             self._state_filter,
             self._origin_filter,
         ):
@@ -414,16 +471,25 @@ class DatasetPage(Page):
         self._tiles["takes"].set_detail(
             f"{summary.finalized_takes} tamam · {summary.partial_takes} yarım"
         )
-        self._tiles["repetitions"].set_value(str(summary.repetitions))
-        self._tiles["labelled"].set_value(
-            str(summary.labelled_repetitions), colour=theme.success
+        self._tiles["movements"].set_value(str(summary.movement_samples))
+        self._tiles["movements"].set_detail(
+            f"{summary.excluded_samples} dışlandı"
         )
-        self._tiles["unlabelled"].set_value(
-            str(summary.unlabelled_repetitions),
-            colour=theme.warning if summary.unlabelled_repetitions else None,
+        self._tiles["ready"].set_value(
+            str(summary.ready_samples), colour=theme.success
         )
-        self._tiles["excluded"].set_value(str(summary.excluded_repetitions))
-        self._tiles["excluded"].set_detail(f"{summary.excluded_takes} kayıt dışlandı")
+        self._tiles["ready"].set_detail("export'a girer")
+        self._tiles["unready"].set_value(
+            str(summary.unready_samples),
+            colour=theme.warning if summary.unready_samples else None,
+        )
+        self._tiles["unready"].set_detail(
+            _readiness_detail(summary.readiness_counts)
+        )
+        self._tiles["intervals"].set_value(str(summary.error_intervals))
+        self._tiles["intervals"].set_detail(
+            f"{len(summary.error_class_counts)} hata türü"
+        )
         self._tiles["duration"].set_value(format_duration(summary.total_duration_s))
         self._tiles["coverage"].set_value(
             f"%{summary.mean_tracking_coverage * 100:.0f}"
@@ -448,8 +514,8 @@ class DatasetPage(Page):
                 format_duration(metrics.duration_s),
                 f"{metrics.measured_fps:.1f}",
                 f"%{metrics.tracking_coverage * 100:.0f}",
-                str(row.repetition_count),
-                f"{row.labelled_count}/{row.repetition_count}",
+                str(row.movement_count),
+                f"{row.labelled_count}/{row.movement_count}",
                 take.state.value + (" · sentetik" if take.is_synthetic else ""),
             ]
             for column, text in enumerate(values):
@@ -470,6 +536,16 @@ class DatasetPage(Page):
                 for code, count in summary.exercise_counts.items()
             }
         )
+        self._error_bars.set_distribution(
+            {
+                schema.label_for_error(code): count
+                for code, count in summary.error_class_counts.items()
+            },
+            colours={
+                schema.label_for_error(code): error_class_colour(code)
+                for code in summary.error_class_counts
+            },
+        )
         self._correctness_bars.set_distribution(
             {
                 LabelSchema.label_for_correctness(Correctness(code)): count
@@ -478,7 +554,6 @@ class DatasetPage(Page):
             colours={
                 "Doğru": theme.success,
                 "Hatalı": theme.warning,
-                "Kararsız": theme.info,
                 "Etiketlenmedi": theme.text_muted,
             },
         )

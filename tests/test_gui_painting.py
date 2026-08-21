@@ -22,12 +22,18 @@ pytest.importorskip("PySide6")
 from PySide6.QtCore import QSize  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-from kinecapture.domain.enums import Correctness, SegmentSource, SegmentStatus, TrackingState  # noqa: E402
+from kinecapture.domain.enums import (  # noqa: E402
+    Correctness,
+    SegmentSource,
+    SegmentStatus,
+    TrackingState,
+)
 from kinecapture.domain.models import BodyPose  # noqa: E402
-from kinecapture.domain.project import RepetitionSegment  # noqa: E402
+from kinecapture.domain.project import ErrorInterval, MovementSample  # noqa: E402
 from kinecapture.gui.theme import DARK_THEME, LIGHT_THEME  # noqa: E402
+from kinecapture.gui.widgets.scene_view import SceneMode, SceneView  # noqa: E402
 from kinecapture.gui.widgets.skeleton_view import VIEW_PRESETS, SkeletonView3D  # noqa: E402
-from kinecapture.gui.widgets.timeline import TimelineWidget  # noqa: E402
+from kinecapture.gui.widgets.timeline import TimelineMode, TimelineWidget  # noqa: E402
 from kinecapture.gui.widgets.video_view import VideoView  # noqa: E402
 from kinecapture.visualization.skeleton_spec import (  # noqa: E402
     MOCK_SKELETON,
@@ -70,18 +76,32 @@ def make_body(spec, *, nan_joints=(), confidences=None, tracking_id=1) -> BodyPo
     )
 
 
-def make_segments(count: int = 3, frame_count: int = 300):
-    segments = []
+def make_samples(count: int = 3, frame_count: int = 300, *, intervals: int = 0):
+    samples = []
     span = frame_count // (count + 1)
+    verdicts = list(Correctness)
     for index in range(count):
-        segment = RepetitionSegment.create(
+        sample = MovementSample.create(
             "take", 1 + index * span, (index + 1) * span
         )
-        segment.index = index + 1
-        segment.annotation.exercise = "squat"
-        segment.annotation.correctness = list(Correctness)[index % len(Correctness)]
-        segments.append(segment)
-    return segments
+        sample.index = index + 1
+        sample.exercise = "squat"
+        sample.correctness = verdicts[index % len(verdicts)]
+        for slot in range(intervals):
+            start = sample.start_frame + 2 + slot * 3
+            sample.error_intervals.append(
+                ErrorInterval.create(
+                    start,
+                    min(sample.end_frame, start + 8),
+                    f"class-{slot}",
+                )
+            )
+        samples.append(sample)
+    return samples
+
+
+#: Pre-redesign name kept so older helpers in this file keep reading.
+make_segments = make_samples
 
 
 # --------------------------------------------------------------- timeline
@@ -100,7 +120,7 @@ def test_timeline_paints_populated(qapp, theme) -> None:
         ),
         gaps=[80, 200],
     )
-    timeline.set_segments(make_segments(3, frames))
+    timeline.set_samples(make_samples(3, frames, intervals=2))
     timeline.set_position(150)
     timeline.set_loop_range((100, 180))
     paint(timeline)
@@ -121,18 +141,59 @@ def test_timeline_paints_single_frame_take(qapp) -> None:
 def test_timeline_paints_without_coverage(qapp) -> None:
     timeline = TimelineWidget(DARK_THEME)
     timeline.set_take(120, fps=30.0, markers=[5])
-    timeline.set_segments(make_segments(1, 120))
+    timeline.set_samples(make_samples(1, 120))
     paint(timeline)
 
 
-def test_timeline_paints_excluded_and_suggested_segments(qapp) -> None:
+def test_timeline_paints_excluded_and_suggested_samples(qapp) -> None:
     timeline = TimelineWidget(DARK_THEME)
     timeline.set_take(200, fps=30.0)
-    segments = make_segments(2, 200)
-    segments[0].status = SegmentStatus.EXCLUDED
-    segments[1].source = SegmentSource.MODEL_SUGGESTION
-    timeline.set_segments(segments)
-    timeline.set_selected(segments[1].segment_id)
+    samples = make_samples(2, 200)
+    samples[0].status = SegmentStatus.EXCLUDED
+    samples[1].source = SegmentSource.MODEL_SUGGESTION
+    timeline.set_samples(samples)
+    timeline.set_selected_sample(samples[1].sample_id)
+    paint(timeline)
+
+
+@pytest.mark.parametrize("theme", THEMES, ids=lambda t: t.name)
+def test_timeline_paints_error_mode(qapp, theme) -> None:
+    """Error mode masks outside the parent and stacks overlapping intervals."""
+    timeline = TimelineWidget(theme)
+    timeline.set_take(300, fps=30.0)
+    samples = make_samples(2, 300)
+    chosen = samples[0]
+    # Deliberately overlapping, plus a repeat of the first class.
+    chosen.error_intervals = [
+        ErrorInterval.create(chosen.start_frame + 2, chosen.start_frame + 30, "a"),
+        ErrorInterval.create(chosen.start_frame + 20, chosen.start_frame + 50, "b"),
+        ErrorInterval.create(chosen.start_frame + 55, chosen.end_frame - 2, "a"),
+    ]
+    timeline.set_samples(samples)
+    timeline.set_error_labels({"a": "Diz içe çöküyor", "b": "Sırt yuvarlanıyor"})
+    timeline.set_selected_sample(chosen.sample_id)
+    timeline.set_mode(TimelineMode.ERROR)
+    timeline.set_selected_interval(chosen.error_intervals[1].interval_id)
+    paint(timeline)
+
+
+def test_timeline_error_mode_without_a_selection_paints_a_hint(qapp) -> None:
+    timeline = TimelineWidget(DARK_THEME)
+    timeline.set_take(200, fps=30.0)
+    timeline.set_samples(make_samples(1, 200))
+    timeline.set_mode(TimelineMode.ERROR)
+    paint(timeline)
+
+
+def test_timeline_paints_an_interval_without_a_class(qapp) -> None:
+    """An unfinished interval must look unfinished, not finished."""
+    timeline = TimelineWidget(DARK_THEME)
+    timeline.set_take(200, fps=30.0)
+    samples = make_samples(1, 200)
+    samples[0].error_intervals = [ErrorInterval.create(20, 40, "")]
+    timeline.set_samples(samples)
+    timeline.set_selected_sample(samples[0].sample_id)
+    timeline.set_mode(TimelineMode.ERROR)
     paint(timeline)
 
 
@@ -142,7 +203,7 @@ def test_timeline_paints_at_extreme_zoom(qapp) -> None:
     timeline.set_take(
         frames, fps=60.0, coverage=np.ones(frames, dtype=np.float32)
     )
-    timeline.set_segments(make_segments(4, frames))
+    timeline.set_samples(make_samples(4, frames, intervals=1))
     timeline.zoom_to_range(2000, 2010)  # deepest zoom
     paint(timeline)
     timeline.zoom_to_fit()  # widest
@@ -152,7 +213,7 @@ def test_timeline_paints_at_extreme_zoom(qapp) -> None:
 def test_timeline_paints_in_a_tiny_viewport(qapp) -> None:
     timeline = TimelineWidget(DARK_THEME)
     timeline.set_take(100, fps=30.0, markers=[50])
-    timeline.set_segments(make_segments(2, 100))
+    timeline.set_samples(make_samples(2, 100))
     paint(timeline, QSize(60, 140))
 
 
@@ -266,6 +327,48 @@ def test_video_view_paints_extreme_aspect_ratios(qapp) -> None:
     paint(view, QSize(900, 100))
 
 
+# ------------------------------------------------------------ scene view
+
+
+@pytest.mark.parametrize("theme", THEMES, ids=lambda t: t.name)
+@pytest.mark.parametrize("mode", list(SceneMode))
+def test_scene_view_paints_every_mode(qapp, theme, mode) -> None:
+    view = SceneView(theme, mode=mode)
+    view.set_frame(
+        np.random.randint(0, 255, (180, 320, 3), dtype=np.uint8),
+        [make_body(MOCK_SKELETON)],
+        MOCK_SKELETON,
+    )
+    paint(view, QSize(480, 320))
+    assert view.mode is mode
+
+
+def test_scene_view_without_video_still_paints(qapp) -> None:
+    """No proxy video: RGB modes explain themselves, skeleton keeps working."""
+    view = SceneView(DARK_THEME)
+    view.set_video_available(False, "Proxy video dosyası yok.")
+    for mode in SceneMode:
+        view.set_mode(mode)
+        view.set_frame(None, [make_body(ZED_BODY_34)], ZED_BODY_34)
+        paint(view, QSize(480, 320))
+    assert not view.is_mode_useful(SceneMode.RGB)
+    assert view.is_mode_useful(SceneMode.SKELETON)
+    # Every mode stays offered, so a control never silently disappears.
+    assert len(view.available_modes()) == 3
+
+
+def test_scene_view_modes_share_one_position(qapp) -> None:
+    """Switching mode must not change which frame is shown."""
+    view = SceneView(DARK_THEME)
+    rgb = np.random.randint(0, 255, (120, 160, 3), dtype=np.uint8)
+    body = make_body(MOCK_SKELETON)
+    view.set_frame(rgb, [body], MOCK_SKELETON, active_id=1)
+    for mode in SceneMode:
+        view.set_mode(mode)
+        paint(view, QSize(400, 300))
+    assert view._bodies == (body,)
+
+
 # ------------------------------------------------------- whole-page paint
 
 
@@ -306,12 +409,28 @@ def test_review_page_paints_with_a_loaded_take(qapp, workspace, session) -> None
     workspace.save_take(take)
 
     loaded = load_take(workspace, take, with_video=False)
+    schema = workspace.label_schema
+    schema.add_exercise("Squat")
+    schema.add_error_type("Diz içe çöküyor")
+    workspace.save_label_schema(schema)
+
     repository = AnnotationRepository(
         workspace, take, frame_count=loaded.frame_count
     )
-    segment = repository.create_segment(2, loaded.frame_count - 3)
-    repository.annotate(
-        segment.segment_id, exercise="squat", correctness=Correctness.CORRECT
+    midpoint = loaded.frame_count // 2
+    good = repository.create_sample(2, midpoint - 2)
+    repository.label_sample(
+        good.sample_id, exercise="squat", correctness=Correctness.CORRECT
+    )
+    bad = repository.create_sample(midpoint, loaded.frame_count - 3)
+    repository.label_sample(
+        bad.sample_id, exercise="squat", correctness=Correctness.INCORRECT
+    )
+    repository.create_error_interval(
+        bad.sample_id,
+        bad.start_frame + 2,
+        bad.start_frame + 8,
+        error_code="diz-ice-cokuyor",
     )
     repository.save()
 
@@ -336,10 +455,24 @@ def test_review_page_paints_with_a_loaded_take(qapp, workspace, session) -> None
         qapp.processEvents()
         assert not window.grab().isNull()
 
-        # And with a segment selected, which paints the handles.
-        page._segment_list.setCurrentRow(0)
+        # With a movement selected, which paints the handles.
+        page._sample_list.setCurrentRow(0)
         qapp.processEvents()
         assert not window.grab().isNull()
+
+        # In error mode on the movement that has an interval.
+        page._sample_list.setCurrentRow(1)
+        qapp.processEvents()
+        page._set_timeline_mode(TimelineMode.ERROR)
+        qapp.processEvents()
+        assert page._timeline.mode is TimelineMode.ERROR
+        assert not window.grab().isNull()
+
+        # And in every scene mode.
+        for mode in SceneMode:
+            page._set_scene_mode(mode)
+            qapp.processEvents()
+            assert not window.grab().isNull(), mode.value
     finally:
         window.state.release_capture_service()
         window.close()

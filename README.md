@@ -19,12 +19,33 @@ gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışı
 | ZED 2i backend (RGB / derinlik / vücut takibi / SVO2) | Çalışıyor, gerçek donanımda doğrulandı |
 | Kayıt, finalize, checksum, yarım kayıt kurtarma | Çalışıyor |
 | Senkron oynatma + zaman çizelgesi | Çalışıyor |
-| Tekrar segmentasyonu (oluştur/böl/birleştir/dışla, undo/redo) | Çalışıyor |
-| Etiketleme + autosave | Çalışıyor |
+| Hareket segmentasyonu (oluştur/böl/birleştir/dışla, undo/redo) | Çalışıyor |
+| İki seviyeli etiketleme (hareket + zamansal hata aralığı) | Çalışıyor |
+| Etiketleme sırasında hata türü oluşturma | Çalışıyor |
+| Autosave + undo/redo | Çalışıyor |
 | Dataset paneli + kalite bulguları | Çalışıyor |
 | Sürümlü export (manifest / spec / mapping / fingerprint / doğrulama) | Çalışıyor |
 | KineSynthV3 26-eklem eşleştirmesi | **Kısmi** — 23/26 eklem; 3 eklem eşleşmiyor ve NaN yazılıyor |
 | Otomatik tekrar algılama, çok kameralı kayıt, çok uzmanlı consensus | Uygulanmadı |
+
+### Etiket modeli
+
+Etiketler **iki seviyelidir**:
+
+1. **Hareket sample'ı** — kayıt içindeki bir tekrar. Hareket türü ve **ikili**
+   doğru/yanlış kararı taşır. Bir kayıt birden çok hareket içerebilir; her biri
+   ayrı bir export örneği olur.
+2. **Hata aralığı** — seçili hareketin *içinde*, hatanın göründüğü zaman
+   aralığı. Bir aralık tek bir hata sınıfı taşır. Aynı sınıf hareket boyunca
+   tekrarlanabilir, farklı sınıflar çakışabilir (aynı anda iki hata),
+   fakat hiçbir aralık ait olduğu hareketin dışına çıkamaz.
+
+Bu, ileride eğitilecek modelin yalnızca "hatalı mı?" değil "hata hareketin
+neresinde?" sorusunu da öğrenebilmesi içindir.
+
+**Hareket fazı kavramı kaldırılmıştır.** Eski kayıtlardaki faz değerleri
+silinmez; `legacy` bloğunda saklanır fakat arayüzde ve yeni export
+sözleşmesinde yer almaz.
 
 ---
 
@@ -77,7 +98,8 @@ Sol gezinme çubuğunda sekiz çalışma alanı var (`Ctrl+1` … `Ctrl+8`,
 2. **Projeler ve Protokoller** — proje oluştur/aç, çekim planı tanımla.
 3. **Katılımcılar ve Oturumlar** — anonim katılımcı (`P0001`), oturum formu.
 4. **Capture** — canlı RGB/derinlik, 3B iskelet, ön kontrol paneli, kayıt.
-5. **İnceleme ve Etiketleme** — senkron oynatma, zaman çizelgesi, tekrarlar, etiketler.
+5. **İnceleme ve Etiketleme** — senkron oynatma, iki modlu zaman çizelgesi,
+   hareket ve hata etiketleri.
 6. **Dataset** — bileşim, filtreler, kalite bulguları.
 7. **Export** — sürümlü dataset yayını.
 8. **Ayarlar ve Tanılama** — tercihler, yakalama profili, etiket şeması, tanı.
@@ -93,19 +115,38 @@ Sol gezinme çubuğunda sekiz çalışma alanı var (`Ctrl+1` … `Ctrl+8`,
 
 Metin alanına yazarken bu kısayollar tetiklenmez.
 
+### Etiketleme akışı
+
+1. Kaydı oynatın veya zaman çizelgesinde gezinin.
+2. **Hareket modunda** (F1) HAREKET şeridinde sürükleyerek bir tekrar çizin.
+3. Hareketi seçin, gerekirse sadece onu döngüde oynatıp sınırlarını düzeltin.
+4. Hareket türünü ve doğru/yanlış kararını verin (`1` / `2`).
+5. Hareket yanlışsa **hata moduna** (F2 veya `E`) geçin, HATA şeridinde hatanın
+   göründüğü aralığı çizin ve hata türünü seçin.
+6. Aynı harekete başka hata aralıkları ekleyin, sonra sonraki harekete geçin.
+
+Aranan hata türü yoksa, adı yazıp Enter'a basmak yeni türü projeye kalıcı
+olarak ekler ve seçili aralığa atar; ekrandan çıkmanız gerekmez.
+
 ### İnceleme kısayolları
 
 | Tuş | İşlem |
 |---|---|
 | `Boşluk` | Oynat / duraklat |
 | `,` / `.` | Bir kare geri / ileri |
-| `N` | Konumda yeni tekrar |
-| `S` | Seçili tekrarı böl |
+| `F1` / `F2` | Hareket modu / hata modu |
+| `N` | Konumda yeni hareket |
+| `E` | Konumda yeni hata aralığı |
+| `S` | Seçili hareketi böl |
 | `X` | Dışla / geri al |
-| `C` | Önceki tekrarın etiketini kopyala |
-| `1`–`4` | Doğru / Hatalı / Kararsız / Etiketlenmedi |
+| `C` | Önceki hareketin etiketini kopyala |
+| `1` / `2` | Doğru / Hatalı |
+| `Ctrl+F` | Hata türü aramasına odaklan |
+| `Ctrl+1`/`2`/`3` | RGB / İskelet / RGB + İskelet |
 | `Ctrl+Z`, `Ctrl+Y` | Geri al / yinele |
 | `Ctrl+S` | Hemen kaydet |
+
+Metin alanına yazarken bu kısayollar tetiklenmez.
 
 ---
 
@@ -125,7 +166,7 @@ dataset_root/
     │           ├── raw/capture.svo2            # ZED native kayıt (değişmez)
     │           ├── derived/skeleton.jsonl      # kare başına iskelet (append-safe)
     │           ├── derived/proxy.mp4           # inceleme için küçültülmüş kopya
-    │           ├── annotations/segments.json   # insan kararları (sidecar)
+    │           ├── annotations/segments.json   # insan kararları (sidecar, v2)
     │           ├── quality/quality.json        # ölçülen kalite metrikleri
     │           └── checksums.json
     └── releases/dataset_v001/ ...
@@ -145,6 +186,14 @@ dataset_root/
   açılışta bulunur ve kurtarılabilir.
 - **Uzun yol desteği.** Windows 260 karakter sınırı `\\?\` önekiyle aşılır
   (`kinecapture.core.paths`).
+- **Kare sınırları tek sözleşme.** `start_frame` / `end_frame` her yerde
+  `derived/skeleton.jsonl` kare listesindeki 0 tabanlı konumdur ve **her iki uç
+  dahildir**. Arayüz, sidecar ve export aynı anlamı kullanır.
+- **Eski etiketler bozulmaz.** v1 sidecar okunabilir; okuma sırasında dosya
+  **yeniden yazılmaz**. Yerini yitiren alanlar (`movement_phase`, `severity`,
+  `affected_joints`, eski durumlar) `legacy` bloğunda korunur. Belirsiz bir
+  `uncertain` kararı kesin bir doğru/yanlış'a **çevrilmez**; etiketlenmemiş
+  sayılır ve orijinali kaydedilir.
 
 ---
 
@@ -154,7 +203,7 @@ Her sürüm (`dataset_v001`, `dataset_v002`, …) şunları içerir:
 
 | Dosya | İçerik |
 |---|---|
-| `samples/*.npz` | Tekrar başına `float32 [T, J, 3]` + güven + kare indeksi + kamera zaman damgası |
+| `samples/*.npz` | Hareket başına `float32 [T, J, 3]` + güven + kare indeksi + kamera zaman damgası + hata aralıkları |
 | `manifest.json` | Örnek listesi, ilişkiler, provenance, dizi sözleşmesi |
 | `skeleton_spec.json` | Eklem adları, sırası, kenarlar, koordinat sistemi, birim |
 | `label_mapping.json` | Sınıf kodları ve sabit indeksleri |
@@ -165,6 +214,52 @@ Her sürüm (`dataset_v001`, `dataset_v002`, …) şunları içerir:
 **Ham koordinatlar yazılır.** Root centering, ölçek normalizasyonu,
 interpolasyon ve augmentation uygulanmaz — bunlar eğitim katmanına aittir.
 Görülemeyen eklem NaN kalır.
+
+#### Etiket sözleşmesi
+
+Her örnek (bir hareket sample'ı) şunları taşır:
+
+| Alan | Anlam |
+|---|---|
+| `exercise` | Hareket türü kodu |
+| `correctness` | `correct` veya `incorrect` — **ikili** |
+| `error_intervals[]` | Zamansal hata aralıkları (0 veya daha fazla) |
+
+Her hata aralığı hem **mutlak** (kayıt içi) hem **göreli** (dizi içi) konum
+taşır, böylece tüketici tahmin yürütmez:
+
+```jsonc
+{
+  "error_code": "diz-ice-cokuyor",
+  "class_index": 0,             // label_mapping.error_types.code_to_index
+  "start_position": 43,          // kayıt akışındaki mutlak konum
+  "end_position": 55,
+  "relative_start": 4,           // joints_xyz[4 : 12+1] tam olarak bu aralık
+  "relative_end": 12,
+  "num_frames": 9,
+  "start_camera_frame": 46,      // kameranın kendi kare numarası
+  "end_camera_frame": 58,
+  "start_timestamp_ns": 1787...,
+  "end_timestamp_ns": 1787...
+}
+```
+
+`.npz` içinde ayrıca iki hazır hedef bulunur:
+
+- `error_intervals` — `int32 [K, 3]` = `(class_index, relative_start, relative_end)`,
+  her iki uç dahil.
+- `error_multi_hot` — `uint8 [T, C]`; sütun sırası `label_mapping` ile aynıdır.
+  Çakışan aralıklar aynı karede birden çok sütunu 1 yapar.
+
+Doğrulama raporu yetim aralıkları, hareket dışına taşanları, bilinmeyen hata
+kodlarını, ters/boş aralıkları, doğruluk-hata çelişkilerini ve manifest-dizi
+uzunluğu uyuşmazlıklarını yakalar. Fingerprint hata sınıflarına ve aralık
+sınırlarına duyarlıdır: bir aralığı eklemek, silmek, taşımak veya yeniden
+sınıflandırmak sürüm parmak izini değiştirir.
+
+**Export'a ne girer?** Ekranda "hazır" görünen hareketler — ne eksiği ne
+fazlası. Aynı kural (`evaluate_sample`) hem arayüzü hem exportu besler.
+Dışlanan her şey nedeniyle birlikte `excluded.json` içine yazılır.
 
 `participant_id`, `session_id` ve `take_id` her örnekte korunur; katılımcı
 bazlı ayrım yapılabilsin ve rastgele split sızıntısı fark edilebilsin diye.
@@ -219,17 +314,21 @@ Domain                 domain/ (Qt ve pyzed içermez)
 conda run -n KineSynth python -m pytest -k export
 ```
 
-**223 test, tamamı geçiyor** (~29 s). Testler gerçek kamera gerektirmez ve
+**314 test, tamamı geçiyor** (~93 s). Testler gerçek kamera gerektirmez ve
 gerçek zaman beklemez; GUI testleri `QT_QPA_PLATFORM=offscreen` ile çalışır.
 
 Kapsam: ortam ve opsiyonel `pyzed` importu, config doğrulama, domain
 shape/dtype, ZED iskelet tabloları, eklem eşleştirme, mock determinizmi,
 çok gövde ve takip kaybı senaryoları, state machine, capture servisi,
 atomik yazım ve overwrite koruması, checksum, yarım kayıt kurtarma,
-oynatma, segmentasyon, etiketleme, undo/redo, autosave, dataset index,
-export manifest/fingerprint/doğrulama, iptal ve hata atomikliği,
-ZED gövde dönüşümü (donanımsız stub ile), GUI kurulumu ve temalar,
-ve her özel widget ile her sayfanın gerçekten çizdirilmesi (paint testleri).
+oynatma, hareket segmentasyonu, hata aralıkları (tek/çok/tekrarlı/çakışan),
+aralığın hareket dışına çıkamaması, hareket sınırı değişince güvenli davranış,
+etiketleme sırasında hata türü oluşturma ve tekrar adı kontrolü,
+undo/redo, autosave, eski v1 annotation JSON'unun kayıpsız okunması,
+dataset index, export manifest/mapping/fingerprint/doğrulama, iptal ve hata
+atomikliği, ZED gövde dönüşümü (donanımsız stub ile), RGB/iskelet/bindirilmiş
+görünüm modları, iki modlu zaman çizelgesi ve her sayfanın gerçekten
+çizdirilmesi (paint testleri).
 
 ---
 

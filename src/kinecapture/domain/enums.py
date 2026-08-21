@@ -118,21 +118,66 @@ class SegmentStatus(str, Enum):
 
 
 class Correctness(str, Enum):
-    """Coarse correctness judgement for a repetition."""
+    """Whether a movement sample was performed correctly.
+
+    The judgement is **binary** once a human has made it. ``UNLABELLED`` is a
+    working state, not a third kind of movement: it means nobody has decided
+    yet, and such a sample is never exported.
+
+    Legacy sidecars may contain ``uncertain`` or ``unknown``. Both are read back
+    as :attr:`UNLABELLED` - an undecided label must never be silently promoted
+    into a definite one - and the original value is preserved in the sample's
+    ``legacy`` block.
+    """
 
     CORRECT = "correct"
     INCORRECT = "incorrect"
-    UNCERTAIN = "uncertain"
-    UNKNOWN = "unknown"
+    UNLABELLED = "unlabelled"
+
+    @property
+    def is_decided(self) -> bool:
+        return self is not Correctness.UNLABELLED
+
+    @classmethod
+    def parse(cls, value: object) -> "Correctness":
+        """Read any historical value, defaulting to UNLABELLED."""
+        if isinstance(value, cls):
+            return value
+        text = str(value or "").strip().lower()
+        if text == "correct":
+            return cls.CORRECT
+        if text == "incorrect":
+            return cls.INCORRECT
+        # "uncertain", "unknown", "", anything unrecognised.
+        return cls.UNLABELLED
 
 
-class AnnotationStatus(str, Enum):
-    """Review state of an annotation record."""
+class SampleReadiness(str, Enum):
+    """Why a movement sample is, or is not, ready to be exported.
 
-    DRAFT = "draft"
-    REVIEWED = "reviewed"
-    APPROVED = "approved"
+    This is *derived* from the sample's content rather than stored, so the
+    screen's notion of "labelled" and the exporter's notion of "eligible" can
+    never drift apart - there is exactly one rule, in
+    :func:`kinecapture.domain.project.evaluate_sample`.
+    """
+
+    #: Fully labelled and internally consistent.
+    READY = "ready"
+    #: No exercise chosen, or correctness not decided.
+    UNLABELLED = "unlabelled"
+    #: Marked incorrect but no error interval has been localised yet.
+    NEEDS_ERROR_INTERVAL = "needs_error_interval"
+    #: Marked correct yet carries error intervals - a contradiction.
+    CONTRADICTION = "contradiction"
+    #: Has an interval that is reversed, empty, outside the sample, or whose
+    #: error class is not in the project schema.
+    INVALID_INTERVAL = "invalid_interval"
+    #: Deliberately kept out of the dataset by the user.
     EXCLUDED = "excluded"
+
+    @property
+    def is_ready(self) -> bool:
+        return self is SampleReadiness.READY
 
 
 class ConsentStatus(str, Enum):
@@ -156,7 +201,6 @@ class HealthLevel(str, Enum):
 
 
 __all__ = [
-    "AnnotationStatus",
     "BackendKind",
     "CaptureMode",
     "CaptureState",
@@ -165,6 +209,7 @@ __all__ = [
     "Correctness",
     "DataOrigin",
     "HealthLevel",
+    "SampleReadiness",
     "SegmentSource",
     "SegmentStatus",
     "TakeQuality",

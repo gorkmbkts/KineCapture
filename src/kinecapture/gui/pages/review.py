@@ -1,12 +1,22 @@
-"""Review and label: synchronised playback, repetition editing, annotation.
+"""Review and label: playback, movement segmentation, error localisation.
+
+The screen is organised around the two-level label model, and the mode switch
+is the spine of it:
+
+* **Hareket modu** - draw and adjust movement samples across the take, then give
+  each one an exercise and a binary correct/incorrect verdict.
+* **Hata modu** - with a movement selected, draw error intervals inside it and
+  assign each one an error class.
+
+The mode is always visible, the selected movement is always visible, and the
+timeline masks everything outside it while in error mode, so it is never
+ambiguous whether a drag is creating a movement or an error.
 
 Playback is driven by a ``QTimer``, never a blocking loop, so the window stays
-responsive at any speed and the user can scrub while it plays.
-
-Video and skeleton are advanced from the *same* position index and the elapsed
-time shown comes from the recorded camera timestamps, so a dropped frame appears
-as a gap in the timeline rather than being smoothed away by an assumed frame
-rate.
+responsive at any speed and the user can scrub while it plays. Video and
+skeleton advance from the *same* position index, and the elapsed time shown
+comes from the recorded camera timestamps, so a dropped frame appears as a gap
+rather than being smoothed away by an assumed frame rate.
 """
 
 from __future__ import annotations
@@ -17,8 +27,8 @@ import numpy as np
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QComboBox,
-    QDoubleSpinBox,
     QHBoxLayout,
     QLineEdit,
     QListWidget,
@@ -33,14 +43,13 @@ from PySide6.QtWidgets import (
 from kinecapture.annotations.repository import AnnotationRepository
 from kinecapture.core.errors import KineCaptureError
 from kinecapture.domain.enums import (
-    AnnotationStatus,
     Correctness,
+    SampleReadiness,
     SegmentStatus,
     TakeQuality,
 )
 from kinecapture.domain.labels import LabelSchema
-from kinecapture.domain.project import RepetitionSegment, Take
-from kinecapture.playback.take_reader import LoadedTake, load_take
+from kinecapture.domain.project import ErrorInterval, MovementSample
 from kinecapture.gui.icons import get_icon
 from kinecapture.gui.pages.base import Page, scrollable
 from kinecapture.gui.state import AppState
@@ -54,35 +63,42 @@ from kinecapture.gui.widgets.common import (
     make_button,
     make_label,
 )
-from kinecapture.gui.widgets.skeleton_view import VIEW_PRESETS, SkeletonView3D
-from kinecapture.gui.widgets.timeline import TimelineWidget
-from kinecapture.gui.widgets.video_view import VideoView
-
-_CORRECTNESS_ORDER = (
-    Correctness.CORRECT,
-    Correctness.INCORRECT,
-    Correctness.UNCERTAIN,
-    Correctness.UNKNOWN,
+from kinecapture.gui.widgets.error_picker import ErrorClassPicker
+from kinecapture.gui.widgets.scene_view import SceneMode, SceneView
+from kinecapture.gui.widgets.skeleton_view import VIEW_PRESETS
+from kinecapture.gui.widgets.timeline import (
+    TimelineMode,
+    TimelineWidget,
+    error_class_colour,
 )
-
-_STATUS_LABELS = {
-    AnnotationStatus.DRAFT: "Taslak",
-    AnnotationStatus.REVIEWED: "İncelendi",
-    AnnotationStatus.APPROVED: "Onaylandı",
-    AnnotationStatus.EXCLUDED: "Dışlandı",
-}
+from kinecapture.playback.take_reader import LoadedTake, load_take
 
 _PLAYBACK_SPEEDS = (0.25, 0.5, 1.0, 1.5, 2.0, 4.0)
 
+#: Icon, short label and colour role for each readiness state.
+_READINESS_PRESENTATION = {
+    SampleReadiness.READY: ("check", "Hazır", "success"),
+    SampleReadiness.UNLABELLED: ("edit", "Etiketlenmedi", "text_muted"),
+    SampleReadiness.NEEDS_ERROR_INTERVAL: (
+        "target",
+        "Hata aralığı bekliyor",
+        "warning",
+    ),
+    SampleReadiness.CONTRADICTION: ("warning", "Çelişki", "danger"),
+    SampleReadiness.INVALID_INTERVAL: ("error", "Geçersiz aralık", "danger"),
+    SampleReadiness.EXCLUDED: ("eye", "Dışlandı", "text_muted"),
+}
+
 
 class ReviewPage(Page):
-    """Playback, repetition segmentation and labelling for one take."""
+    """Playback, movement segmentation and two-level labelling for one take."""
 
     navigate_requested = Signal(str)
 
     title = "İnceleme ve Etiketleme"
     description = (
-        "Kaydı senkron oynatın, tekrar aralıklarını düzenleyin ve etiketleyin."
+        "Hareketleri işaretleyin, doğru/yanlış kararını verin ve hatalı "
+        "hareketlerde hatanın tam olarak nerede olduğunu gösterin."
     )
     icon = "review"
 
@@ -96,9 +112,11 @@ class ReviewPage(Page):
         self._speed = 1.0
         self._loop_selected = False
         self._suppress_form = False
+        self._selected_sample_id: Optional[str] = None
+        self._selected_interval_id: Optional[str] = None
 
         self._take_selector = QComboBox()
-        self._take_selector.setMinimumWidth(320)
+        self._take_selector.setMinimumWidth(300)
         self._take_selector.currentIndexChanged.connect(self._take_selected)
         self.header.add_action(make_label("Kayıt", role="caption"))
         self.header.add_action(self._take_selector)
@@ -125,22 +143,17 @@ class ReviewPage(Page):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_viewer(theme))
-        # The side column carries take details, the repetition list and the
-        # whole annotation form - more than fits at 1366x768. Scrolling it keeps
-        # every card at its natural height instead of crushing all of them.
         splitter.addWidget(scrollable(self._build_side(theme)))
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([860, 500])
+        splitter.setSizes([820, 540])
         body.addWidget(splitter, 1)
 
-        body.addWidget(self._build_transport(theme))
         body.addWidget(self._build_timeline(theme))
         self.content.addWidget(self._body, 1)
 
         self._play_timer = QTimer(self)
         self._play_timer.timeout.connect(self._advance)
-
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
         self._autosave_timer.timeout.connect(self._autosave)
@@ -149,103 +162,166 @@ class ReviewPage(Page):
         state.dataset_changed.connect(self._reload_take_list)
         state.review_requested.connect(self.open_take)
         self._set_empty(True)
+        self._sync_mode_ui()
 
     # --------------------------------------------------------------- layout
     def _build_viewer(self, theme: Theme) -> QWidget:
-        wrapper = QWidget()
-        layout = QVBoxLayout(wrapper)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(theme.space_sm)
+        card = Card("Görüntü", theme=theme, icon="camera")
 
-        views = QSplitter(Qt.Orientation.Horizontal)
+        self._mode_buttons: dict[SceneMode, QWidget] = {}
+        group = QButtonGroup(self)
+        group.setExclusive(True)
+        for mode in SceneMode:
+            button = make_button(mode.label, icon=mode.icon, theme=theme)
+            button.setCheckable(True)
+            button.setToolTip(f"Görüntü modu: {mode.label}")
+            button.clicked.connect(lambda _=False, m=mode: self._set_scene_mode(m))
+            group.addButton(button)
+            card.add_header_widget(button)
+            self._mode_buttons[mode] = button
+        self._mode_buttons[SceneMode.OVERLAY].setChecked(True)
 
-        video_card = Card("Görüntü", theme=theme, icon="camera")
-        self._video = VideoView(theme, placeholder_text="Proxy video yok")
-        self._overlay_toggle = make_button("Bindirme", icon="skeleton", theme=theme)
-        self._overlay_toggle.setCheckable(True)
-        self._overlay_toggle.setChecked(True)
-        self._overlay_toggle.toggled.connect(self._video.set_overlay_enabled)
-        video_card.add_header_widget(self._overlay_toggle)
-        video_card.add_widget(self._video, 1)
-        views.addWidget(video_card)
+        self._scene = SceneView(theme, mode=SceneMode.OVERLAY)
+        card.add_widget(self._scene, 1)
 
-        skeleton_card = Card("3B iskelet", theme=theme, icon="skeleton")
+        controls = QHBoxLayout()
+        controls.setSpacing(theme.space_sm)
         self._preset_selector = QComboBox()
         for preset in VIEW_PRESETS:
             self._preset_selector.addItem(preset.label, preset.key)
         self._preset_selector.setCurrentIndex(2)
         self._preset_selector.currentIndexChanged.connect(
-            lambda: self._skeleton.set_preset(self._preset_selector.currentData())
+            lambda: self._scene.set_skeleton_preset(self._preset_selector.currentData())
         )
-        skeleton_card.add_header_widget(self._preset_selector)
+        controls.addWidget(make_label("3B görünüm", role="caption"))
+        controls.addWidget(self._preset_selector)
+
         self._center_toggle = make_button("Merkezle", icon="target", theme=theme)
         self._center_toggle.setCheckable(True)
         self._center_toggle.setChecked(True)
         self._center_toggle.setToolTip(
             "Yalnızca görüntüleme için kök merkezleme; ham veri değişmez."
         )
-        skeleton_card.add_header_widget(self._center_toggle)
-        self._skeleton = SkeletonView3D(theme)
-        self._center_toggle.toggled.connect(self._skeleton.set_root_centered)
-        skeleton_card.add_widget(self._skeleton, 1)
-        views.addWidget(skeleton_card)
+        self._center_toggle.toggled.connect(self._scene.set_root_centered)
+        controls.addWidget(self._center_toggle)
 
-        views.setSizes([540, 460])
-        layout.addWidget(views, 1)
-        return wrapper
+        controls.addStretch(1)
+        self._body_selector = QComboBox()
+        self._body_selector.currentIndexChanged.connect(self._redraw)
+        controls.addWidget(make_label("Gövde", role="caption"))
+        controls.addWidget(self._body_selector)
+
+        container = QWidget()
+        container.setLayout(controls)
+        card.add_widget(container)
+        return card
 
     def _build_side(self, theme: Theme) -> QWidget:
         wrapper = QWidget()
-        wrapper.setMinimumWidth(400)
+        wrapper.setMinimumWidth(430)
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.space_md)
 
-        info_card = Card("Kayıt bilgisi", theme=theme, icon="info")
-        self._take_chip = StatusChip("-", theme=theme, icon="info")
-        info_card.add_header_widget(self._take_chip)
-        self._take_details = KeyValueList(theme)
-        info_card.add_widget(self._take_details)
-        quality_row = QHBoxLayout()
-        self._quality_selector = QComboBox()
-        for quality in TakeQuality:
-            self._quality_selector.addItem(quality.value, quality.value)
-        self._quality_selector.currentIndexChanged.connect(self._quality_changed)
-        quality_row.addWidget(make_label("Kalite kararı", role="caption"))
-        quality_row.addWidget(self._quality_selector, 1)
-        quality_container = QWidget()
-        quality_container.setLayout(quality_row)
-        info_card.add_widget(quality_container)
-        layout.addWidget(info_card)
+        self._side_layout = layout
+        layout.addWidget(self._build_mode_card(theme))
+        layout.addWidget(self._build_movement_card(theme))
+        layout.addWidget(self._build_error_card(theme))
+        layout.addWidget(self._build_take_card(theme))
+        layout.addStretch(1)
+        return wrapper
 
-        rep_card = Card(
-            "Tekrarlar",
-            subtitle="Zaman çizelgesinde sürükleyerek oluşturun ve düzenleyin.",
-            theme=theme,
-            icon="list",
+    def _order_side_cards(self, editing_errors: bool) -> None:
+        """Put the active mode's card directly under the mode switch.
+
+        Scrolling to reach the tool the user just switched to is the one thing
+        this column must never do, and at 1366x768 there is only room for one
+        expanded card above the fold.
+        """
+        first = self._error_card if editing_errors else self._movement_card
+        second = self._movement_card if editing_errors else self._error_card
+        if self._side_layout.indexOf(first) == 1:
+            return
+        for card in (first, second):
+            self._side_layout.removeWidget(card)
+        self._side_layout.insertWidget(1, first)
+        self._side_layout.insertWidget(2, second)
+
+    def _build_mode_card(self, theme: Theme) -> QWidget:
+        """The spine of the screen: which level am I editing?"""
+        card = Card(theme=theme)
+        row = QHBoxLayout()
+        row.setSpacing(theme.space_sm)
+
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._timeline_mode_buttons: dict[TimelineMode, QWidget] = {}
+        for mode, icon, tip in (
+            (
+                TimelineMode.MOVEMENT,
+                "list",
+                "Kayıttaki hareket tekrarlarını çizin ve düzenleyin (F1)",
+            ),
+            (
+                TimelineMode.ERROR,
+                "target",
+                "Seçili hareketin İÇİNDE hatanın göründüğü aralıkları işaretleyin (F2)",
+            ),
+        ):
+            button = make_button(mode.label, icon=icon, theme=theme, tooltip=tip)
+            button.setCheckable(True)
+            button.clicked.connect(lambda _=False, m=mode: self._set_timeline_mode(m))
+            self._mode_group.addButton(button)
+            row.addWidget(button)
+            self._timeline_mode_buttons[mode] = button
+        self._timeline_mode_buttons[TimelineMode.MOVEMENT].setChecked(True)
+        row.addStretch(1)
+
+        container = QWidget()
+        container.setLayout(row)
+        card.add_widget(container)
+
+        self._mode_hint = make_label("", role="muted")
+        self._mode_hint.setWordWrap(True)
+        self._mode_hint.setMaximumHeight(34)
+        card.add_widget(self._mode_hint)
+        return card
+
+    def _build_movement_card(self, theme: Theme) -> QWidget:
+        card = Card("Hareketler", theme=theme, icon="list")
+        self._movement_progress = StatusChip("0/0 hazır", theme=theme, icon="check")
+        card.add_header_widget(self._movement_progress)
+
+        self._sample_list = QListWidget()
+        self._sample_list.setMinimumHeight(96)
+        self._sample_list.currentItemChanged.connect(
+            lambda current, _: self._sample_row_selected(current)
         )
-        self._segment_list = QListWidget()
-        self._segment_list.setMinimumHeight(150)
-        self._segment_list.currentItemChanged.connect(
-            lambda current, _: self._segment_selected(current)
-        )
-        rep_card.add_widget(self._segment_list, 1)
+        card.add_widget(self._sample_list, 1)
+
+        # Everything below collapses while the user is working on error
+        # intervals, so the tools for the active mode are never below the fold.
+        self._movement_detail = QWidget()
+        detail = QVBoxLayout(self._movement_detail)
+        detail.setContentsMargins(0, 0, 0, 0)
+        detail.setSpacing(theme.space_sm)
+        card.add_widget(self._movement_detail)
 
         buttons = QHBoxLayout()
         for text, icon, handler, tooltip in (
-            ("Ekle", "add", self._create_segment_here, "Oynatma konumunda yeni tekrar (N)"),
-            ("Böl", "split", self._split_segment, "Seçili tekrarı konumdan böl (S)"),
-            ("Birleştir", "merge", self._merge_segments, "Seçiliyi sonrakiyle birleştir"),
+            ("Ekle", "add", self._create_sample_here, "Konumda yeni hareket (N)"),
+            ("Böl", "split", self._split_sample, "Seçili hareketi konumdan böl (S)"),
+            ("Birleştir", "merge", self._merge_samples, "Seçiliyi sonrakiyle birleştir"),
             ("Dışla", "eye", self._toggle_exclude, "Datasetten çıkar / geri al (X)"),
-            ("Sil", "trash", self._delete_segment, "Tekrar aralığını sil"),
+            ("Sil", "trash", self._delete_sample, "Hareket aralığını sil"),
         ):
             button = make_button(text, icon=icon, theme=theme, tooltip=tooltip)
             button.clicked.connect(handler)
             buttons.addWidget(button)
         buttons.addStretch(1)
-        button_container = QWidget()
-        button_container.setLayout(buttons)
-        rep_card.add_widget(button_container)
+        container = QWidget()
+        container.setLayout(buttons)
+        detail.addWidget(container)
 
         extra = QHBoxLayout()
         markers_button = make_button(
@@ -254,119 +330,60 @@ class ReviewPage(Page):
             theme=theme,
             tooltip="Kayıt sırasında bırakılan marker'ları sınır olarak kullan",
         )
-        markers_button.clicked.connect(self._segments_from_markers)
+        markers_button.clicked.connect(self._samples_from_markers)
         extra.addWidget(markers_button)
-        self._loop_button = make_button(
-            "Seçiliyi döngüle", icon="refresh", theme=theme
-        )
+        self._loop_button = make_button("Seçiliyi döngüle", icon="refresh", theme=theme)
         self._loop_button.setCheckable(True)
         self._loop_button.toggled.connect(self._toggle_loop)
         extra.addWidget(self._loop_button)
         extra.addStretch(1)
         extra_container = QWidget()
         extra_container.setLayout(extra)
-        rep_card.add_widget(extra_container)
-        layout.addWidget(rep_card)
+        detail.addWidget(extra_container)
 
-        layout.addWidget(self._build_annotation_card(theme))
-        layout.addStretch(1)
-        return wrapper
-
-    def _build_annotation_card(self, theme: Theme) -> QWidget:
-        card = Card(
-            "Etiket",
-            subtitle="Değişiklikler otomatik kaydedilir.",
-            theme=theme,
-            icon="edit",
-        )
+        # ---- the level-1 label -------------------------------------------
         self._exercise_selector = QComboBox()
         self._exercise_selector.setEditable(True)
-        self._exercise_selector.currentTextChanged.connect(self._annotation_edited)
+        self._exercise_selector.currentTextChanged.connect(self._label_edited)
         self._exercise_row = FieldRow(
-            "Egzersiz", self._exercise_selector, theme=theme, required=True
+            "Hareket türü", self._exercise_selector, theme=theme, required=True
         )
-        card.add_widget(self._exercise_row)
+        detail.addWidget(self._exercise_row)
 
-        correctness_row = QHBoxLayout()
-        self._correctness_buttons: dict[Correctness, QWidget] = {}
-        for correctness in _CORRECTNESS_ORDER:
+        verdict_row = QHBoxLayout()
+        verdict_row.setSpacing(theme.space_sm)
+        self._verdict_buttons: dict[Correctness, QWidget] = {}
+        for correctness, key in (
+            (Correctness.CORRECT, "1"),
+            (Correctness.INCORRECT, "2"),
+        ):
             button = make_button(
-                LabelSchema.label_for_correctness(correctness), theme=theme
+                f"{LabelSchema.label_for_correctness(correctness)}  ({key})",
+                theme=theme,
             )
             button.setCheckable(True)
             button.clicked.connect(
-                lambda _=False, c=correctness: self._set_correctness(c)
+                lambda _=False, c=correctness: self._set_verdict(c)
             )
-            self._correctness_buttons[correctness] = button
-            correctness_row.addWidget(button)
-        correctness_container = QWidget()
-        correctness_container.setLayout(correctness_row)
-        card.add_widget(
-            FieldRow(
-                "Değerlendirme (1-4)",
-                correctness_container,
-                theme=theme,
-                required=True,
-            )
+            self._verdict_buttons[correctness] = button
+            verdict_row.addWidget(button)
+        verdict_row.addStretch(1)
+        verdict_container = QWidget()
+        verdict_container.setLayout(verdict_row)
+        self._verdict_row = FieldRow(
+            "Doğru mu, yanlış mı?", verdict_container, theme=theme, required=True
         )
-
-        self._error_types = QLineEdit()
-        self._error_types.setPlaceholderText("Virgülle ayırın (şemada tanımlı kodlar)")
-        self._error_types.editingFinished.connect(self._annotation_edited)
-        card.add_widget(
-            FieldRow(
-                "Hata türleri",
-                self._error_types,
-                theme=theme,
-                help_text="Hata ontolojisi proje etiket şemasında tanımlanır.",
-            )
-        )
-
-        self._affected_joints = QLineEdit()
-        self._affected_joints.setPlaceholderText("Örn. left_knee, pelvis")
-        self._affected_joints.editingFinished.connect(self._annotation_edited)
-        card.add_widget(
-            FieldRow("Etkilenen eklemler", self._affected_joints, theme=theme)
-        )
-
-        detail_row = QHBoxLayout()
-        self._phase_selector = QComboBox()
-        self._phase_selector.setEditable(True)
-        self._phase_selector.currentTextChanged.connect(self._annotation_edited)
-        detail_row.addWidget(FieldRow("Hareket fazı", self._phase_selector, theme=theme))
-        self._severity = QDoubleSpinBox()
-        self._severity.setRange(0.0, 10.0)
-        self._severity.setSingleStep(0.5)
-        self._severity.setSpecialValueText("-")
-        self._severity.valueChanged.connect(lambda _: self._annotation_edited())
-        detail_row.addWidget(FieldRow("Şiddet", self._severity, theme=theme))
-        self._confidence = QDoubleSpinBox()
-        self._confidence.setRange(0.0, 1.0)
-        self._confidence.setSingleStep(0.1)
-        self._confidence.setSpecialValueText("-")
-        self._confidence.valueChanged.connect(lambda _: self._annotation_edited())
-        detail_row.addWidget(
-            FieldRow("Etiket güveni", self._confidence, theme=theme)
-        )
-        detail_container = QWidget()
-        detail_container.setLayout(detail_row)
-        card.add_widget(detail_container)
+        detail.addWidget(self._verdict_row)
 
         self._note = QPlainTextEdit()
-        self._note.setMaximumHeight(56)
-        self._note.textChanged.connect(self._annotation_edited)
-        card.add_widget(FieldRow("Not", self._note, theme=theme))
-
-        self._status_selector = QComboBox()
-        for status in AnnotationStatus:
-            self._status_selector.addItem(_STATUS_LABELS[status], status.value)
-        self._status_selector.currentIndexChanged.connect(self._annotation_edited)
-        card.add_widget(FieldRow("Durum", self._status_selector, theme=theme))
+        self._note.setMaximumHeight(44)
+        self._note.textChanged.connect(self._label_edited)
+        detail.addWidget(FieldRow("Not", self._note, theme=theme))
 
         actions = QHBoxLayout()
         for text, icon, handler, tooltip in (
-            ("Öncekini kopyala", "list", self._copy_previous, "Önceki tekrarın etiketini kopyala (C)"),
-            ("Tümüne uygula", "check", self._apply_all, "Bu etiketi tüm tekrarlara uygula"),
+            ("Öncekini kopyala", "list", self._copy_previous, "Önceki hareketin etiketi (C)"),
+            ("Tümüne uygula", "check", self._apply_all, "Bu etiketi tüm hareketlere uygula"),
             ("Geri al", "undo", self._undo, "Ctrl+Z"),
             ("Yinele", "redo", self._redo, "Ctrl+Y"),
         ):
@@ -374,27 +391,107 @@ class ReviewPage(Page):
             button.clicked.connect(handler)
             actions.addWidget(button)
         actions.addStretch(1)
+        actions_container = QWidget()
+        actions_container.setLayout(actions)
+        detail.addWidget(actions_container)
+
+        self._status_label = make_label("", role="muted")
+        self._status_label.setWordWrap(True)
+        card.add_widget(self._status_label)
+        self._movement_card = card
+        return card
+
+    def _build_error_card(self, theme: Theme) -> QWidget:
+        card = Card("Hata aralıkları", theme=theme, icon="target")
+        # The primary action lives in the header so it survives any collapse or
+        # small-screen scroll: adding an interval is the point of this card.
+        header_add = make_button(
+            "+ Hata aralığı",
+            variant="primary",
+            theme=theme,
+            tooltip="Oynatma konumunda yeni hata aralığı (E)",
+        )
+        header_add.clicked.connect(self._create_interval_here)
+        card.add_header_widget(header_add)
+        self._error_chip = StatusChip("-", theme=theme, icon="info")
+        card.add_header_widget(self._error_chip)
+
+        self._interval_list = QListWidget()
+        self._interval_list.setMinimumHeight(78)
+        self._interval_list.currentItemChanged.connect(
+            lambda current, _: self._interval_row_selected(current)
+        )
+        card.add_widget(self._interval_list, 1)
+
+        self._error_detail = QWidget()
+        detail = QVBoxLayout(self._error_detail)
+        detail.setContentsMargins(0, 0, 0, 0)
+        detail.setSpacing(theme.space_sm)
+        card.add_widget(self._error_detail)
+
+        buttons = QHBoxLayout()
+        play_button = make_button(
+            "Aralığı oynat", icon="play", theme=theme, tooltip="Seçili aralığı döngüle"
+        )
+        play_button.clicked.connect(self._loop_interval)
+        buttons.addWidget(play_button)
+        delete_button = make_button("Sil", icon="trash", theme=theme)
+        delete_button.clicked.connect(self._delete_interval)
+        buttons.addWidget(delete_button)
+        buttons.addStretch(1)
+        container = QWidget()
+        container.setLayout(buttons)
+        detail.addWidget(container)
+
+        self._picker = ErrorClassPicker(theme)
+        self._picker.class_chosen.connect(self._assign_error_class)
+        self._picker.creation_requested.connect(self._create_error_class)
+        detail.addWidget(
+            FieldRow(
+                "Hata türü",
+                self._picker,
+                theme=theme,
+                help_text=(
+                    "Yeni tür projeye kalıcı kaydolur ve diğer kayıtlarda da "
+                    "önerilir. Geri al yalnız bu atamayı geri alır, tür listede kalır."
+                ),
+            )
+        )
+        self._error_card = card
+        return card
+
+    def _build_take_card(self, theme: Theme) -> QWidget:
+        card = Card("Kayıt bilgisi", theme=theme, icon="info")
+        self._take_chip = StatusChip("-", theme=theme, icon="info")
+        card.add_header_widget(self._take_chip)
+        self._take_details = KeyValueList(theme)
+        card.add_widget(self._take_details)
+
+        row = QHBoxLayout()
+        self._quality_selector = QComboBox()
+        for quality in TakeQuality:
+            self._quality_selector.addItem(quality.value, quality.value)
+        self._quality_selector.currentIndexChanged.connect(self._quality_changed)
+        row.addWidget(make_label("Kalite kararı", role="caption"))
+        row.addWidget(self._quality_selector, 1)
+        container = QWidget()
+        container.setLayout(row)
+        card.add_widget(container)
+
         next_button = make_button(
-            "Sonraki etiketsiz",
+            "Sonraki eksik kayıt",
             variant="primary",
             icon="chevron-right",
             theme=theme,
-            tooltip="Etiketsiz bir sonraki kayda geç",
+            tooltip="Etiketi tamamlanmamış bir sonraki kayda geç",
         )
         next_button.clicked.connect(self._next_unlabelled)
-        actions.addWidget(next_button)
-        actions_container = QWidget()
-        actions_container.setLayout(actions)
-        card.add_widget(actions_container)
-
-        self._problem_label = make_label("", role="error")
-        self._problem_label.setWordWrap(True)
-        card.add_widget(self._problem_label)
-        self._annotation_card = card
+        card.add_widget(next_button)
         return card
 
     def _build_transport(self, theme: Theme) -> QWidget:
-        card = Card(theme=theme)
+        """Playback controls. Lives inside the timeline card: they are one tool,
+        and a separate card costs ~40px of vertical space a 768px screen needs."""
         row = QHBoxLayout()
         row.setSpacing(theme.space_sm)
 
@@ -417,41 +514,41 @@ class ReviewPage(Page):
         self._speed_selector.currentIndexChanged.connect(self._speed_changed)
         row.addWidget(self._speed_selector)
 
-        self._body_selector = QComboBox()
-        self._body_selector.currentIndexChanged.connect(self._redraw)
-        row.addWidget(make_label("Gövde", role="caption"))
-        row.addWidget(self._body_selector)
-
         row.addSpacing(theme.space_md)
         self._position_label = make_label("-", role="muted")
         row.addWidget(self._position_label)
         row.addStretch(1)
 
-        zoom_fit = make_button("Tümünü göster", icon="search", theme=theme)
-        zoom_fit.clicked.connect(lambda: self._timeline.zoom_to_fit())
-        row.addWidget(zoom_fit)
+        for text, icon, handler, tooltip in (
+            ("Seçiliye yakınlaş", "search", self._zoom_selected, "Seçili aralığa yakınlaş"),
+            ("Tümünü göster", "eye", lambda: self._timeline.zoom_to_fit(), ""),
+        ):
+            button = make_button(text, icon=icon, theme=theme, tooltip=tooltip)
+            button.clicked.connect(handler)
+            row.addWidget(button)
 
         container = QWidget()
         container.setLayout(row)
-        card.add_widget(container)
-        return card
+        return container
 
     def _build_timeline(self, theme: Theme) -> QWidget:
         card = Card(theme=theme)
+        card.add_widget(self._build_transport(theme))
         self._timeline = TimelineWidget(theme)
         self._timeline.position_changed.connect(self._seek)
-        self._timeline.segment_selected.connect(self._select_segment_by_id)
-        self._timeline.segment_bounds_changed.connect(self._segment_bounds_changed)
-        self._timeline.segment_create_requested.connect(self._create_segment_range)
-        self._timeline.segment_double_clicked.connect(self._zoom_to_segment)
+        self._timeline.sample_selected.connect(self._select_sample_by_id)
+        self._timeline.sample_bounds_changed.connect(self._sample_bounds_changed)
+        self._timeline.sample_create_requested.connect(self._create_sample_range)
+        self._timeline.sample_double_clicked.connect(self._zoom_to_sample)
+        self._timeline.interval_selected.connect(self._select_interval_by_id)
+        self._timeline.interval_bounds_changed.connect(self._interval_bounds_changed)
+        self._timeline.interval_create_requested.connect(self._create_interval_range)
+        self._timeline.interval_double_clicked.connect(self._select_interval_by_id)
         card.add_widget(self._timeline)
-        legend = make_label(
-            "Katmanlar: veri kapsamı · takip güveni · marker'lar · tekrarlar   —   "
-            "Sürükle: aralık oluştur/taşı · Tekerlek: yakınlaştır · Shift+Tekerlek: kaydır",
-            role="muted",
-        )
-        legend.setWordWrap(True)
-        card.add_widget(legend)
+
+        self._timeline_legend = make_label("", role="muted")
+        self._timeline_legend.setWordWrap(True)
+        card.add_widget(self._timeline_legend)
         return card
 
     def _install_shortcuts(self) -> None:
@@ -463,15 +560,21 @@ class ReviewPage(Page):
         add("Space", self._guarded(self._toggle_play))
         add(",", self._guarded(lambda: self._step(-1)))
         add(".", self._guarded(lambda: self._step(1)))
-        add("N", self._guarded(self._create_segment_here))
-        add("S", self._guarded(self._split_segment))
+        add("N", self._guarded(self._create_sample_here))
+        add("E", self._guarded(self._create_interval_here))
+        add("S", self._guarded(self._split_sample))
         add("X", self._guarded(self._toggle_exclude))
         add("C", self._guarded(self._copy_previous))
+        add("F1", self._guarded(lambda: self._set_timeline_mode(TimelineMode.MOVEMENT)))
+        add("F2", self._guarded(lambda: self._set_timeline_mode(TimelineMode.ERROR)))
+        add("1", self._guarded(lambda: self._set_verdict(Correctness.CORRECT)))
+        add("2", self._guarded(lambda: self._set_verdict(Correctness.INCORRECT)))
+        add("Ctrl+F", self._picker.focus_search)
         add("Ctrl+Z", self._undo)
         add("Ctrl+Y", self._redo)
         add("Ctrl+S", self._save_now)
-        for number, correctness in enumerate(_CORRECTNESS_ORDER, start=1):
-            add(str(number), self._guarded(lambda c=correctness: self._set_correctness(c)))
+        for index, mode in enumerate(SceneMode, start=1):
+            add(f"Ctrl+{index}", self._guarded(lambda m=mode: self._set_scene_mode(m)))
 
     def _guarded(self, handler):  # type: ignore[no-untyped-def]
         """Wrap a shortcut so it never fires while the user is typing."""
@@ -485,6 +588,100 @@ class ReviewPage(Page):
             handler()
 
         return wrapper
+
+    # ----------------------------------------------------------------- mode
+    def _set_scene_mode(self, mode: SceneMode) -> None:
+        self._scene.set_mode(mode)
+        for candidate, button in self._mode_buttons.items():
+            button.setChecked(candidate is mode)
+        # The 3D controls only mean anything in the skeleton view.
+        is_skeleton = mode is SceneMode.SKELETON
+        self._preset_selector.setEnabled(is_skeleton)
+        self._center_toggle.setEnabled(is_skeleton)
+        self._redraw()
+
+    def _set_timeline_mode(self, mode: TimelineMode) -> None:
+        if mode is TimelineMode.ERROR and self._current_sample() is None:
+            self.state.notify(
+                "Hata aralığı işaretlemek için önce bir hareket seçin.", 4000
+            )
+            self._timeline_mode_buttons[TimelineMode.MOVEMENT].setChecked(True)
+            return
+        self._timeline.set_mode(mode)
+        for candidate, button in self._timeline_mode_buttons.items():
+            button.setChecked(candidate is mode)
+        self._sync_mode_ui()
+
+    def _sync_mode_ui(self) -> None:
+        mode = self._timeline.mode
+        sample = self._current_sample()
+        if mode is TimelineMode.MOVEMENT:
+            self._mode_hint.setText(
+                "HAREKET şeridinde sürükleyerek tekrar çizin. Her tekrar bir örnek."
+            )
+            self._timeline_legend.setText(
+                "HAREKET şeridinde sürükle: tekrar çiz/taşı  ·  "
+                "Tekerlek: yakınlaştır  ·  Shift+Tekerlek: kaydır"
+            )
+        else:
+            name = f"Hareket {sample.index}" if sample else "Seçili hareket"
+            self._mode_hint.setText(
+                f"{name} İÇİNDE, HATA şeridinde sürükleyip hata türünü seçin. "
+                "Aralık hareketin dışına çıkamaz."
+            )
+            self._timeline_legend.setText(
+                "HATA şeridinde sürükle: hata aralığı çiz/taşı  ·  "
+                "Hareketin dışı maskelenir"
+            )
+        self._error_card.setEnabled(sample is not None)
+
+        # Only the active mode's editing tools stay expanded. At 1366x768 the
+        # side column cannot hold both, and burying the tool the user just
+        # switched to would be the worst possible thing to hide.
+        editing_errors = mode is TimelineMode.ERROR
+        self._movement_detail.setVisible(not editing_errors)
+        self._error_detail.setVisible(editing_errors)
+        # A collapsed list is a reference, not a workspace: three rows is plenty.
+        self._sample_list.setMaximumHeight(84 if editing_errors else 16777215)
+        self._interval_list.setMaximumHeight(84 if not editing_errors else 16777215)
+        self._order_side_cards(editing_errors)
+        self._movement_card.set_subtitle(
+            self._movement_summary() if editing_errors else ""
+        )
+        self._error_card.set_subtitle(
+            "" if editing_errors else self._error_summary()
+        )
+        self._refresh_interval_list()
+
+    def _error_summary(self) -> str:
+        """One line about the selected movement's error intervals, collapsed."""
+        sample = self._current_sample()
+        if sample is None:
+            return "Önce bir hareket seçin."
+        count = len(sample.error_intervals)
+        if not count:
+            return (
+                "Hata aralığı yok."
+                if sample.correctness is not Correctness.INCORRECT
+                else "Hatalı hareket — en az bir hata aralığı gerekli."
+            )
+        names = ", ".join(
+            self.state.label_schema.label_for_error(code)
+            for code in sample.error_codes
+        )
+        return f"{count} aralık · {names}"
+
+    def _movement_summary(self) -> str:
+        """One line describing the movement being worked on, while collapsed."""
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
+            return "Hareket seçilmedi."
+        _icon, readiness, _colour = self._readiness_chip(sample)
+        return (
+            f"Seçili: {sample.index}. hareket · "
+            f"{sample.exercise or '— tür yok'} · "
+            f"{LabelSchema.label_for_correctness(sample.correctness)} · {readiness}"
+        )
 
     # ---------------------------------------------------------------- state
     def _set_empty(self, empty: bool) -> None:
@@ -510,14 +707,18 @@ class ReviewPage(Page):
         rows = list(index.rows) if index else []
         for row in rows:
             take = row.take
-            flag = " [SENTETİK]" if take.is_synthetic else ""
-            state_flag = " [YARIM]" if take.is_recoverable_partial else ""
+            flags = []
+            if take.is_synthetic:
+                flags.append("SENTETİK")
+            if take.is_recoverable_partial:
+                flags.append("YARIM")
             label = (
                 f"{row.participant_code} · Kayıt {take.index_in_session} · "
                 f"{take.started_at[:16].replace('T', ' ')} · "
-                f"{row.repetition_count} tekrar ({row.labelled_count} etiketli)"
-                f"{flag}{state_flag}"
+                f"{row.labelled_count}/{row.movement_count} hazır"
             )
+            if flags:
+                label += "  [" + " ".join(flags) + "]"
             self._take_selector.addItem(label, take.take_id)
         self._take_selector.blockSignals(False)
         if not rows:
@@ -542,8 +743,8 @@ class ReviewPage(Page):
         ):
             self.open_take(row.take)
 
-    def open_take(self, take: Take) -> None:
-        """Load a take for review; called by the page and by other pages."""
+    def open_take(self, take) -> None:  # type: ignore[no-untyped-def]
+        """Load a take for review; called by this page and by other pages."""
         workspace = self.state.workspace
         if workspace is None:
             return
@@ -567,6 +768,8 @@ class ReviewPage(Page):
             annotator=self.state.session.operator if self.state.session else "",
         )
         self._repo.add_change_listener(self._on_repo_changed)
+        self._selected_sample_id = None
+        self._selected_interval_id = None
         self._set_empty(False)
 
         position = self._take_selector.findData(take.take_id)
@@ -579,7 +782,12 @@ class ReviewPage(Page):
         self._reload_body_selector()
         self._reload_timeline()
         self._refresh_take_info()
-        self._refresh_segment_list()
+        self._refresh_sample_list()
+        self._scene.set_video_available(
+            loaded.has_video,
+            loaded.video.unavailable_reason if loaded.video else "Proxy video yok.",
+        )
+        self._set_timeline_mode(TimelineMode.MOVEMENT)
         self._seek(0)
 
         if loaded.stream.truncated:
@@ -589,9 +797,9 @@ class ReviewPage(Page):
                 8000,
             )
         if not loaded.has_video:
-            reason = loaded.video.unavailable_reason if loaded.video else "-"
-            self._video.set_placeholder_text(
-                f"Proxy video yok ({reason}).\nİskelet oynatma çalışmaya devam eder."
+            self.state.notify(
+                "Proxy video yok; RGB modları boş görünür, İskelet modu çalışır.",
+                6000,
             )
 
     def _populate_schema_choices(self) -> None:
@@ -601,11 +809,11 @@ class ReviewPage(Page):
         self._exercise_selector.addItem("", "")
         for option in schema.exercises:
             self._exercise_selector.addItem(option.label, option.code)
-        self._phase_selector.clear()
-        self._phase_selector.addItem("")
-        for option in schema.movement_phases:
-            self._phase_selector.addItem(option.label, option.code)
         self._suppress_form = False
+        self._picker.set_schema(schema)
+        self._timeline.set_error_labels(
+            {o.code: o.label for o in schema.error_types}
+        )
 
     def _reload_body_selector(self) -> None:
         if self._loaded is None:
@@ -622,7 +830,6 @@ class ReviewPage(Page):
             return
         stream = self._loaded.stream
         tracking_id = self._body_selector.currentData()
-        coverage = stream.coverage_curve(tracking_id)
         markers = [
             stream.position_of_frame_index(int(m.get("frame_index", 0)))
             for m in stream.markers
@@ -635,11 +842,11 @@ class ReviewPage(Page):
             self._loaded.frame_count,
             fps=self._loaded.target_fps,
             markers=markers,
-            coverage=coverage,
+            coverage=stream.coverage_curve(tracking_id),
             gaps=gaps,
         )
         if self._repo is not None:
-            self._timeline.set_segments(self._repo.segments)
+            self._timeline.set_samples(self._repo.samples)
 
     def _refresh_take_info(self) -> None:
         if self._loaded is None:
@@ -668,10 +875,7 @@ class ReviewPage(Page):
                 ("Kayıt", take.take_id),
                 ("Katılımcı / oturum", f"{take.participant_id} / {take.session_id[-12:]}"),
                 ("Kare", f"{stream.frame_count} (kaydedilen {metrics.frames_written})"),
-                (
-                    "Süre",
-                    f"{stream.duration_s:.2f} sn (kamera zaman damgasından)",
-                ),
+                ("Süre", f"{stream.duration_s:.2f} sn (kamera zaman damgasından)"),
                 (
                     "FPS",
                     f"{metrics.measured_fps:.1f} ölçülen / {metrics.target_fps:.0f} hedef",
@@ -686,8 +890,7 @@ class ReviewPage(Page):
                     else "-",
                 ),
                 ("Kamera", camera.display_name if camera else "-"),
-                ("Backend", camera.backend if camera else "-"),
-                ("Native kayıt", take.files.get("native_recording", "yok")),
+                ("Proxy video", "var" if self._loaded.has_video else "yok"),
             ]
         )
         self._quality_selector.blockSignals(True)
@@ -700,10 +903,7 @@ class ReviewPage(Page):
     def _toggle_play(self) -> None:
         if self._loaded is None:
             return
-        if self._playing:
-            self._pause()
-        else:
-            self._play()
+        self._pause() if self._playing else self._play()
 
     def _play(self) -> None:
         if self._loaded is None or self._loaded.frame_count == 0:
@@ -751,9 +951,7 @@ class ReviewPage(Page):
     def _seek(self, position: int) -> None:
         if self._loaded is None:
             return
-        self._position = int(
-            np.clip(position, 0, max(0, self._loaded.frame_count - 1))
-        )
+        self._position = int(np.clip(position, 0, max(0, self._loaded.frame_count - 1)))
         self._timeline.set_position(self._position)
         self._redraw()
 
@@ -764,13 +962,12 @@ class ReviewPage(Page):
         frame = loaded.stream.frame_at(self._position)
         tracking_id = self._body_selector.currentData()
 
+        rgb = None
         if loaded.has_video and loaded.video is not None:
-            image = loaded.video.read_at(loaded.video_position_for(self._position))
-            if image is not None:
-                self._video.set_rgb(image)
-        bodies = frame.bodies if frame else ()
-        self._video.set_bodies(bodies, loaded.spec, active_id=tracking_id)
-        self._skeleton.set_bodies(bodies, loaded.spec, active_id=tracking_id)
+            rgb = loaded.video.read_at(loaded.video_position_for(self._position))
+        self._scene.set_frame(
+            rgb, frame.bodies if frame else (), loaded.spec, active_id=tracking_id
+        )
 
         if frame is not None and loaded.stream.frames:
             first = loaded.stream.frames[0].camera_timestamp_ns
@@ -779,16 +976,20 @@ class ReviewPage(Page):
                 if first and frame.camera_timestamp_ns
                 else self._position / loaded.target_fps
             )
+            inside = ""
+            sample = self._current_sample()
+            if sample is not None and sample.contains(self._position):
+                inside = f"  ·  hareket {sample.index} içinde"
             self._position_label.setText(
                 f"Konum {self._position + 1}/{loaded.frame_count}  ·  "
-                f"kayıt karesi {frame.frame_index}  ·  {elapsed:.2f} sn"
+                f"kayıt karesi {frame.frame_index}  ·  {elapsed:.2f} sn{inside}"
             )
 
-    # ------------------------------------------------------------- segments
+    # ------------------------------------------------------------ repository
     def _on_repo_changed(self) -> None:
-        self._refresh_segment_list()
+        self._refresh_sample_list()
         if self._repo is not None:
-            self._timeline.set_segments(self._repo.segments)
+            self._timeline.set_samples(self._repo.samples)
         self._mark_dirty()
 
     def _mark_dirty(self) -> None:
@@ -814,156 +1015,209 @@ class ReviewPage(Page):
         self._autosave_timer.stop()
         self._autosave()
 
-    def _refresh_segment_list(self) -> None:
+    # -------------------------------------------------------- movement list
+    def _current_sample(self) -> Optional[MovementSample]:
+        if self._repo is None or not self._selected_sample_id:
+            return None
+        return self._repo.find(self._selected_sample_id)
+
+    def _current_interval(self) -> Optional[ErrorInterval]:
+        sample = self._current_sample()
+        if sample is None or not self._selected_interval_id:
+            return None
+        return sample.interval(self._selected_interval_id)
+
+    def _readiness_chip(self, sample: MovementSample) -> tuple[str, str, str]:
+        assert self._repo is not None
+        state = self._repo.readiness(sample)
+        icon, text, colour_name = _READINESS_PRESENTATION[state]
+        return icon, text, getattr(self.theme, colour_name, self.theme.text_secondary)
+
+    def _refresh_sample_list(self) -> None:
         if self._repo is None:
             return
-        current = self._current_segment_id()
-        self._segment_list.blockSignals(True)
-        self._segment_list.clear()
-        for segment in self._repo.segments:
-            annotation = segment.annotation
-            flags = []
-            if not segment.is_active:
-                flags.append("dışlandı")
-            if annotation.is_labelled:
-                flags.append(LabelSchema.label_for_correctness(annotation.correctness))
-            else:
-                flags.append("etiketsiz")
-            label = (
-                f"{segment.index}. kare {segment.start_frame}-{segment.end_frame} "
-                f"({segment.frame_count})  ·  "
-                f"{annotation.exercise or '—'}  ·  {' / '.join(flags)}"
+        current = self._selected_sample_id
+        self._sample_list.blockSignals(True)
+        self._sample_list.clear()
+        for sample in self._repo.samples:
+            _icon, readiness_text, _colour = self._readiness_chip(sample)
+            verdict = LabelSchema.label_for_correctness(sample.correctness)
+            errors = (
+                f" · {len(sample.error_intervals)} hata aralığı"
+                if sample.error_intervals
+                else ""
             )
-            item = QListWidgetItem(label)
-            item.setData(Qt.ItemDataRole.UserRole, segment.segment_id)
-            self._segment_list.addItem(item)
-            if segment.segment_id == current:
-                self._segment_list.setCurrentItem(item)
-        self._segment_list.blockSignals(False)
+            item = QListWidgetItem(
+                f"{sample.index}. kare {sample.start_frame}-{sample.end_frame} "
+                f"({sample.frame_count})\n"
+                f"{sample.exercise or '— tür yok'} · {verdict}{errors} · {readiness_text}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, sample.sample_id)
+            self._sample_list.addItem(item)
+            if sample.sample_id == current:
+                self._sample_list.setCurrentItem(item)
+        self._sample_list.blockSignals(False)
 
-        problems = self._repo.validation_problems()
-        self._problem_label.setText(
-            "  ·  ".join(problem["message"] for problem in problems)
+        if self._timeline.mode is TimelineMode.ERROR:
+            self._movement_card.set_subtitle(self._movement_summary())
+
+        ready = self._repo.ready_count
+        total = len(self._repo.active_samples)
+        self._movement_progress.set_status(
+            f"{ready}/{total} hazır",
+            icon="check" if ready == total and total else "edit",
+            colour=self.theme.success if total and ready == total else self.theme.warning,
         )
-        self._annotation_card.set_subtitle(
-            f"{self._repo.labelled_count}/{len(self._repo.active_segments)} tekrar "
-            "etiketlendi. Değişiklikler otomatik kaydedilir."
-        )
-        self._load_annotation_form()
+        self._refresh_status_line()
+        self._load_label_form()
+        self._refresh_interval_list()
 
-    def _current_segment_id(self) -> Optional[str]:
-        item = self._segment_list.currentItem()
-        return item.data(Qt.ItemDataRole.UserRole) if item else None
-
-    def _current_segment(self) -> Optional[RepetitionSegment]:
+    def _refresh_status_line(self) -> None:
         if self._repo is None:
-            return None
-        segment_id = self._current_segment_id()
-        return self._repo.find(segment_id) if segment_id else None
+            return
+        parts: list[str] = []
+        sample = self._current_sample()
+        if sample is not None:
+            problems = self._repo.problems(sample)
+            if problems:
+                parts.append(" · ".join(p.message for p in problems))
+        structural = self._repo.validation_problems()
+        if structural:
+            parts.append(" · ".join(p["message"] for p in structural))
+        self._status_label.setText("  ".join(parts))
+        self._status_label.setProperty("role", "error" if parts else "muted")
+        from kinecapture.gui.widgets.common import restyle
 
-    def _segment_selected(self, item: Optional[QListWidgetItem]) -> None:
+        restyle(self._status_label)
+
+    def _sample_row_selected(self, item: Optional[QListWidgetItem]) -> None:
         if item is None:
             return
-        segment_id = item.data(Qt.ItemDataRole.UserRole)
-        self._timeline.set_selected(segment_id)
-        segment = self._repo.find(segment_id) if self._repo else None
-        if segment is not None:
-            self._seek(segment.start_frame)
+        self._select_sample_by_id(item.data(Qt.ItemDataRole.UserRole), from_list=True)
+
+    def _select_sample_by_id(self, sample_id: str, *, from_list: bool = False) -> None:
+        if self._repo is None:
+            return
+        self._selected_sample_id = sample_id
+        self._selected_interval_id = None
+        self._timeline.set_selected_sample(sample_id)
+        sample = self._repo.find(sample_id)
+        if sample is not None and not from_list:
+            for row in range(self._sample_list.count()):
+                item = self._sample_list.item(row)
+                if item.data(Qt.ItemDataRole.UserRole) == sample_id:
+                    self._sample_list.blockSignals(True)
+                    self._sample_list.setCurrentItem(item)
+                    self._sample_list.blockSignals(False)
+                    break
+        if sample is not None:
+            self._seek(sample.start_frame)
             if self._loop_selected:
-                self._timeline.set_loop_range((segment.start_frame, segment.end_frame))
-        self._load_annotation_form()
+                self._timeline.set_loop_range((sample.start_frame, sample.end_frame))
+        self._load_label_form()
+        self._sync_mode_ui()
+        self._refresh_status_line()
 
-    def _select_segment_by_id(self, segment_id: str) -> None:
-        for row in range(self._segment_list.count()):
-            item = self._segment_list.item(row)
-            if item.data(Qt.ItemDataRole.UserRole) == segment_id:
-                self._segment_list.setCurrentItem(item)
-                return
-
-    def _create_segment_here(self) -> None:
+    # ------------------------------------------------------ movement editing
+    def _create_sample_here(self) -> None:
         if self._repo is None or self._loaded is None:
             return
         span = max(2, int(self._loaded.target_fps))
         end = min(self._loaded.frame_count - 1, self._position + span)
-        self._create_segment_range(self._position, end)
+        self._create_sample_range(self._position, end)
 
-    def _create_segment_range(self, start: int, end: int) -> None:
+    def _create_sample_range(self, start: int, end: int) -> None:
         if self._repo is None or self._loaded is None:
             return
         frames = self._loaded.stream.frames
-        start_ts = frames[start].camera_timestamp_ns if start < len(frames) else None
-        end_ts = frames[end].camera_timestamp_ns if end < len(frames) else None
         try:
-            segment = self._repo.create_segment(
-                start, end, start_timestamp_ns=start_ts, end_timestamp_ns=end_ts
+            sample = self._repo.create_sample(
+                start,
+                end,
+                start_timestamp_ns=frames[start].camera_timestamp_ns
+                if start < len(frames)
+                else None,
+                end_timestamp_ns=frames[end].camera_timestamp_ns
+                if end < len(frames)
+                else None,
             )
         except KineCaptureError as exc:
             self.state.report_error(exc)
             return
-        self._select_segment_by_id(segment.segment_id)
+        self._select_sample_by_id(sample.sample_id)
 
-    def _segment_bounds_changed(self, segment_id: str, start: int, end: int) -> None:
+    def _sample_bounds_changed(self, sample_id: str, start: int, end: int) -> None:
         if self._repo is None:
             return
         try:
-            self._repo.update_bounds(segment_id, start, end)
+            report = self._repo.update_sample_bounds(sample_id, start, end)
         except KineCaptureError as exc:
             self.state.report_error(exc)
+            return
+        if not report.is_lossless:
+            # Never lose a localised error silently.
+            self.state.notify(report.message(), 9000)
 
-    def _split_segment(self) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+    def _split_sample(self) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
         try:
-            self._repo.split(segment.segment_id, self._position)
+            self._repo.split_sample(sample.sample_id, self._position)
         except KineCaptureError as exc:
             self.state.notify(exc.user_text(), 5000)
 
-    def _merge_segments(self) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+    def _merge_samples(self) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
-        ordered = list(self._repo.segments)
+        ordered = list(self._repo.samples)
         position = next(
-            (i for i, s in enumerate(ordered) if s.segment_id == segment.segment_id), -1
+            (i for i, s in enumerate(ordered) if s.sample_id == sample.sample_id), -1
         )
         if position < 0 or position + 1 >= len(ordered):
-            self.state.notify("Birleştirilecek bir sonraki tekrar yok.", 4000)
+            self.state.notify("Birleştirilecek bir sonraki hareket yok.", 4000)
             return
         try:
-            merged = self._repo.merge(
-                segment.segment_id, ordered[position + 1].segment_id
+            report = self._repo.merge_samples(
+                sample.sample_id, ordered[position + 1].sample_id
             )
         except KineCaptureError as exc:
             self.state.notify(exc.user_text(), 5000)
             return
-        self._select_segment_by_id(merged.segment_id)
+        self.state.notify(report.message(), 9000 if report.had_conflict else 4000)
+        self._select_sample_by_id(sample.sample_id)
 
     def _toggle_exclude(self) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
-        target = (
-            SegmentStatus.EXCLUDED if segment.is_active else SegmentStatus.ACTIVE
-        )
-        self._repo.set_status(segment.segment_id, target)
+        target = SegmentStatus.EXCLUDED if sample.is_active else SegmentStatus.ACTIVE
+        self._repo.set_sample_status(sample.sample_id, target)
 
-    def _delete_segment(self) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+    def _delete_sample(self) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
+        extra = (
+            f"\n\nBu hareketteki {len(sample.error_intervals)} hata aralığı da silinir."
+            if sample.error_intervals
+            else ""
+        )
         answer = QMessageBox.question(
             self,
-            "Tekrarı sil",
-            f"{segment.index}. tekrar aralığı silinsin mi?\n\n"
+            "Hareketi sil",
+            f"{sample.index}. hareket aralığı silinsin mi?{extra}\n\n"
             "Bu yalnızca etiket verisini siler; kayıt kareleri korunur.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
-        self._repo.delete(segment.segment_id)
+        self._repo.delete_sample(sample.sample_id)
+        self._selected_sample_id = None
+        self._refresh_sample_list()
 
-    def _segments_from_markers(self) -> None:
+    def _samples_from_markers(self) -> None:
         if self._repo is None or self._loaded is None:
             return
         stream = self._loaded.stream
@@ -974,144 +1228,331 @@ class ReviewPage(Page):
         if not positions:
             self.state.notify("Bu kayıtta marker yok.", 4000)
             return
-        created = self._repo.create_from_markers(
+        created = self._repo.create_samples_from_markers(
             positions, final_frame=self._loaded.frame_count - 1
         )
-        self.state.notify(f"{len(created)} tekrar aralığı önerildi.")
+        self.state.notify(f"{len(created)} hareket aralığı önerildi.")
 
     def _toggle_loop(self, enabled: bool) -> None:
         self._loop_selected = enabled
-        segment = self._current_segment()
-        if enabled and segment is not None:
-            self._timeline.set_loop_range((segment.start_frame, segment.end_frame))
+        sample = self._current_sample()
+        if enabled and sample is not None:
+            self._timeline.set_loop_range((sample.start_frame, sample.end_frame))
         else:
             self._timeline.set_loop_range(None)
 
-    def _zoom_to_segment(self, segment_id: str) -> None:
+    def _zoom_to_sample(self, sample_id: str) -> None:
         if self._repo is None:
             return
-        segment = self._repo.find(segment_id)
-        if segment is not None:
-            self._timeline.zoom_to_range(segment.start_frame, segment.end_frame)
+        sample = self._repo.find(sample_id)
+        if sample is not None:
+            self._timeline.zoom_to_range(sample.start_frame, sample.end_frame)
 
-    # ------------------------------------------------------------ annotation
-    def _load_annotation_form(self) -> None:
-        segment = self._current_segment()
-        self._annotation_card.setEnabled(segment is not None)
-        if segment is None:
+    def _zoom_selected(self) -> None:
+        interval = self._current_interval()
+        if self._timeline.mode is TimelineMode.ERROR and interval is not None:
+            self._timeline.zoom_to_range(interval.start_frame, interval.end_frame)
             return
-        annotation = segment.annotation
-        self._suppress_form = True
+        sample = self._current_sample()
+        if sample is not None:
+            self._timeline.zoom_to_range(sample.start_frame, sample.end_frame)
 
-        position = self._exercise_selector.findData(annotation.exercise)
+    # ----------------------------------------------------------- level-1 label
+    def _load_label_form(self) -> None:
+        sample = self._current_sample()
+        self._movement_card.setEnabled(True)
+        for widget in (self._exercise_selector, self._note):
+            widget.setEnabled(sample is not None)
+        for button in self._verdict_buttons.values():
+            button.setEnabled(sample is not None)
+        if sample is None:
+            self._suppress_form = True
+            self._exercise_selector.setCurrentIndex(0)
+            self._note.setPlainText("")
+            for button in self._verdict_buttons.values():
+                button.setChecked(False)
+            self._exercise_row.clear_error()
+            self._verdict_row.clear_error()
+            self._suppress_form = False
+            return
+
+        self._suppress_form = True
+        position = self._exercise_selector.findData(sample.exercise)
         if position >= 0:
             self._exercise_selector.setCurrentIndex(position)
         else:
-            self._exercise_selector.setCurrentText(annotation.exercise)
-        for correctness, button in self._correctness_buttons.items():
-            button.setChecked(correctness is annotation.correctness)
-        self._error_types.setText(", ".join(annotation.error_types))
-        self._affected_joints.setText(", ".join(annotation.affected_joints))
-        phase_position = self._phase_selector.findData(annotation.movement_phase)
-        if phase_position >= 0:
-            self._phase_selector.setCurrentIndex(phase_position)
-        else:
-            self._phase_selector.setCurrentText(annotation.movement_phase)
-        self._severity.setValue(annotation.severity or 0.0)
-        self._confidence.setValue(annotation.annotator_confidence or 0.0)
-        self._note.setPlainText(annotation.note)
-        self._status_selector.setCurrentIndex(
-            self._status_selector.findData(annotation.status.value)
-        )
-        self._exercise_row.set_error(
-            "" if annotation.exercise else "Egzersiz seçilmedi."
-        )
+            self._exercise_selector.setCurrentText(sample.exercise)
+        for correctness, button in self._verdict_buttons.items():
+            button.setChecked(correctness is sample.correctness)
+        self._note.setPlainText(sample.note)
         self._suppress_form = False
 
-    def _annotation_edited(self) -> None:
+        self._exercise_row.set_error("" if sample.exercise else "Hareket türü seçilmedi.")
+        self._verdict_row.set_error(
+            "" if sample.correctness.is_decided else "Doğru/yanlış kararı verilmedi."
+        )
+
+    def _label_edited(self) -> None:
         if self._suppress_form or self._repo is None:
             return
-        segment = self._current_segment()
-        if segment is None:
+        sample = self._current_sample()
+        if sample is None:
             return
         exercise = self._exercise_selector.currentData()
         if exercise is None:
             exercise = self._exercise_selector.currentText().strip()
-        self._repo.annotate(
-            segment.segment_id,
+        self._repo.label_sample(
+            sample.sample_id,
             exercise=exercise,
-            error_types=[
-                value.strip()
-                for value in self._error_types.text().split(",")
-                if value.strip()
-            ],
-            affected_joints=[
-                value.strip()
-                for value in self._affected_joints.text().split(",")
-                if value.strip()
-            ],
-            movement_phase=(
-                self._phase_selector.currentData()
-                or self._phase_selector.currentText().strip()
-            ),
-            severity=self._severity.value() or None,
-            annotator_confidence=self._confidence.value() or None,
             note=self._note.toPlainText().strip(),
-            status=AnnotationStatus(self._status_selector.currentData()),
         )
 
-    def _set_correctness(self, correctness: Correctness) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+    def _set_verdict(self, correctness: Correctness) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
-        self._repo.annotate(segment.segment_id, correctness=correctness)
-        for value, button in self._correctness_buttons.items():
+        self._repo.label_sample(sample.sample_id, correctness=correctness)
+        for value, button in self._verdict_buttons.items():
             button.setChecked(value is correctness)
+        if correctness is Correctness.INCORRECT and not sample.error_intervals:
+            # Move the user straight to the next required step.
+            self.state.notify(
+                "Hatalı olarak işaretlendi. Şimdi hatanın göründüğü aralığı "
+                "işaretleyin (F2 veya E).",
+                6000,
+            )
 
     def _copy_previous(self) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
-        ordered = list(self._repo.segments)
+        ordered = list(self._repo.samples)
         position = next(
-            (i for i, s in enumerate(ordered) if s.segment_id == segment.segment_id), 0
+            (i for i, s in enumerate(ordered) if s.sample_id == sample.sample_id), 0
         )
         if position == 0:
-            self.state.notify("Kopyalanacak önceki tekrar yok.", 4000)
+            self.state.notify("Kopyalanacak önceki hareket yok.", 4000)
             return
-        self._repo.copy_annotation_from(
-            ordered[position - 1].segment_id, segment.segment_id
+        self._repo.copy_label_from(ordered[position - 1].sample_id, sample.sample_id)
+        self.state.notify(
+            "Etiket kopyalandı. Hata aralıkları kopyalanmaz; bu harekete özgüdür.",
+            5000,
         )
-        self._load_annotation_form()
+        self._load_label_form()
 
     def _apply_all(self) -> None:
-        segment = self._current_segment()
-        if segment is None or self._repo is None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
             return
-        annotation = segment.annotation
         answer = QMessageBox.question(
             self,
             "Tümüne uygula",
-            f"'{annotation.exercise or '—'}' / "
-            f"'{LabelSchema.label_for_correctness(annotation.correctness)}' "
-            "etiketi bu kayıttaki tüm tekrarlara uygulansın mı?",
+            f"'{sample.exercise or '—'}' / "
+            f"'{LabelSchema.label_for_correctness(sample.correctness)}' "
+            "etiketi bu kayıttaki tüm hareketlere uygulansın mı?\n\n"
+            "Hata aralıkları etkilenmez.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if answer != QMessageBox.StandardButton.Yes:
             return
         count = self._repo.apply_to_all(
-            exercise=annotation.exercise, correctness=annotation.correctness
+            exercise=sample.exercise, correctness=sample.correctness
         )
-        self.state.notify(f"{count} tekrar güncellendi.")
+        self.state.notify(f"{count} hareket güncellendi.")
 
+    # ----------------------------------------------------------- level-2 label
+    def _refresh_interval_list(self) -> None:
+        sample = self._current_sample()
+        self._interval_list.blockSignals(True)
+        self._interval_list.clear()
+        if sample is None:
+            self._interval_list.addItem(
+                QListWidgetItem("Önce bir hareket seçin.")
+            )
+            self._interval_list.item(0).setFlags(Qt.ItemFlag.NoItemFlags)
+            self._interval_list.blockSignals(False)
+            self._error_chip.set_status("-", icon="info", colour=self.theme.text_muted)
+            self._picker.set_current("")
+            return
+
+        schema = self.state.label_schema
+        for interval in sample.sorted_intervals():
+            name = (
+                schema.label_for_error(interval.error_code)
+                if interval.error_code
+                else "— tür seçilmedi"
+            )
+            item = QListWidgetItem(
+                f"kare {interval.start_frame}-{interval.end_frame} "
+                f"({interval.frame_count})  ·  {name}"
+            )
+            item.setData(Qt.ItemDataRole.UserRole, interval.interval_id)
+            if interval.error_code:
+                from PySide6.QtGui import QColor
+
+                item.setForeground(QColor(error_class_colour(interval.error_code)))
+            self._interval_list.addItem(item)
+            if interval.interval_id == self._selected_interval_id:
+                self._interval_list.setCurrentItem(item)
+        if not sample.error_intervals:
+            hint = QListWidgetItem(
+                "Hata aralığı yok."
+                if sample.correctness is not Correctness.INCORRECT
+                else "Hatalı hareket — en az bir hata aralığı gerekli."
+            )
+            hint.setFlags(Qt.ItemFlag.NoItemFlags)
+            self._interval_list.addItem(hint)
+        self._interval_list.blockSignals(False)
+
+        count = len(sample.error_intervals)
+        if sample.correctness is Correctness.CORRECT and count:
+            self._error_chip.set_status(
+                "Çelişki", icon="warning", colour=self.theme.danger
+            )
+        elif sample.correctness is Correctness.INCORRECT and not count:
+            self._error_chip.set_status(
+                "Aralık gerekli", icon="target", colour=self.theme.warning
+            )
+        else:
+            self._error_chip.set_status(
+                f"{count} aralık",
+                icon="check" if count else "info",
+                colour=self.theme.success if count else self.theme.text_muted,
+            )
+
+        interval = self._current_interval()
+        self._picker.set_current(interval.error_code if interval else "")
+
+    def _interval_row_selected(self, item: Optional[QListWidgetItem]) -> None:
+        if item is None:
+            return
+        interval_id = item.data(Qt.ItemDataRole.UserRole)
+        if interval_id:
+            self._select_interval_by_id(interval_id)
+
+    def _select_interval_by_id(self, interval_id: str) -> None:
+        self._selected_interval_id = interval_id
+        self._timeline.set_selected_interval(interval_id)
+        interval = self._current_interval()
+        if interval is not None:
+            self._seek(interval.start_frame)
+            self._picker.set_current(interval.error_code)
+        self._refresh_interval_list()
+
+    def _create_interval_here(self) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None or self._loaded is None:
+            self.state.notify("Önce bir hareket seçin.", 4000)
+            return
+        span = max(2, int(self._loaded.target_fps // 3))
+        start = max(sample.start_frame, min(self._position, sample.end_frame - 1))
+        self._create_interval_range(start, min(sample.end_frame, start + span))
+
+    def _create_interval_range(self, start: int, end: int) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None or self._loaded is None:
+            return
+        frames = self._loaded.stream.frames
+        try:
+            interval = self._repo.create_error_interval(
+                sample.sample_id,
+                start,
+                end,
+                start_timestamp_ns=frames[start].camera_timestamp_ns
+                if start < len(frames)
+                else None,
+                end_timestamp_ns=frames[end].camera_timestamp_ns
+                if end < len(frames)
+                else None,
+            )
+        except KineCaptureError as exc:
+            self.state.notify(exc.user_text(), 5000)
+            return
+        self._set_timeline_mode(TimelineMode.ERROR)
+        self._select_interval_by_id(interval.interval_id)
+        self._picker.focus_search()
+        self.state.notify("Hata aralığı eklendi. Şimdi hata türünü seçin.", 5000)
+
+    def _interval_bounds_changed(self, interval_id: str, start: int, end: int) -> None:
+        sample = self._current_sample()
+        if sample is None or self._repo is None:
+            return
+        try:
+            self._repo.update_error_interval_bounds(
+                sample.sample_id, interval_id, start, end
+            )
+        except KineCaptureError as exc:
+            self.state.notify(exc.user_text(), 5000)
+
+    def _assign_error_class(self, code: str) -> None:
+        sample = self._current_sample()
+        interval = self._current_interval()
+        if sample is None or interval is None or self._repo is None:
+            self.state.notify("Önce bir hata aralığı seçin.", 4000)
+            return
+        self._repo.set_error_interval_class(
+            sample.sample_id, interval.interval_id, code
+        )
+        self._picker.clear_search()
+        self._refresh_interval_list()
+
+    def _create_error_class(self, name: str) -> None:
+        sample = self._current_sample()
+        interval = self._current_interval()
+        if self._repo is None:
+            return
+        try:
+            if sample is not None and interval is not None:
+                _updated, option = self._repo.assign_new_error_class(
+                    sample.sample_id, interval.interval_id, name
+                )
+            else:
+                option = self._repo.ensure_error_class(name)
+        except KineCaptureError as exc:
+            self.state.notify(exc.user_text(), 6000)
+            return
+        # The vocabulary changed, so every picker and the timeline captions
+        # need the new class immediately.
+        self._populate_schema_choices()
+        self._picker.clear_search()
+        self._refresh_interval_list()
+        self.state.notify(
+            f"'{option.label}' hata türü projeye eklendi ve seçili aralığa atandı."
+            if interval is not None
+            else f"'{option.label}' hata türü projeye eklendi.",
+            5000,
+        )
+
+    def _delete_interval(self) -> None:
+        sample = self._current_sample()
+        interval = self._current_interval()
+        if sample is None or interval is None or self._repo is None:
+            return
+        self._repo.delete_error_interval(sample.sample_id, interval.interval_id)
+        self._selected_interval_id = None
+        self._refresh_interval_list()
+
+    def _loop_interval(self) -> None:
+        interval = self._current_interval()
+        if interval is None:
+            self.state.notify("Önce bir hata aralığı seçin.", 4000)
+            return
+        self._timeline.set_loop_range((interval.start_frame, interval.end_frame))
+        self._seek(interval.start_frame)
+        self._play()
+
+    # ------------------------------------------------------------- undo/redo
     def _undo(self) -> None:
         if self._repo is not None and self._repo.undo():
-            self._load_annotation_form()
+            self._load_label_form()
+            self._refresh_interval_list()
 
     def _redo(self) -> None:
         if self._repo is not None and self._repo.redo():
-            self._load_annotation_form()
+            self._load_label_form()
+            self._refresh_interval_list()
 
+    # ---------------------------------------------------------------- take
     def _quality_changed(self) -> None:
         workspace = self.state.workspace
         if self._loaded is None or workspace is None:
@@ -1133,13 +1574,12 @@ class ReviewPage(Page):
         if index is None:
             return
         self._save_now()
-        rows = index.needing_review()
         current = self._loaded.take.take_id if self._loaded else None
-        for row in rows:
+        for row in index.needing_review():
             if row.take.take_id != current:
                 self.open_take(row.take)
                 return
-        self.state.notify("Etiketlenmemiş başka kayıt yok.", 4000)
+        self.state.notify("Etiketi eksik başka kayıt yok.", 4000)
 
 
 __all__ = ["ReviewPage"]

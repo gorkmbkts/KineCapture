@@ -10,10 +10,12 @@ from kinecapture.domain.enums import Correctness, DataOrigin, TrackingState
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.domain.models import BodyPose, CameraInfo, FramePacket
 from kinecapture.domain.project import (
-    RepetitionSegment,
+    ErrorInterval,
+    MovementSample,
     Take,
-    renumber_segments,
-    validate_segments,
+    evaluate_sample,
+    renumber_samples,
+    validate_samples,
 )
 from kinecapture.visualization.mapping import ZED34_TO_REHAB24_V0
 from kinecapture.visualization.skeleton_spec import (
@@ -285,31 +287,196 @@ def test_mapping_rejects_wrong_joint_count() -> None:
 # ------------------------------------------------------------ project types
 
 
-def test_segment_rejects_reversed_range() -> None:
+def test_sample_rejects_reversed_range() -> None:
     with pytest.raises(ValidationError) as info:
-        RepetitionSegment.create("t", 50, 10)
-    assert info.value.code == "segment_reversed"
+        MovementSample.create("t", 50, 10)
+    assert info.value.code == "sample_reversed"
 
 
-def test_segment_roundtrip() -> None:
-    segment = RepetitionSegment.create("take_1", 10, 40)
-    segment.annotation.exercise = "squat"
-    segment.annotation.correctness = Correctness.INCORRECT
-    restored = RepetitionSegment.from_dict(segment.to_dict())
-    assert restored.segment_id == segment.segment_id
-    assert restored.annotation.exercise == "squat"
-    assert restored.annotation.correctness is Correctness.INCORRECT
+def test_sample_roundtrip_carries_both_levels() -> None:
+    sample = MovementSample.create("take_1", 10, 40)
+    sample.exercise = "squat"
+    sample.correctness = Correctness.INCORRECT
+    sample.error_intervals.append(ErrorInterval.create(15, 22, "knee-valgus"))
+
+    restored = MovementSample.from_dict(sample.to_dict())
+    assert restored.sample_id == sample.sample_id
+    assert restored.exercise == "squat"
+    assert restored.correctness is Correctness.INCORRECT
     assert restored.frame_count == 31
+    assert len(restored.error_intervals) == 1
+    interval = restored.error_intervals[0]
+    assert interval.error_code == "knee-valgus"
+    assert (interval.start_frame, interval.end_frame) == (15, 22)
+    assert interval.frame_count == 8  # inclusive at both ends
 
 
-def test_validate_segments_finds_overlap_and_range() -> None:
-    a = RepetitionSegment.create("t", 0, 20)
-    b = RepetitionSegment.create("t", 15, 40)
-    renumber_segments([a, b])
-    problems = validate_segments([a, b], frame_count=30)
+def test_boundaries_are_inclusive_at_both_ends() -> None:
+    """The one convention shared by UI, sidecar and export."""
+    sample = MovementSample.create("t", 10, 19)
+    assert sample.frame_count == 10
+    assert sample.contains(10) and sample.contains(19)
+    assert not sample.contains(9) and not sample.contains(20)
+
+    interval = ErrorInterval.create(12, 12, "x")
+    assert interval.frame_count == 1
+
+
+def test_sample_clamp_keeps_children_inside() -> None:
+    sample = MovementSample.create("t", 10, 20)
+    assert sample.clamp(-5, 100) == (10, 20)
+    assert sample.clamp(15, 12) == (12, 15)
+
+
+def test_error_interval_needs_a_class_to_be_well_formed() -> None:
+    assert not ErrorInterval.create(1, 5).is_well_formed
+    assert ErrorInterval.create(1, 5, "knee-valgus").is_well_formed
+
+
+def test_validate_samples_finds_overlap_and_range() -> None:
+    a = MovementSample.create("t", 0, 20)
+    b = MovementSample.create("t", 15, 40)
+    renumber_samples([a, b])
+    problems = validate_samples([a, b], frame_count=30)
     kinds = {problem["issue"] for problem in problems}
     assert "overlap" in kinds
     assert "out_of_range" in kinds
+
+
+def test_validate_samples_reports_a_stranded_interval() -> None:
+    sample = MovementSample.create("t", 0, 20)
+    sample.error_intervals.append(ErrorInterval.create(30, 35, "knee-valgus"))
+    problems = validate_samples([sample], frame_count=100)
+    assert any(p["issue"] == "interval_outside_sample" for p in problems)
+
+
+# ------------------------------------------------- legacy label migration
+
+
+def test_legacy_v1_segment_migrates_without_losing_data() -> None:
+    """An old sidecar entry must survive, and must not gain a fake verdict."""
+    legacy = {
+        "schema_version": "1.0.0",
+        "segment_id": "rep_legacy",
+        "take_id": "take_1",
+        "index": 2,
+        "start_frame": 10,
+        "end_frame": 60,
+        "revision": 4,
+        "source": "manual",
+        "status": "active",
+        "annotation": {
+            "exercise": "squat",
+            "correctness": "uncertain",
+            "error_types": ["knee-valgus", "back-round"],
+            "affected_joints": ["left_knee"],
+            "movement_phase": "concentric",
+            "severity": 2.0,
+            "annotator_confidence": 0.8,
+            "status": "approved",
+            "note": "eski not",
+            "evidence_intervals": [
+                {
+                    "interval_id": "ev_1",
+                    "start_frame": 20,
+                    "end_frame": 30,
+                    "error_type": "knee-valgus",
+                    "severity": 1.5,
+                }
+            ],
+        },
+    }
+    sample = MovementSample.from_dict(legacy)
+
+    assert sample.sample_id == "rep_legacy"
+    assert sample.index == 2 and sample.revision == 4
+    assert sample.exercise == "squat"
+    assert sample.note == "eski not"
+    # An undecided verdict must never be promoted into a definite one.
+    assert sample.correctness is Correctness.UNLABELLED
+    assert sample.legacy["correctness"] == "uncertain"
+    # An old evidence interval becomes a real error interval.
+    assert len(sample.error_intervals) == 1
+    assert sample.error_intervals[0].error_code == "knee-valgus"
+    # Sample-level error classes had no timing, so they are not invented into
+    # intervals; they are recorded as unlocalised instead.
+    assert sample.legacy["unlocalised_error_types"] == ["knee-valgus", "back-round"]
+    # Dropped concepts are preserved verbatim.
+    assert sample.legacy["movement_phase"] == "concentric"
+    assert sample.legacy["severity"] == 2.0
+    assert sample.legacy["affected_joints"] == ["left_knee"]
+    assert sample.legacy["status"] == "approved"
+
+
+def test_migrated_sample_round_trips_through_v2() -> None:
+    legacy = {
+        "segment_id": "rep_x",
+        "start_frame": 0,
+        "end_frame": 10,
+        "annotation": {"exercise": "squat", "correctness": "unknown",
+                       "movement_phase": "hold"},
+    }
+    once = MovementSample.from_dict(legacy)
+    twice = MovementSample.from_dict(once.to_dict())
+    assert twice.to_dict() == once.to_dict()
+    assert twice.legacy["movement_phase"] == "hold"
+
+
+def test_repetition_segment_alias_still_works() -> None:
+    from kinecapture.domain.project import RepetitionSegment
+
+    assert RepetitionSegment is MovementSample
+
+
+# ------------------------------------------------------ readiness rule
+
+
+def test_evaluate_sample_covers_every_state() -> None:
+    from kinecapture.domain.enums import SampleReadiness, SegmentStatus
+
+    blank = MovementSample.create("t", 0, 20)
+    assert evaluate_sample(blank)[0] is SampleReadiness.UNLABELLED
+
+    good = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.CORRECT
+    )
+    assert evaluate_sample(good)[0] is SampleReadiness.READY
+
+    contradiction = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.CORRECT
+    )
+    contradiction.error_intervals.append(ErrorInterval.create(2, 5, "k"))
+    assert evaluate_sample(contradiction)[0] is SampleReadiness.CONTRADICTION
+
+    pending = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
+    )
+    assert evaluate_sample(pending)[0] is SampleReadiness.NEEDS_ERROR_INTERVAL
+
+    stranded = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
+    )
+    stranded.error_intervals.append(ErrorInterval.create(50, 60, "k"))
+    assert evaluate_sample(stranded)[0] is SampleReadiness.INVALID_INTERVAL
+
+    excluded = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.CORRECT
+    )
+    excluded.status = SegmentStatus.EXCLUDED
+    assert evaluate_sample(excluded)[0] is SampleReadiness.EXCLUDED
+
+
+def test_unknown_error_class_only_checked_when_vocabulary_given() -> None:
+    from kinecapture.domain.enums import SampleReadiness
+
+    sample = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
+    )
+    sample.error_intervals.append(ErrorInterval.create(2, 5, "made-up"))
+    assert evaluate_sample(sample)[0] is SampleReadiness.READY
+    assert evaluate_sample(sample, known_error_codes=["real"])[0] is (
+        SampleReadiness.INVALID_INTERVAL
+    )
 
 
 def test_take_export_eligibility() -> None:
@@ -342,12 +509,11 @@ def test_take_roundtrip_preserves_provenance() -> None:
 # --------------------------------------------------------------- labels
 
 
-def test_label_schema_ships_no_invented_error_types() -> None:
-    """The error ontology is the researcher's to define, not the code's."""
+def test_label_schema_ships_no_invented_vocabulary() -> None:
+    """The ontology is the researcher's to define, not the code's."""
     schema = LabelSchema.default()
     assert schema.exercises == []
     assert schema.error_types == []
-    assert schema.movement_phases  # structural, safe to default
 
 
 def test_label_schema_rejects_duplicates() -> None:
@@ -357,25 +523,92 @@ def test_label_schema_rejects_duplicates() -> None:
         schema.add_exercise("squat")
 
 
-def test_label_mapping_is_stable() -> None:
+def test_error_type_duplicates_are_detected_across_spelling() -> None:
+    schema = LabelSchema.default()
+    first = schema.add_error_type("Diz İçe Çöküyor")
+    for variant in ("diz içe çöküyor", "  DİZ  İÇE   ÇÖKÜYOR ", "Diz içe çöküyor"):
+        assert schema.match_error_type(variant) is not None
+        with pytest.raises(ValidationError) as info:
+            schema.add_error_type(variant)
+        assert info.value.code == "error_type_duplicate"
+        assert schema.ensure_error_type(variant).code == first.code
+    assert len(schema.error_types) == 1
+
+
+def test_error_type_search_ranks_prefix_matches_first() -> None:
+    schema = LabelSchema.default()
+    schema.add_error_type("Sırt yuvarlanıyor")
+    schema.add_error_type("Diz içe çöküyor")
+    schema.add_error_type("Aşırı diz öne çıkıyor")
+    codes = [o.code for o in schema.search_error_types("diz")]
+    assert codes[0] == "diz-ice-cokuyor"
+    assert "asiri-diz-one-cikiyor" in codes
+    assert "sirt-yuvarlaniyor" not in codes
+    # An empty query lists everything.
+    assert len(schema.search_error_types("")) == 3
+
+
+def test_renaming_an_error_type_keeps_its_code() -> None:
+    """Annotations and releases reference the code, so it must not move."""
+    schema = LabelSchema.default()
+    option = schema.add_error_type("Diz içe çöküyor")
+    renamed = schema.rename_error_type(option.code, "Diz valgusu")
+    assert renamed.code == option.code
+    assert renamed.label == "Diz valgusu"
+    assert schema.label_for_error(option.code) == "Diz valgusu"
+
+
+def test_error_type_in_use_cannot_be_removed() -> None:
+    schema = LabelSchema.default()
+    option = schema.add_error_type("Diz içe çöküyor")
+    with pytest.raises(ValidationError) as info:
+        schema.remove_error_type(option.code, used_codes=[option.code])
+    assert info.value.code == "error_type_in_use"
+    schema.remove_error_type(option.code, used_codes=[])
+    assert schema.error_types == []
+
+
+def test_label_mapping_is_stable_and_binary() -> None:
     schema = LabelSchema.default()
     schema.add_exercise("Lunge")
     schema.add_exercise("Squat")
+    schema.add_error_type("Sırt yuvarlanıyor")
+    schema.add_error_type("Diz içe çöküyor")
     mapping = schema.label_mapping()
+
     # Indices come from sorted codes, so two releases agree on class meaning.
     assert mapping["exercise"]["code_to_index"] == {"lunge": 0, "squat": 1}
-    assert set(mapping["correctness"]["classes"]) == {
-        "correct",
-        "incorrect",
-        "uncertain",
-        "unknown",
+    assert mapping["error_types"]["code_to_index"] == {
+        "diz-ice-cokuyor": 0,
+        "sirt-yuvarlaniyor": 1,
     }
+    # The verdict is binary; unlabelled never gets a class index.
+    assert mapping["correctness"]["classes"] == ["correct", "incorrect"]
+    assert mapping["correctness"]["binary"] is True
 
 
 def test_schema_reports_unknown_values() -> None:
     schema = LabelSchema.default()
     schema.add_exercise("Squat")
     problems = schema.validate_annotation_values(
-        exercise="deadlift", error_types=[]
+        exercise="deadlift", error_types=["nope"]
     )
-    assert problems and problems[0]["issue"] == "unknown_exercise"
+    issues = {p["issue"] for p in problems}
+    assert issues == {"unknown_exercise", "unknown_error_type"}
+
+
+def test_legacy_schema_blocks_are_preserved() -> None:
+    """Movement phase was removed, but an old project file keeps its data."""
+    schema = LabelSchema.from_dict(
+        {
+            "schema_version": "1.0.0",
+            "exercises": [{"code": "squat", "label": "Squat"}],
+            "movement_phases": [{"code": "hold", "label": "Duraklama"}],
+            "severity_scale": [0.0, 3.0],
+        }
+    )
+    assert schema.exercise_codes() == ("squat",)
+    assert not hasattr(schema, "movement_phases")
+    assert schema.legacy["movement_phases"][0]["code"] == "hold"
+    assert schema.legacy["severity_scale"] == [0.0, 3.0]
+    assert schema.to_dict()["legacy"]["movement_phases"][0]["code"] == "hold"

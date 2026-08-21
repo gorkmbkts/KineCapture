@@ -120,7 +120,7 @@ class Card(QFrame):
         self._icon_name = icon
 
         outer = QVBoxLayout(self)
-        margin = theme.space_md if theme else 14
+        margin = theme.space_sm + 2 if theme else 10
         outer.setContentsMargins(margin, margin, margin, margin)
         outer.setSpacing(theme.space_sm if theme else 8)
 

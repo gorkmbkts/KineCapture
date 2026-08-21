@@ -1,9 +1,9 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: vertical_slice_working
-last_updated: 2026-08-20
-app_version: 0.3.0
+status: two_level_labelling_working
+last_updated: 2026-08-21
+app_version: 0.4.0
 ---
 
 # KineCapture Studio — Proje Hafızası
@@ -25,11 +25,17 @@ Kısa kalıcı talimatlar `CLAUDE.md` içindedir.
 
 ## 2. Mevcut aşama
 
-**Uçtan uca dikey dilim çalışıyor.** PROMPT.md bölüm 5'teki 15 adımlık akışın
-tamamı hem sentetik hem gerçek ZED 2i donanımıyla yürütülebiliyor.
+**Uçtan uca dikey dilim + iki seviyeli etiketleme çalışıyor.**
 
-Önceki scaffold aşaması (2026-08-20, aynı gün) bu sürümle büyük ölçüde
-değiştirildi. Aşağıdaki "değişen kararlar" bölümü farkları kaydeder.
+- 2026-08-20: PROMPT.md bölüm 5'teki 15 adımlık akış tamamlandı; hem sentetik
+  hem gerçek ZED 2i donanımıyla doğrulandı.
+- 2026-08-21: `CLAUDE_ANNOTATION_REDESIGN_PROMPT.md` uygulandı. Etiket modeli
+  **iki seviyeye** çıkarıldı (hareket sample'ı + zamansal hata aralığı),
+  hareket fazı kaldırıldı, doğru/yanlış ikili hale getirildi, İnceleme ekranı
+  ve export sözleşmesi yeniden yazıldı. Ayrıntı: bölüm 6B.
+
+Önceki scaffold aşaması bu sürümle büyük ölçüde değiştirildi. "Değişen
+kararlar" bölümleri farkları kaydeder.
 
 ## 3. Ortam — DOĞRULANMIŞ
 
@@ -138,11 +144,16 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
 - Senkron oynatma (QTimer), hız kontrolü, kare adımlama, döngü aralığı.
 - Katmanlı zaman çizelgesi: veri kapsamı, takip güveni, marker'lar,
   tekrarlar; sürükleyerek oluşturma/taşıma/yeniden boyutlandırma, zoom/pan.
-- Tekrar CRUD: oluştur, böl, birleştir, dışla/geri al, sil; undo/redo;
-  marker'lardan sınır önerisi; çakışma doğrulaması.
-- Etiketleme: egzersiz, doğruluk, hata türleri, etkilenen eklemler, faz,
-  kanıt aralığı veri modeli, şiddet, güven, not, durum; autosave; öncekini
-  kopyala; tümüne uygula; sonraki etiketsize geç.
+- Hareket sample'ı CRUD: oluştur, böl, birleştir, dışla/geri al, sil;
+  undo/redo; marker'lardan sınır önerisi; çakışma doğrulaması.
+- **İki seviyeli etiketleme**: hareket türü + ikili doğru/yanlış (seviye 1),
+  hareketin içinde hata sınıfına bağlı zamansal aralıklar (seviye 2). Tek/çok,
+  aynı sınıftan tekrarlı ve çakışan aralıklar; aralık ana hareketin dışına
+  çıkamaz; ana sınır daralınca kırpma/kaldırma raporlanır ve geri alınabilir.
+- **Etiketleme sırasında hata sınıfı oluşturma**: aranabilir seçici, Enter ile
+  oluştur-veya-yeniden-kullan, büyük/küçük harf ve boşluk farkına dayanıklı
+  tekrar kontrolü, projeye atomik kalıcı yazım.
+- Autosave; öncekini kopyala; tümüne uygula; sonraki eksik kayda geç.
 - Dataset paneli: sayımlar, filtreler, dağılımlar, kalite bulguları.
 - Sürümlü export: `[T,J,3] float32` + manifest + skeleton spec + label
   mapping + fingerprint + validation report + excluded; staging → atomik
@@ -150,6 +161,11 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
 - Modern GUI: 8 çalışma alanı, daraltılabilir navigasyon, koyu **ve** açık
   tema, 43 vektör ikon (emoji yok), inline form doğrulama, hata bandı,
   klavye kısayolları, kalabalık yan panellerde kaydırma.
+- **Tek görüntü alanı**: RGB / İskelet / RGB+İskelet modları; kalıcı iki panel
+  yok. Proxy video yoksa iskelet modu çalışmaya devam eder.
+- **İki modlu zaman çizelgesi**: HAREKET ve HATA şeritleri; hata modunda seçili
+  hareketin dışı maskelenir, çakışan aralıklar ayrı satırlara yığılır, her
+  aralık sınıf adıyla birlikte çizilir (yalnız renge bağımlı değil).
   Bütün sayfalar gerçekten çizdirilerek doğrulandı (ekran görüntüsü alındı).
 
 ## 6. Bu görevde alınan kalıcı teknik kararlar
@@ -170,9 +186,9 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
 5. **İskelet akışı JSONL.** Chunked binary yerine seçildi: kare başına flush
    ile kurtarılabilir, yarım son satır tolere edilebilir, dış araçlarla
    okunabilir. HD720/34 eklem ≈ 100 byte/kare — 5 dakikalık kayıt ~1 MB.
-6. **Tekrar aralıkları AKIŞ KONUMUDUR, kamera kare numarası değil.**
-   `RepetitionSegment.start_frame/end_frame` = `skeleton.jsonl` kare
-   listesindeki 0-tabanlı indeks. Kamera kimliği kaybolmuyor: segmentte
+6. **Etiket aralıkları AKIŞ KONUMUDUR, kamera kare numarası değil.**
+   `MovementSample` ve `ErrorInterval` içindeki `start_frame`/`end_frame` =
+   `skeleton.jsonl` kare listesindeki 0-tabanlı indeks, **her iki uç dahil**. Kamera kimliği kaybolmuyor: segmentte
    timestamp, exportta `frame_indices` ve `camera_timestamps_ns` dizileri ve
    manifestte `start_camera_frame`/`end_camera_frame` var. Bu ayrım
    geliştirme sırasında gerçek bir hata olarak yakalandı (kare düşünce
@@ -188,13 +204,13 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
    projeksiyonu yeterli, bağımlılıksız, DPI ölçeklemesinde tutarlı ve
    test edilebilir. Orbit/zoom/pan + 4 hazır görünüm var.
 9. **Zaman çizelgesi elle yazıldı.** Katmanlı, sürüklenebilir, zoom'lanabilir
-   bir tekrar editörü sunan hazır bir Qt bileşeni yok.
+   ve iç içe iki seviyeli bir aralık editörü sunan hazır bir Qt bileşeni yok.
 10. **İkonlar SVG path + QPainter.** Tema rengine göre boyanıyor, DPI'ya göre
     render ediliyor, repository'de binary asset yok. Emoji kullanılmadı.
 11. **Etiket ontolojisi veridir.** `label_schema.json` proje başına.
     Varsayılan şema **boş** egzersiz ve **boş** hata türü listesiyle gelir;
-    hareket fazları yapısal olduğu için varsayılanı var. Kod içinde uydurma
-    hata sınıfı yok.
+    kod içinde uydurma hata sınıfı yok. Kullanıcı hata türlerini etiketleme
+    sırasında ekler ve şemaya atomik yazılır (bkz. bölüm 6B).
 12. **26-eklem eşleştirmesi kısmi ve öyle raporlanıyor.**
     `zed_body_34__to__rehab24_6_mocap` v0.1.0-partial: 23/26 eklem eşleşiyor.
     `Head_end`, `LeftToeBase_end`, `RightToeBase_end` mocap uç işaretçileridir
@@ -223,6 +239,105 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
 | `SessionWriter.write_frame` → `NotImplementedError` | `TakeWriter` çalışıyor | format kararlaştırıldı |
 | Yalnız `mock_16` iskelet kayıtlı | + BODY_18/34/38 | yerel SDK'dan okundu |
 | Tek düz `RecordingSession` modeli | Project→…→Repetition hiyerarşisi | PROMPT bölüm 4.1 |
+
+## 6B. İki seviyeli etiketleme redesign'ı (2026-08-21)
+
+### Ürün kararları
+
+1. **Bir hata aralığı = tek hata sınıfı.** Aynı anda görülen farklı sınıflar
+   *çakışan aralıklarla* ifade edilir. Böylece her aralık temiz bir
+   `(sınıf, başlangıç, bitiş)` üçlüsü olur ve zamansal hedef belirsizleşmez.
+   Aynı sınıf bir hareket içinde tekrar edebilir.
+2. **Doğru/yanlış ikili.** `Correctness` artık `correct | incorrect |
+   unlabelled`. `unlabelled` bir hareket sınıfı değil, "henüz karar verilmedi"
+   çalışma durumudur ve asla export edilmez. Eski `uncertain`/`unknown`
+   **kesin karara çevrilmez**; `unlabelled` olur ve orijinal değer `legacy`
+   içinde saklanır.
+3. **`AnnotationStatus` kaldırıldı.** Draft/reviewed/approved yerine
+   **türetilmiş** `SampleReadiness` var: `evaluate_sample()` tek kuraldır ve
+   hem ekranın "hazır" tanımını hem exportun "uygun" tanımını besler. İkisi
+   ayrışamaz. `SegmentStatus.EXCLUDED` kullanıcının açık "datasetten çıkar"
+   eylemi olarak korundu.
+4. **Tutarlılık kuralları**: doğru + hata aralığı = `contradiction`;
+   hatalı + aralık yok = `needs_error_interval` (çalışılabilir, hazır değil);
+   ters/boş/dışarı taşan/bilinmeyen sınıflı aralık = `invalid_interval`.
+   Hiçbiri export edilmez.
+5. **Hareket fazı kaldırıldı** (UI, yeni model, yeni export). Eski değerler
+   `legacy.movement_phase` içinde korunur. `severity`, `affected_joints`,
+   `annotator_confidence` da aynı şekilde saklanır — kullanılmıyor fakat
+   silinmiyor.
+6. **Kare sınırı sözleşmesi tek ve belgeli**: konumlar `skeleton.jsonl` kare
+   listesindeki 0 tabanlı indekstir ve **her iki uç dahildir**. Arayüz, sidecar
+   ve export aynı anlamı kullanır. Export ayrıca göreli konumları
+   (`relative_start/end`), kamera kare numaralarını ve zaman damgalarını yazar.
+7. **Undo kapsamı**: undo bu kaydın etiketlerini geri alır, **proje çapındaki
+   hata sınıfı sözlüğünü değil**. Sınıf oluşturma bir *proje* düzenlemesidir;
+   picker "listeye ekler" ve bir aralık fikri değişti diye liste küçülmez.
+   Bu davranış hem docstring'de hem arayüz ipucunda yazılı.
+8. **Birleştirme kayıp yaratmaz**: farklı etiketli iki hareket birleşirse
+   kaybeden etiket `legacy.merged_from` içine yazılır ve kullanıcıya bildirilir.
+   Bölme, sınırı aşan hata aralığını ikiye böler; hiçbiri düşmez.
+9. **Ana sınır daralması**: kesişen aralıklar kırpılır, tamamen dışarıda kalan
+   kaldırılır; ikisi de rapor edilir (`BoundsChangeReport`) ve Ctrl+Z ile geri
+   alınabilir.
+10. **İskelet-only mod 3B metrik görünüm kaldı** (döndürme + merkezleme).
+    Gerekçe: bindirilmiş mod zaten "kamera ile hizalı mı" sorusunu yanıtlıyor;
+    derinlik hatası kameranın kendi bakışından görünmez. Sabit projeksiyon
+    eklemek yeni bilgi vermezdi.
+
+### Şema ve uyumluluk
+
+- `ANNOTATION_SCHEMA_VERSION` 1.0.0 → **2.0.0**, `LABEL_SCHEMA_VERSION` → 2.0.0.
+- Sidecar dosya adı **değişmedi** (`annotations/segments.json`), böylece mevcut
+  kayıtlar bulunmaya devam ediyor. v2 `samples` anahtarını yazar; okuma hem
+  `samples` hem eski `segments` anahtarını kabul eder.
+- **Okuma dosyayı yeniden yazmaz.** v1 belge yalnızca kullanıcı bir düzenlemeyi
+  kaydettiğinde v2'ye dönüşür. Projeyi açmak eski etiketi bozamaz.
+- `RepetitionSegment` adı `MovementSample`'a taşındı; eski ad alias olarak
+  duruyor. `load_segments`/`save_segments` de alias.
+- Eski `EvidenceInterval` değerlendirildi ve **yerini `ErrorInterval` aldı**:
+  aynı fikir, fakat tek sınıf + kaynak + zaman damgası taşıyor ve ana hareketin
+  içinde olması garanti ediliyor. Eski `evidence_intervals` kayıpsız okunuyor.
+- Hareket seviyesindeki eski `error_types` listesi zamansız olduğu için
+  aralığa **çevrilmiyor**; `legacy.unlocalised_error_types` olarak saklanıyor.
+  Sınır uydurmak, veriyi kaybetmekten daha kötü olurdu.
+
+### Export sözleşmesi
+
+- Her hareket sample'ı bir örnek; zaman boyutu hareketin sınırlarından gelir.
+- Manifest örneği: `exercise`, ikili `correctness`, `error_intervals[]`
+  (sınıf + mutlak + göreli + kamera karesi + zaman damgası), `error_classes`,
+  `has_error_localisation`.
+- `.npz` içinde ayrıca: `error_intervals` `int32 [K,3]`
+  `(class_index, relative_start, relative_end)` ve `error_multi_hot`
+  `uint8 [T,C]` (sütun sırası `label_mapping` ile aynı; çakışma aynı karede
+  birden çok sütunu 1 yapar). İkisi birlikte yazılıyor: liste otoriter ve
+  okunabilir, dizi doğrudan eğitilebilir.
+- `label_mapping.error_types.code_to_index` sıralı koddan üretilir → sürümler
+  arası kararlı.
+- Doğrulama: yetim aralık, dizi dışına taşma, bilinmeyen kod, ters/boş aralık,
+  doğruluk-hata çelişkisi, manifest-dizi uzunluk uyuşmazlığı, göreli-mutlak
+  tutarsızlığı.
+- Fingerprint hata sınıfı ve aralık sınırlarına duyarlı (test edildi).
+- **Dışlanan her şey nedeniyle yazılır**: hazır olmayan hareket, kullanıcı
+  tarafından dışlanan hareket, filtrelenen kayıt. "Hareketim neden yok?"
+  sorusunun cevabı `excluded.json` içinde.
+- Geçersiz bir aralık, sample'ın **tamamını** dışlar. Yalnız o aralığı atmak
+  modele "burada hata yok" demek olurdu; bu yanlış etiketlemedir.
+
+### Bu turda bulunan gerçek hatalar
+
+1. **v2 round-trip kaybı**: ikinci okumada üst düzey `status` (sample'ın
+   active/excluded durumu) eski *annotation review status* sanılıp `legacy`'ye
+   yazılıyordu. Yalnız v1 belgede toplanacak şekilde düzeltildi.
+2. **Sessiz dışlama**: hazır olmayan hareketler `excluded.json`'a hiç
+   yazılmadan eleniyordu. `_partition_samples` + `_rejected_takes` eklendi.
+3. **`projects.py` eski sayaç anahtarını okuyordu** (`repetitions`), sayfa her
+   açılışta `KeyError` veriyordu.
+4. **Zaman çizelgesi şerit başlığı çakışması**: frame 0'da başlayan bir aralık
+   "HAREKET" yazısının üstüne biniyordu. Sol gutter (`_GUTTER = 58`) eklendi.
+5. 1366x768'de yan panel taşıyordu; aktif modun kartı öne alınıyor, pasif modun
+   kartı özet satırına daraltılıyor, transport zaman çizelgesi kartına taşındı.
 
 ## 7. Mimari sınırlar
 
@@ -269,7 +384,7 @@ Hepsi kullanıcının Windows makinesinde, `KineSynth` environment içinde
 | Doğrulama | Komut | Sonuç |
 |---|---|---|
 | Interpreter | `conda run -n KineSynth python -c "import sys; print(sys.executable)"` | `C:\Users\gorke\anaconda3\envs\KineSynth\python.exe`, Python 3.11.14 |
-| Test paketi | `python -m pytest` | **223 passed**, 0 warning, 28.9 s |
+| Test paketi | `python -m pytest` | **314 passed**, 0 warning, 92.9 s (2026-08-21) |
 | ZED'siz import | alt süreçte `sys.modules` kontrolü | `pyzed` hiç yüklenmedi |
 | Self test | `python -m kinecapture --self-test` | exit 0; proje→export tamamı OK |
 | Cihaz listesi | `python -m kinecapture --list-devices` | ZED SDK 5.4.1, ZED 2i S/N 31844341 AVAILABLE |
@@ -330,6 +445,31 @@ bıraktı, başka hiçbir eklemi bozmadı.
 
 `mean_joint_conf=0.736` değeri, SDK'nın 0..100 ölçeğinin 0..1'e doğru
 çevrildiğini de kanıtlıyor (ham değer ~73.6 olurdu).
+
+### Redesign doğrulaması (2026-08-21, donanımsız)
+
+Yeniden tasarım sonrası gerçekten çalıştırıldı:
+
+```text
+python -m pytest                    314 passed, 92.9 s
+python -m kinecapture --self-test   exit 0
+  hareket/hata etiketleme   : OK (2 hareket, 1 zamansal hata aralığı)
+  dataset index             : OK (1 kayıt, 2 hazır hareket, 1 hata aralığı)
+  export                    : OK (dataset_v001, 2 örnek, 1 hata aralığı,
+                                  doğrulama=geçti)
+```
+
+Ayrıca elle doğrulandı: v1 sidecar → v2 kayıpsız okuma (eski `segment_id`
+korunuyor, `uncertain` → `unlabelled` + `legacy`, `evidence_intervals` →
+gerçek `ErrorInterval`, dosya okuma sırasında **değişmiyor**), v2 round-trip
+kararlı, çakışan iki sınıfın 5 ortak karesi `error_multi_hot` içinde iki sütun
+olarak görünüyor, fingerprint aralık ekle/taşı/sınıf değiştir/sil işlemlerinin
+dördünde de değişiyor, sayfalar 1600x980 **ve** 1366x768'de taşmadan
+çiziliyor.
+
+**Redesign donanımda test edilmedi.** Etiketleme ve export kamera
+gerektirmiyor; bu turda 2026-08-20'deki gerçek ZED 2i kaydı yeniden
+alınmadı. Kayıt hattı (`camera/`, `capture/`) bu turda değişmedi.
 
 ### Ek olarak: donanımsız gövde dönüşümü testleri
 
@@ -400,9 +540,9 @@ gerektirmeden regresyonu yakalar.
 - Çok uzmanlı consensus ve reviewer yorumları.
 - Çok kameralı kayıt, bulut senkronizasyonu, gelişmiş yetkilendirme.
 - Yüz bulanıklaştırma / skeleton-only privacy export.
-- Kanıt aralığı (`EvidenceInterval`) için tam GUI — veri modeli ve
-  serileştirme hazır, ekran yalnız metin alanları sunuyor.
-- Zaman çizelgesinde hareket fazı ve reviewer yorum katmanları.
+- Zaman çizelgesinde reviewer yorum katmanı.
+- Hata sınıflarının hiyerarşisi/gruplanması (şu an düz liste).
+- Bir hata aralığını başka bir harekete taşıma (şu an sil + yeniden çiz).
 - Paketleme / dağıtım (installer).
 
 ## 12. Sonraki önerilen adım
@@ -414,6 +554,9 @@ gerektirmeden regresyonu yakalar.
 2. Proje etiket şemasına gerçek egzersiz listesini ve hata ontolojisini
    girin (Ayarlar → Etiket şeması). Kod içinde uydurulmuş sınıf yok.
 3. ZED ilk-açılış optimizasyonunu iptal edilebilir arka plan işine taşıyın.
-4. Kanıt aralığı (evidence interval) için zaman çizelgesi katmanı ekleyin.
+4. Birkaç gerçek kaydı iki seviyeli modelle baştan sona etiketleyip
+   export alın; hata sınıfı listesi ancak gerçek kullanımla oturur.
 5. Otomatik tekrar algılamayı `SegmentSource.MODEL_SUGGESTION` olarak
    ekleyin; insan onayı olmadan ground truth sayılmamalı (altyapı hazır).
+6. Zamansal hedefi (`error_multi_hot`) tüketen ilk eğitim betiğini yazıp
+   sözleşmenin gerçekten kullanışlı olduğunu doğrulayın.

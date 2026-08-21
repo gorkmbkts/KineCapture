@@ -1,7 +1,26 @@
 """Versioned dataset releases.
 
-A release is one repetition per sample, exported as ``float32 [T, J, 3]`` in the
-capture's *native* joint order and *raw* coordinates.
+A release is one **movement sample** per example, exported as ``float32
+[T, J, 3]`` in the capture's *native* joint order and *raw* coordinates, plus
+the temporal error intervals localised inside that movement.
+
+Label contract
+--------------
+Each example carries:
+
+* ``exercise`` - the movement class;
+* ``correctness`` - a **binary** verdict, ``correct`` or ``incorrect``;
+* ``error_intervals`` - zero or more ``(error class, start, end)`` spans inside
+  the example, given both in take-absolute positions and in positions relative
+  to the exported array, so a consumer never has to guess or recompute.
+
+Only samples the review screen calls ready are exported; ready is decided by
+:func:`kinecapture.domain.project.evaluate_sample`, the same function the UI
+uses, so "labelled" on screen and "eligible" here cannot drift apart.
+
+Boundary convention (identical in the UI, the sidecar and here): positions are
+0-based indices into the take's pose stream and ranges are **inclusive at both
+ends**, so ``joints[start:end + 1]`` is the span.
 
 What is deliberately NOT done here
 ----------------------------------
@@ -17,11 +36,6 @@ is written, the manifest is complete and validation has run does the staging
 directory get moved into place with a single rename. A cancelled or failed
 export leaves no half-release that could be mistaken for a finished one, and an
 existing release is never modified.
-
-Naming
-------
-``dataset_v001``, ``dataset_v002``, ... The next number is derived from what is
-already published, so two releases never collide.
 """
 
 from __future__ import annotations
@@ -44,13 +58,10 @@ from kinecapture.core.logging import get_logger
 from kinecapture.core.paths import ensure_dir, long_path, path_exists
 from kinecapture.dataset.index import DatasetIndex, TakeRow, exportable_rows
 from kinecapture.dataset.workspace import ProjectWorkspace
-from kinecapture.domain.project import RepetitionSegment
+from kinecapture.domain.project import MovementSample, evaluate_sample
 from kinecapture.playback.take_reader import load_skeleton_stream
 from kinecapture.visualization.mapping import JointMapping, find_mapping
-from kinecapture.visualization.skeleton_spec import (
-    SkeletonSpec,
-    try_get_skeleton_spec,
-)
+from kinecapture.visualization.skeleton_spec import SkeletonSpec, try_get_skeleton_spec
 
 logger = get_logger(__name__)
 
@@ -69,11 +80,17 @@ class ExportOptions:
     """
 
     include_synthetic: bool = False
-    include_unlabelled: bool = False
-    include_excluded_segments: bool = False
+    #: Include samples the review screen does not call ready. Off by default:
+    #: the release then contains exactly what the UI shows as finished.
+    include_unready: bool = False
+    include_excluded_samples: bool = False
     min_frames_per_sample: int = 4
     target_skeleton_format: Optional[str] = None
     store_confidences: bool = True
+    #: Emit the per-frame ``error_multi_hot`` target array alongside the
+    #: interval list. Costs ``T x C`` bytes per sample and saves every consumer
+    #: from rebuilding the same thing.
+    store_error_target_arrays: bool = True
     notes: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -88,6 +105,7 @@ class ExportResult:
     path: Path
     sample_count: int
     excluded_count: int
+    error_interval_count: int
     fingerprint: str
     validation_passed: bool
     warnings: list[str] = field(default_factory=list)
@@ -132,24 +150,114 @@ class ReleaseBuilder:
         self.options = options or ExportOptions()
 
     # ---------------------------------------------------------------- select
+    @property
+    def _error_vocabulary(self) -> tuple[str, ...]:
+        return self.workspace.label_schema.error_type_codes()
+
     def select_rows(self, rows: Optional[Sequence[TakeRow]] = None) -> list[TakeRow]:
         """Takes eligible under the current options."""
         candidates = list(rows) if rows is not None else list(self.index.rows)
         if not self.options.include_synthetic:
             candidates = [row for row in candidates if not row.take.is_synthetic]
-        if self.options.include_unlabelled:
+        if self.options.include_unready:
             return [row for row in candidates if row.take.usable_for_export]
         return exportable_rows(candidates)
 
-    def _selected_segments(self, row: TakeRow) -> list[RepetitionSegment]:
-        segments = [
-            segment
-            for segment in row.segments
-            if self.options.include_excluded_segments or segment.is_active
-        ]
-        if not self.options.include_unlabelled:
-            segments = [s for s in segments if s.annotation.is_labelled]
-        return sorted(segments, key=lambda s: s.start_frame)
+    def _partition_samples(
+        self, row: TakeRow
+    ) -> tuple[list[MovementSample], list[dict[str, Any]]]:
+        """Split a take's samples into exported and rejected-with-a-reason.
+
+        A sample the user has not finished is not silently absent from the
+        release: it is listed in ``excluded.json`` with the same wording the
+        review screen shows, so "why is my movement missing?" has an answer.
+        """
+        selected: list[MovementSample] = []
+        rejected: list[dict[str, Any]] = []
+        for sample in row.samples:
+            if not (self.options.include_excluded_samples or sample.is_active):
+                rejected.append(
+                    {
+                        "take_id": row.take.take_id,
+                        "sample_id": sample.sample_id,
+                        "reason": "sample_excluded_by_user",
+                        "message": (
+                            f"Hareket {sample.index}: kullanıcı tarafından "
+                            "datasetten çıkarıldı."
+                        ),
+                    }
+                )
+                continue
+            readiness, problems = evaluate_sample(
+                sample, known_error_codes=self._error_vocabulary
+            )
+            if not self.options.include_unready and not readiness.is_ready:
+                rejected.append(
+                    {
+                        "take_id": row.take.take_id,
+                        "sample_id": sample.sample_id,
+                        "reason": f"sample_{readiness.value}",
+                        "message": (
+                            f"Hareket {sample.index}: "
+                            + (
+                                " ".join(p.message for p in problems)
+                                or "etiket tamamlanmamış."
+                            )
+                        ),
+                    }
+                )
+                continue
+            selected.append(sample)
+        return sorted(selected, key=lambda s: s.start_frame), rejected
+
+    def _selected_samples(self, row: TakeRow) -> list[MovementSample]:
+        """Just the exportable samples, for progress counting and previews."""
+        return self._partition_samples(row)[0]
+
+    def _rejected_takes(
+        self,
+        rows: Optional[Sequence[TakeRow]],
+        selected: Sequence[TakeRow],
+    ) -> list[dict[str, Any]]:
+        """Takes that never got as far as sample selection, and why.
+
+        Without this, a whole take vanishing from a release would look like a
+        bug rather than a filter doing its job.
+        """
+        considered = list(rows) if rows is not None else list(self.index.rows)
+        chosen = {row.take.take_id for row in selected}
+        rejected: list[dict[str, Any]] = []
+        for row in considered:
+            if row.take.take_id in chosen:
+                continue
+            take = row.take
+            if take.is_synthetic and not self.options.include_synthetic:
+                reason, message = (
+                    "take_synthetic_excluded",
+                    "Sentetik kayıt; 'Sentetik kayıtları dahil et' kapalı.",
+                )
+            elif not take.usable_for_export:
+                reason, message = (
+                    "take_not_usable",
+                    f"Kayıt durumu '{take.state.value}', kalite "
+                    f"'{take.quality.value}'.",
+                )
+            else:
+                reason, message = (
+                    "take_without_ready_sample",
+                    "Bu kayıtta export'a hazır hareket yok.",
+                )
+            rejected.append(
+                {
+                    "take_id": take.take_id,
+                    "reason": reason,
+                    "message": f"{row.participant_code}: {message}",
+                }
+            )
+        return rejected
+
+    #: Pre-redesign name, kept for older callers.
+    _selected_segments = _selected_samples
 
     # ----------------------------------------------------------------- build
     def build(
@@ -187,7 +295,10 @@ class ReleaseBuilder:
         os.replace(long_path(staging), long_path(final_dir))
         result.path = final_dir
         logger.info(
-            "Dataset sürümü yayımlandı: %s (%d örnek)", name, result.sample_count
+            "Dataset sürümü yayımlandı: %s (%d örnek, %d hata aralığı)",
+            name,
+            result.sample_count,
+            result.error_interval_count,
         )
         return result
 
@@ -200,7 +311,17 @@ class ReleaseBuilder:
         progress: Optional[ProgressCallback],
     ) -> ExportResult:
         selected = self.select_rows(rows)
-        total = max(1, sum(len(self._selected_segments(row)) for row in selected))
+        total = max(1, sum(len(self._selected_samples(row)) for row in selected))
+
+        manifest_samples: list[dict[str, Any]] = []
+        fingerprint_keys: list[dict[str, Any]] = []
+        excluded: list[dict[str, Any]] = self._rejected_takes(rows, selected)
+        warnings: list[str] = []
+
+        # Column order of the per-frame error target. Fixed by the project's
+        # label mapping so every release indexes classes identically.
+        error_classes = sorted(self._error_vocabulary)
+        error_index = {code: position for position, code in enumerate(error_classes)}
 
         def report(done: int, message: str) -> None:
             if progress is not None and not progress(done, total, message):
@@ -209,18 +330,16 @@ class ReleaseBuilder:
                     remedy="Hazırlanan geçici dosyalar silindi.",
                 )
 
-        manifest_samples: list[dict[str, Any]] = []
-        fingerprint_keys: list[dict[str, Any]] = []
-        excluded: list[dict[str, Any]] = []
-        warnings: list[str] = []
         spec_seen: dict[str, SkeletonSpec] = {}
         mapping_used: Optional[JointMapping] = None
         completed = 0
+        interval_total = 0
 
         for row in selected:
             take = row.take
-            segments = self._selected_segments(row)
-            if not segments:
+            samples, rejected = self._partition_samples(row)
+            excluded.extend(rejected)
+            if not samples:
                 continue
 
             paths = self.workspace.take_paths(take)
@@ -232,7 +351,7 @@ class ReleaseBuilder:
                         "message": "İskelet akışı dosyası bulunamadı.",
                     }
                 )
-                completed += len(segments)
+                completed += len(samples)
                 report(completed, f"{row.participant_code}: akış yok, atlandı")
                 continue
 
@@ -247,12 +366,12 @@ class ReleaseBuilder:
                         "take_id": take.take_id,
                         "reason": "unknown_skeleton_format",
                         "message": (
-                            f"Bilinmeyen iskelet biçimi: "
+                            "Bilinmeyen iskelet biçimi: "
                             f"{take.skeleton_format or stream.skeleton_format!r}"
                         ),
                     }
                 )
-                completed += len(segments)
+                completed += len(samples)
                 continue
 
             mapping: Optional[JointMapping] = None
@@ -271,7 +390,7 @@ class ReleaseBuilder:
                             ),
                         }
                     )
-                    completed += len(segments)
+                    completed += len(samples)
                     continue
                 mapping_used = mapping
                 output_spec = mapping.target_spec
@@ -285,25 +404,24 @@ class ReleaseBuilder:
             spec_seen[output_spec.name] = output_spec
 
             tracking_id = self._preferred_tracking_id(stream)
-            for segment in segments:
+            for sample in samples:
                 completed += 1
-                # Segment bounds are stream positions (see RepetitionSegment),
-                # so they index the frame list directly. Clamping guards against
-                # a sidecar written against a stream that was later truncated by
-                # an interrupted recording.
+                # Bounds are stream positions, inclusive. Clamping guards a
+                # sidecar written against a stream later truncated by an
+                # interrupted recording.
                 last = max(0, stream.frame_count - 1)
-                start = min(max(0, segment.start_frame), last)
-                end = min(max(start, segment.end_frame), last)
+                start = min(max(0, sample.start_frame), last)
+                end = min(max(start, sample.end_frame), last)
                 joints = stream.joint_array(tracking_id, start=start, end=end)
 
                 if joints.shape[0] < self.options.min_frames_per_sample:
                     excluded.append(
                         {
                             "take_id": take.take_id,
-                            "segment_id": segment.segment_id,
+                            "sample_id": sample.sample_id,
                             "reason": "too_few_frames",
                             "message": (
-                                f"Tekrar {segment.index}: {joints.shape[0]} kare, "
+                                f"Hareket {sample.index}: {joints.shape[0]} kare, "
                                 f"en az {self.options.min_frames_per_sample} gerekli."
                             ),
                         }
@@ -313,9 +431,9 @@ class ReleaseBuilder:
                     excluded.append(
                         {
                             "take_id": take.take_id,
-                            "segment_id": segment.segment_id,
+                            "sample_id": sample.sample_id,
                             "reason": "no_body_in_interval",
-                            "message": f"Tekrar {segment.index}: aralıkta gövde yok.",
+                            "message": f"Hareket {sample.index}: aralıkta gövde yok.",
                         }
                     )
                     continue
@@ -330,65 +448,68 @@ class ReleaseBuilder:
                     if confidences is not None:
                         confidences = mapping.apply_confidence(confidences)
 
-                sample_id = f"{take.take_id}__{segment.segment_id}"
+                frame_window = stream.frames[start : end + 1]
+                intervals, dropped = self._resolve_intervals(
+                    sample, start, end, frame_window, error_index
+                )
+                excluded.extend(dropped)
+                interval_total += len(intervals)
+
+                sample_id = f"{take.take_id}__{sample.sample_id}"
                 sample_path = samples_dir / f"{sample_id}.npz"
                 payload: dict[str, np.ndarray] = {
                     "joints_xyz": joints.astype(np.float32),
                     "frame_indices": np.asarray(
-                        [f.frame_index for f in stream.frames[start : end + 1]],
-                        dtype=np.int64,
+                        [f.frame_index for f in frame_window], dtype=np.int64
                     ),
                     "camera_timestamps_ns": np.asarray(
-                        [
-                            f.camera_timestamp_ns
-                            for f in stream.frames[start : end + 1]
-                        ],
-                        dtype=np.int64,
+                        [f.camera_timestamp_ns for f in frame_window], dtype=np.int64
                     ),
                 }
                 if confidences is not None:
                     payload["joint_confidences"] = confidences.astype(np.float32)
+
+                # (class index, relative start, relative end), inclusive.
+                payload["error_intervals"] = np.asarray(
+                    [
+                        [i["class_index"], i["relative_start"], i["relative_end"]]
+                        for i in intervals
+                    ],
+                    dtype=np.int32,
+                ).reshape(-1, 3)
+
+                if self.options.store_error_target_arrays:
+                    payload["error_multi_hot"] = self._error_multi_hot(
+                        intervals, frames=int(joints.shape[0]), classes=len(error_classes)
+                    )
+
                 with open(long_path(sample_path), "wb") as handle:
                     np.savez_compressed(handle, **payload)
 
                 entry = self._sample_entry(
                     sample_id=sample_id,
                     row=row,
-                    segment=segment,
+                    sample=sample,
                     joints=joints,
                     output_spec=output_spec,
                     file_name=f"samples/{sample_path.name}",
+                    positions=(start, end),
                     camera_frame_range=(
                         int(payload["frame_indices"][0]),
                         int(payload["frame_indices"][-1]),
                     ),
+                    intervals=intervals,
                 )
                 manifest_samples.append(entry)
-                fingerprint_keys.append(
-                    {
-                        key: entry[key]
-                        for key in (
-                            "sample_id",
-                            "participant_id",
-                            "session_id",
-                            "take_id",
-                            "segment_id",
-                            "num_frames",
-                            "num_joints",
-                            "exercise",
-                            "correctness",
-                            "skeleton_format",
-                        )
-                    }
-                )
-                report(completed, f"{row.participant_code} / tekrar {segment.index}")
+                fingerprint_keys.append(self._fingerprint_key(entry))
+                report(completed, f"{row.participant_code} / hareket {sample.index}")
 
         if not manifest_samples:
             # An empty release is never published. Say *why* it is empty: the
             # exclusion reasons are the actionable part, not the empty count.
             reasons = sorted({item["reason"] for item in excluded})
             remedy = (
-                "Filtreleri gevşetin veya en az bir tekrarı etiketleyip "
+                "Filtreleri gevşetin veya en az bir hareketi tam etiketleyip "
                 "kaydı tamamlayın."
             )
             if reasons == ["no_joint_mapping"]:
@@ -414,7 +535,127 @@ class ReleaseBuilder:
             warnings=warnings,
             specs=spec_seen,
             mapping=mapping_used,
+            error_classes=error_classes,
+            interval_total=interval_total,
         )
+
+    # ------------------------------------------------------- error intervals
+    def _resolve_intervals(
+        self,
+        sample: MovementSample,
+        start: int,
+        end: int,
+        frame_window: Sequence[Any],
+        error_index: dict[str, int],
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Turn a sample's error intervals into export records.
+
+        Returns the usable records and the ones that had to be dropped, each
+        with a reason. An interval is never silently reshaped into something
+        that would misrepresent where the error actually was.
+        """
+        resolved: list[dict[str, Any]] = []
+        dropped: list[dict[str, Any]] = []
+
+        for interval in sample.sorted_intervals():
+            if not interval.error_code:
+                dropped.append(
+                    {
+                        "take_id": sample.take_id,
+                        "sample_id": sample.sample_id,
+                        "interval_id": interval.interval_id,
+                        "reason": "interval_without_class",
+                        "message": "Hata aralığına sınıf atanmamış.",
+                    }
+                )
+                continue
+            if interval.error_code not in error_index:
+                dropped.append(
+                    {
+                        "take_id": sample.take_id,
+                        "sample_id": sample.sample_id,
+                        "interval_id": interval.interval_id,
+                        "reason": "unknown_error_class",
+                        "message": (
+                            f"'{interval.error_code}' hata sınıfı etiket şemasında yok."
+                        ),
+                    }
+                )
+                continue
+            if interval.end_frame < interval.start_frame:
+                dropped.append(
+                    {
+                        "take_id": sample.take_id,
+                        "sample_id": sample.sample_id,
+                        "interval_id": interval.interval_id,
+                        "reason": "interval_reversed",
+                        "message": "Hata aralığının bitişi başlangıcından önce.",
+                    }
+                )
+                continue
+            if interval.start_frame < start or interval.end_frame > end:
+                dropped.append(
+                    {
+                        "take_id": sample.take_id,
+                        "sample_id": sample.sample_id,
+                        "interval_id": interval.interval_id,
+                        "reason": "interval_outside_sample",
+                        "message": (
+                            f"Hata aralığı ({interval.start_frame}-"
+                            f"{interval.end_frame}) hareketin ({start}-{end}) dışında."
+                        ),
+                    }
+                )
+                continue
+
+            relative_start = interval.start_frame - start
+            relative_end = interval.end_frame - start
+            resolved.append(
+                {
+                    "interval_id": interval.interval_id,
+                    "error_code": interval.error_code,
+                    "class_index": error_index[interval.error_code],
+                    "start_position": interval.start_frame,
+                    "end_position": interval.end_frame,
+                    "relative_start": relative_start,
+                    "relative_end": relative_end,
+                    "num_frames": relative_end - relative_start + 1,
+                    "start_camera_frame": int(
+                        frame_window[relative_start].frame_index
+                    ),
+                    "end_camera_frame": int(frame_window[relative_end].frame_index),
+                    "start_timestamp_ns": int(
+                        frame_window[relative_start].camera_timestamp_ns
+                    ),
+                    "end_timestamp_ns": int(
+                        frame_window[relative_end].camera_timestamp_ns
+                    ),
+                    "source": interval.source.value,
+                    "note": interval.note,
+                }
+            )
+        return resolved, dropped
+
+    @staticmethod
+    def _error_multi_hot(
+        intervals: Sequence[dict[str, Any]], *, frames: int, classes: int
+    ) -> np.ndarray:
+        """``uint8 [T, C]`` per-frame error target.
+
+        Column order matches ``label_mapping.json``'s
+        ``error_types.code_to_index``. Overlapping intervals simply set several
+        columns on the same frame, which is exactly what "two errors at once"
+        should mean.
+        """
+        target = np.zeros((frames, max(0, classes)), dtype=np.uint8)
+        for interval in intervals:
+            column = int(interval["class_index"])
+            if 0 <= column < classes:
+                target[
+                    int(interval["relative_start"]) : int(interval["relative_end"]) + 1,
+                    column,
+                ] = 1
+        return target
 
     # ------------------------------------------------------------- documents
     def _write_documents(
@@ -428,6 +669,8 @@ class ReleaseBuilder:
         warnings: list[str],
         specs: dict[str, SkeletonSpec],
         mapping: Optional[JointMapping],
+        error_classes: Sequence[str],
+        interval_total: int,
     ) -> ExportResult:
         project = self.workspace.project
         schema = self.workspace.label_schema
@@ -479,9 +722,47 @@ class ReleaseBuilder:
                         "uygulanmamıştır; bunlar eğitim katmanına aittir."
                     ),
                 },
+                "label_contract": {
+                    "level_1": (
+                        "Her örnek bir hareket sample'ıdır: exercise + ikili "
+                        "correctness taşır."
+                    ),
+                    "level_2": (
+                        "error_intervals, hareketin içindeki zamansal hata "
+                        "aralıklarıdır. Bir aralık tek bir hata sınıfı taşır; "
+                        "aynı anda görülen farklı sınıflar çakışan aralıklarla "
+                        "ifade edilir."
+                    ),
+                    "boundaries": (
+                        "start/end konumları her iki uçta DAHİLDİR. "
+                        "start_position/end_position kayıt içindeki mutlak "
+                        "akış konumudur; relative_start/relative_end ise "
+                        "joints_xyz dizisindeki indekstir "
+                        "(joints_xyz[relative_start:relative_end + 1])."
+                    ),
+                    "arrays": {
+                        "error_intervals": (
+                            "int32 [K, 3] = (class_index, relative_start, "
+                            "relative_end), her iki uç dahil."
+                        ),
+                        "error_multi_hot": (
+                            "uint8 [T, C]; sütun sırası "
+                            "label_mapping.error_types.code_to_index ile aynıdır. "
+                            "Çakışan aralıklar aynı karede birden çok sütunu 1 yapar."
+                        )
+                        if self.options.store_error_target_arrays
+                        else "yazılmadı (store_error_target_arrays=False)",
+                    },
+                    "error_classes": list(error_classes),
+                    "movement_phase": (
+                        "Bu sürümde hareket fazı etiketi yoktur; iki seviyeli "
+                        "etiket modelinde kaldırılmıştır."
+                    ),
+                },
                 "export_config": export_config,
                 "counts": {
                     "samples": len(samples),
+                    "error_intervals": interval_total,
                     "excluded": len(excluded),
                     "participants": len({s["participant_id"] for s in samples}),
                     "sessions": len({s["session_id"] for s in samples}),
@@ -491,35 +772,64 @@ class ReleaseBuilder:
             },
         )
         write_json(
-            staging / "excluded.json",
-            {"count": len(excluded), "items": excluded},
+            staging / "excluded.json", {"count": len(excluded), "items": excluded}
         )
 
-        report = self._validate(staging, samples, warnings)
+        report = self._validate(staging, samples, warnings, error_classes)
         write_json(staging / "validation_report.json", report)
         return ExportResult(
             release_name=name,
             path=staging,
             sample_count=len(samples),
             excluded_count=len(excluded),
+            error_interval_count=interval_total,
             fingerprint=fingerprint["fingerprint"],
             validation_passed=bool(report["passed"]),
             warnings=list(report["warnings"]),
         )
+
+    @staticmethod
+    def _fingerprint_key(entry: dict[str, Any]) -> dict[str, Any]:
+        """The identity of one sample for fingerprinting purposes.
+
+        Includes the error intervals, so adding, removing, re-classifying or
+        moving an interval provably changes the release fingerprint.
+        """
+        return {
+            "sample_id": entry["sample_id"],
+            "participant_id": entry["participant_id"],
+            "session_id": entry["session_id"],
+            "take_id": entry["take_id"],
+            "movement_sample_id": entry["movement_sample_id"],
+            "num_frames": entry["num_frames"],
+            "num_joints": entry["num_joints"],
+            "exercise": entry["exercise"],
+            "correctness": entry["correctness"],
+            "skeleton_format": entry["skeleton_format"],
+            "error_intervals": [
+                [
+                    interval["error_code"],
+                    interval["relative_start"],
+                    interval["relative_end"],
+                ]
+                for interval in entry["error_intervals"]
+            ],
+        }
 
     def _sample_entry(
         self,
         *,
         sample_id: str,
         row: TakeRow,
-        segment: RepetitionSegment,
+        sample: MovementSample,
         joints: np.ndarray,
         output_spec: SkeletonSpec,
         file_name: str,
+        positions: tuple[int, int],
         camera_frame_range: tuple[int, int],
+        intervals: list[dict[str, Any]],
     ) -> dict[str, Any]:
         take = row.take
-        annotation = segment.annotation
         finite = np.isfinite(joints).all(axis=2)
         camera = take.camera_info
         return {
@@ -532,29 +842,29 @@ class ReleaseBuilder:
             "participant_code": row.participant_code,
             "session_id": take.session_id,
             "take_id": take.take_id,
-            "segment_id": segment.segment_id,
-            "repetition_index": segment.index,
+            "movement_sample_id": sample.sample_id,
+            "movement_index": sample.index,
             "num_frames": int(joints.shape[0]),
             "num_joints": int(joints.shape[1]),
-            # Positions in the take's pose stream ...
-            "start_position": segment.start_frame,
-            "end_position": segment.end_frame,
-            # ... and the camera's own frame numbers for the same span, which
-            # differ whenever a frame was dropped during capture.
+            # Absolute positions in the take's pose stream, inclusive.
+            "start_position": positions[0],
+            "end_position": positions[1],
+            # The camera's own frame numbers for the same span.
             "start_camera_frame": camera_frame_range[0],
             "end_camera_frame": camera_frame_range[1],
             "skeleton_format": output_spec.name,
             "coordinate_system": output_spec.coordinate_system,
             "length_unit": output_spec.length_unit,
-            "exercise": annotation.exercise,
-            "correctness": annotation.correctness.value,
-            "error_types": list(annotation.error_types),
-            "affected_joints": list(annotation.affected_joints),
-            "movement_phase": annotation.movement_phase,
-            "severity": annotation.severity,
-            "annotation_status": annotation.status.value,
-            "annotation_source": segment.source.value,
-            "annotator_confidence": annotation.annotator_confidence,
+            # ---- level 1: the movement label ----
+            "exercise": sample.exercise,
+            "correctness": sample.correctness.value,
+            # ---- level 2: temporal error localisation ----
+            "error_intervals": intervals,
+            "error_classes": sorted({i["error_code"] for i in intervals}),
+            "has_error_localisation": bool(intervals),
+            "label_source": sample.source.value,
+            "annotator": sample.annotator,
+            "note": sample.note,
             "origin": take.origin.value,
             "source_backend": camera.backend if camera else "unknown",
             "camera_model": camera.model if camera else "unknown",
@@ -572,7 +882,11 @@ class ReleaseBuilder:
         }
 
     def _validate(
-        self, staging: Path, samples: list[dict[str, Any]], warnings: list[str]
+        self,
+        staging: Path,
+        samples: list[dict[str, Any]],
+        warnings: list[str],
+        error_classes: Sequence[str],
     ) -> dict[str, Any]:
         """Re-read every written sample and check it against its manifest entry."""
         errors: list[dict[str, Any]] = []
@@ -580,18 +894,21 @@ class ReleaseBuilder:
         all_warnings = list(warnings)
         joint_counts: set[int] = set()
         empty_samples = 0
+        localised = 0
+        vocabulary = set(error_classes)
 
         for entry in samples:
+            sample_id = entry["sample_id"]
             path = staging / entry["file"]
             if not path_exists(path):
-                errors.append({"sample_id": entry["sample_id"], "issue": "file_missing"})
+                errors.append({"sample_id": sample_id, "issue": "file_missing"})
                 continue
             with np.load(long_path(path)) as payload:
                 joints = payload["joints_xyz"]
                 if joints.dtype != np.float32:
                     errors.append(
                         {
-                            "sample_id": entry["sample_id"],
+                            "sample_id": sample_id,
                             "issue": "dtype_mismatch",
                             "expected": "float32",
                             "actual": str(joints.dtype),
@@ -600,25 +917,61 @@ class ReleaseBuilder:
                 if joints.ndim != 3 or joints.shape[2] != 3:
                     errors.append(
                         {
-                            "sample_id": entry["sample_id"],
+                            "sample_id": sample_id,
                             "issue": "shape_invalid",
                             "actual": list(joints.shape),
                         }
                     )
                     continue
-                if joints.shape[0] != entry["num_frames"]:
+                frames = int(joints.shape[0])
+                if frames != entry["num_frames"]:
                     errors.append(
                         {
-                            "sample_id": entry["sample_id"],
+                            "sample_id": sample_id,
                             "issue": "frame_count_mismatch",
                             "expected": entry["num_frames"],
-                            "actual": int(joints.shape[0]),
+                            "actual": frames,
                         }
                     )
                 joint_counts.add(int(joints.shape[1]))
                 if not np.isfinite(joints).any():
                     empty_samples += 1
+
+                errors.extend(
+                    self._validate_intervals(entry, payload, frames, vocabulary)
+                )
+
+            if entry["error_intervals"]:
+                localised += 1
             entry["checksum"] = hash_file(path)
+
+        # --- label-level consistency, mirroring the UI's readiness rule ------
+        for entry in samples:
+            correctness = entry["correctness"]
+            count = len(entry["error_intervals"])
+            if correctness == "correct" and count:
+                errors.append(
+                    {
+                        "sample_id": entry["sample_id"],
+                        "issue": "correct_with_error_intervals",
+                        "detail": f"{count} hata aralığı",
+                    }
+                )
+            if correctness == "incorrect" and not count:
+                errors.append(
+                    {
+                        "sample_id": entry["sample_id"],
+                        "issue": "incorrect_without_error_interval",
+                    }
+                )
+            if correctness not in ("correct", "incorrect"):
+                errors.append(
+                    {
+                        "sample_id": entry["sample_id"],
+                        "issue": "correctness_not_binary",
+                        "actual": correctness,
+                    }
+                )
 
         if empty_samples:
             all_warnings.append(
@@ -628,7 +981,6 @@ class ReleaseBuilder:
             all_warnings.append(
                 f"Sürüm birden fazla eklem sayısı içeriyor: {sorted(joint_counts)}."
             )
-
         participants = {s["participant_id"] for s in samples}
         if len(participants) < 2:
             all_warnings.append(
@@ -641,12 +993,52 @@ class ReleaseBuilder:
                 f"{synthetic} örnek SENTETİK verilerden üretildi ve gerçek "
                 "ölçüm değildir."
             )
+        incorrect = sum(1 for s in samples if s["correctness"] == "incorrect")
+        if incorrect and not localised:
+            all_warnings.append(
+                "Hiçbir hatalı örnekte zamansal hata aralığı yok; zamansal "
+                "yerelleştirme eğitilemez."
+            )
 
         checks.append(
             {
                 "check": "array_contract",
-                "passed": not errors,
+                "passed": not any(
+                    e["issue"]
+                    in ("dtype_mismatch", "shape_invalid", "frame_count_mismatch")
+                    for e in errors
+                ),
                 "detail": "Her örnek float32 [T, J, 3] ve manifest ile tutarlı.",
+            }
+        )
+        checks.append(
+            {
+                "check": "error_interval_bounds",
+                "passed": not any(
+                    e["issue"].startswith("interval_") for e in errors
+                ),
+                "detail": (
+                    "Her hata aralığı diziyle örtüşüyor ve göreli sınırları "
+                    "mutlak sınırlarıyla birebir eşleşiyor."
+                ),
+            }
+        )
+        checks.append(
+            {
+                "check": "correctness_consistency",
+                "passed": not any(
+                    e["issue"]
+                    in (
+                        "correct_with_error_intervals",
+                        "incorrect_without_error_interval",
+                        "correctness_not_binary",
+                    )
+                    for e in errors
+                ),
+                "detail": (
+                    "Doğru örneklerde hata aralığı yok, hatalı örneklerin "
+                    "hepsinde en az bir aralık var, karar ikili."
+                ),
             }
         )
         checks.append(
@@ -664,10 +1056,117 @@ class ReleaseBuilder:
             "validated_at": utc_now_iso(),
             "passed": not errors,
             "sample_count": len(samples),
+            "error_interval_count": sum(
+                len(s["error_intervals"]) for s in samples
+            ),
+            "samples_with_localisation": localised,
             "errors": errors,
             "warnings": all_warnings,
             "checks": checks,
         }
+
+    @staticmethod
+    def _validate_intervals(
+        entry: dict[str, Any],
+        payload: Any,
+        frames: int,
+        vocabulary: set[str],
+    ) -> list[dict[str, Any]]:
+        """Check one sample's intervals against the array actually written."""
+        sample_id = entry["sample_id"]
+        problems: list[dict[str, Any]] = []
+        stored = np.asarray(payload["error_intervals"]).reshape(-1, 3)
+
+        if stored.shape[0] != len(entry["error_intervals"]):
+            problems.append(
+                {
+                    "sample_id": sample_id,
+                    "issue": "interval_count_mismatch",
+                    "expected": len(entry["error_intervals"]),
+                    "actual": int(stored.shape[0]),
+                }
+            )
+
+        for position, interval in enumerate(entry["error_intervals"]):
+            rel_start = int(interval["relative_start"])
+            rel_end = int(interval["relative_end"])
+            if rel_end < rel_start:
+                problems.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "interval_reversed",
+                        "interval_id": interval["interval_id"],
+                    }
+                )
+            if rel_start < 0 or rel_end >= frames:
+                problems.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "interval_out_of_array",
+                        "interval_id": interval["interval_id"],
+                        "detail": f"[{rel_start}, {rel_end}] vs T={frames}",
+                    }
+                )
+            # Absolute and relative bounds must describe the same span.
+            if (
+                interval["start_position"] - entry["start_position"] != rel_start
+                or interval["end_position"] - entry["start_position"] != rel_end
+            ):
+                problems.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "interval_relative_absolute_mismatch",
+                        "interval_id": interval["interval_id"],
+                    }
+                )
+            if interval["error_code"] not in vocabulary:
+                problems.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "interval_unknown_class",
+                        "interval_id": interval["interval_id"],
+                        "detail": interval["error_code"],
+                    }
+                )
+            if position < stored.shape[0]:
+                row = stored[position]
+                if (
+                    int(row[1]) != rel_start
+                    or int(row[2]) != rel_end
+                    or int(row[0]) != int(interval["class_index"])
+                ):
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "interval_array_manifest_mismatch",
+                            "interval_id": interval["interval_id"],
+                        }
+                    )
+
+        if "error_multi_hot" in payload:
+            multi_hot = np.asarray(payload["error_multi_hot"])
+            if multi_hot.shape[0] != frames:
+                problems.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "interval_target_length_mismatch",
+                        "expected": frames,
+                        "actual": int(multi_hot.shape[0]),
+                    }
+                )
+            else:
+                expected_on = sum(
+                    i["relative_end"] - i["relative_start"] + 1
+                    for i in entry["error_intervals"]
+                )
+                if expected_on and not multi_hot.any():
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "interval_target_empty",
+                        }
+                    )
+        return problems
 
     @staticmethod
     def _preferred_tracking_id(stream: Any) -> Optional[int]:

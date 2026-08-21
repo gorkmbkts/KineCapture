@@ -205,21 +205,49 @@ def run_self_test(config: AppConfig) -> int:
             f"({loaded.frame_count} kare, video={loaded.has_video})"
         )
 
+        # Two movement samples: one clean, one whose error is localised, so the
+        # self-test exercises both label levels rather than only the easy path.
+        schema = workspace.label_schema
+        error_class = schema.add_error_type("Diz içe çöküyor")
+        workspace.save_label_schema(schema)
+
         repository = AnnotationRepository(
             workspace, take, frame_count=loaded.frame_count
         )
-        segment = repository.create_segment(1, max(3, loaded.frame_count - 2))
-        repository.annotate(
-            segment.segment_id, exercise="squat", correctness=Correctness.CORRECT
+        midpoint = loaded.frame_count // 2
+        good = repository.create_sample(1, midpoint - 2)
+        repository.label_sample(
+            good.sample_id, exercise="squat", correctness=Correctness.CORRECT
+        )
+        bad = repository.create_sample(midpoint, max(midpoint + 3, loaded.frame_count - 2))
+        repository.label_sample(
+            bad.sample_id, exercise="squat", correctness=Correctness.INCORRECT
+        )
+        repository.create_error_interval(
+            bad.sample_id,
+            bad.start_frame + 2,
+            bad.start_frame + 6,
+            error_code=error_class.code,
         )
         repository.save()
-        print("  segmentasyon/etiketleme   : OK (1 tekrar)")
+        if repository.ready_count != 2:
+            print(
+                f"  etiketleme                : BAŞARISIZ "
+                f"({repository.ready_count}/2 hazır)",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            "  hareket/hata etiketleme   : OK "
+            "(2 hareket, 1 zamansal hata aralığı)"
+        )
 
         index = DatasetIndex(workspace).refresh()
         summary = index.summary()
         print(
             f"  dataset index             : OK "
-            f"({summary.takes} kayıt, {summary.labelled_repetitions} etiketli tekrar)"
+            f"({summary.takes} kayıt, {summary.ready_samples} hazır hareket, "
+            f"{summary.error_intervals} hata aralığı)"
         )
 
         builder = ReleaseBuilder(
@@ -228,7 +256,8 @@ def run_self_test(config: AppConfig) -> int:
         result = builder.build()
         print(
             f"  export                    : OK ({result.release_name}, "
-            f"{result.sample_count} örnek, doğrulama="
+            f"{result.sample_count} örnek, {result.error_interval_count} hata "
+            f"aralığı, doğrulama="
             f"{'geçti' if result.validation_passed else 'HATA'})"
         )
         for name in (

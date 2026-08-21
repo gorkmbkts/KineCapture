@@ -385,7 +385,8 @@ class ProjectsPage(Page):
                 (
                     "İçerik",
                     f"{counts['participants']} katılımcı · {counts['sessions']} oturum · "
-                    f"{counts['takes']} kayıt · {counts['repetitions']} tekrar",
+                    f"{counts['takes']} kayıt · "
+                    f"{counts['movement_samples']} hareket",
                 ),
                 (
                     "Varsayılan profil",
@@ -396,7 +397,7 @@ class ProjectsPage(Page):
                 (
                     "Etiket şeması",
                     f"v{schema.schema_version} · "
-                    f"{len(schema.exercises)} egzersiz · "
+                    f"{len(schema.exercises)} hareket türü · "
                     f"{len(schema.error_types)} hata türü",
                 ),
             ]

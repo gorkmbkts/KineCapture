@@ -38,9 +38,11 @@ class Page(QWidget):
         self._theme = state.theme
 
         outer = QVBoxLayout(self)
-        margin = self._theme.space_lg
-        outer.setContentsMargins(margin, margin, margin, margin)
-        outer.setSpacing(self._theme.space_md)
+        # Tight enough that a 1366x768 screen still fits a page's controls
+        # without scrolling, roomy enough not to feel cramped at 1080p.
+        margin = self._theme.space_md
+        outer.setContentsMargins(margin, margin, margin, self._theme.space_sm)
+        outer.setSpacing(self._theme.space_sm)
 
         self.header = SectionHeader(self.title, self.description, theme=self._theme)
         outer.addWidget(self.header)

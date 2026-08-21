@@ -19,7 +19,7 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.3.0"
+APP_VERSION: str = "0.4.0"
 
 #: Schema version for ``project.json``.
 PROJECT_SCHEMA_VERSION: str = "1.0.0"
@@ -33,11 +33,13 @@ TAKE_SCHEMA_VERSION: str = "1.0.0"
 #: Schema version for the append-safe per-frame skeleton sidecar (JSONL).
 SKELETON_STREAM_SCHEMA_VERSION: str = "1.0.0"
 
-#: Schema version for ``annotations/segments.json``.
-ANNOTATION_SCHEMA_VERSION: str = "1.0.0"
+#: Schema version for the label sidecar (``annotations/segments.json``).
+#: 2.x introduces the two-level MovementSample / ErrorInterval hierarchy;
+#: 1.x documents are read through a lossless compatibility path.
+ANNOTATION_SCHEMA_VERSION: str = "2.0.0"
 
 #: Schema version of the built-in label schema document.
-LABEL_SCHEMA_VERSION: str = "1.0.0"
+LABEL_SCHEMA_VERSION: str = "2.0.0"
 
 #: Schema version for an exported dataset release manifest.
 RELEASE_SCHEMA_VERSION: str = "1.0.0"

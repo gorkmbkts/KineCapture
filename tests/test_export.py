@@ -13,7 +13,12 @@ from kinecapture.capture.service import CaptureService
 from kinecapture.core.errors import ExportCancelled, ExportError
 from kinecapture.core.jsonio import read_json
 from kinecapture.dataset.index import DatasetIndex, DatasetQuery
-from kinecapture.domain.enums import Correctness, DataOrigin, TakeQuality
+from kinecapture.domain.enums import (
+    Correctness,
+    DataOrigin,
+    SampleReadiness,
+    TakeQuality,
+)
 from kinecapture.export.release import (
     ExportOptions,
     ReleaseBuilder,
@@ -37,19 +42,31 @@ def _record_and_label(
     workspace.save_take(take)
 
     loaded = load_take(workspace, take, with_video=False)
+    schema = workspace.label_schema
+    if not schema.error_types:
+        schema.add_error_type("Diz içe çöküyor")
+        workspace.save_label_schema(schema)
+
     repository = AnnotationRepository(
         workspace, take, frame_count=loaded.frame_count, annotator="pytest"
     )
     span = loaded.frame_count // (reps + 1)
     for index in range(reps):
-        segment = repository.create_segment(
-            1 + index * span, (index + 1) * span
-        )
-        repository.annotate(
-            segment.segment_id,
+        sample = repository.create_sample(1 + index * span, (index + 1) * span)
+        correct = index % 2 == 0
+        repository.label_sample(
+            sample.sample_id,
             exercise=exercise,
-            correctness=Correctness.CORRECT if index % 2 == 0 else Correctness.INCORRECT,
+            correctness=Correctness.CORRECT if correct else Correctness.INCORRECT,
         )
+        if not correct:
+            # An incorrect movement is only finished once the error is located.
+            repository.create_error_interval(
+                sample.sample_id,
+                sample.start_frame + 2,
+                sample.start_frame + 6,
+                error_code="diz-ice-cokuyor",
+            )
     repository.save()
     return take
 
@@ -67,8 +84,9 @@ def test_index_counts_everything(labelled_project) -> None:
     index = DatasetIndex(labelled_project).refresh()
     summary = index.summary()
     assert summary.takes == 1
-    assert summary.repetitions == 2
-    assert summary.labelled_repetitions == 2
+    assert summary.movement_samples == 2
+    assert summary.ready_samples == 2
+    assert summary.error_intervals == 1
     assert summary.synthetic_takes == 1
     assert summary.real_takes == 0
     assert summary.correctness_counts == {"correct": 1, "incorrect": 1}
@@ -91,6 +109,9 @@ def test_query_filters(labelled_project) -> None:
     assert not index.filter(DatasetQuery(origin=DataOrigin.REAL))
     assert index.filter(DatasetQuery(origin=DataOrigin.SYNTHETIC))
     assert index.filter(DatasetQuery(correctness=(Correctness.INCORRECT,)))
+    assert index.filter(DatasetQuery(error_codes=("diz-ice-cokuyor",)))
+    assert not index.filter(DatasetQuery(error_codes=("nope",)))
+    assert index.filter(DatasetQuery(readiness=(SampleReadiness.READY,)))
 
 
 def test_quality_issues_flag_single_participant(labelled_project) -> None:
@@ -189,7 +210,7 @@ def test_manifest_preserves_grouping_keys(labelled_project) -> None:
         assert entry["participant_id"]
         assert entry["session_id"]
         assert entry["take_id"]
-        assert entry["segment_id"]
+        assert entry["movement_sample_id"]
         assert entry["source_backend"]
         assert entry["capture_profile"]
 
@@ -273,13 +294,15 @@ def test_export_skips_unlabelled_by_default(workspace, session) -> None:
         ).build()
 
 
-def test_excluded_segments_are_left_out(labelled_project) -> None:
+def test_excluded_samples_are_left_out(labelled_project) -> None:
     from kinecapture.domain.enums import SegmentStatus
 
     index = DatasetIndex(labelled_project).refresh()
     row = index.rows[0]
     repository = AnnotationRepository(labelled_project, row.take)
-    repository.set_status(repository.segments[0].segment_id, SegmentStatus.EXCLUDED)
+    repository.set_sample_status(
+        repository.samples[0].sample_id, SegmentStatus.EXCLUDED
+    )
     repository.save()
 
     index.refresh(force=True)
