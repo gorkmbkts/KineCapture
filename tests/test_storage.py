@@ -39,8 +39,12 @@ def test_write_json_refuses_silent_overwrite(tmp_path: Path) -> None:
 
 
 def test_write_json_leaves_no_temp_files(tmp_path: Path) -> None:
-    write_json(tmp_path / "a.json", {"v": 1})
-    assert [p.name for p in tmp_path.iterdir()] == ["a.json"]
+    target = tmp_path / "nested" / "a.json"
+    write_json(target, {"v": 1})
+    # The staging file is created beside the target and must be gone after the
+    # rename; a leftover would accumulate on every save.
+    siblings = sorted(p.name for p in target.parent.iterdir())
+    assert siblings == ["a.json"]
 
 
 def test_read_json_reports_corruption(tmp_path: Path) -> None:

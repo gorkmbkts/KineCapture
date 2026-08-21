@@ -1,234 +1,248 @@
 # KineCapture Studio
 
-Working title for a Windows desktop application that captures, reviews and
-annotates 3D human motion recorded with a **Stereolabs ZED 2i** camera, so the
-resulting datasets can feed a machine-learning pipeline later.
+Stereolabs ZED 2i ile hareket verisi toplama, inceleme, etiketleme ve makine
+öğrenmesi için sürümlenmiş dataset üretme masaüstü uygulaması.
 
-**Current stage: scaffold.** This repository is an architecture skeleton with a
-working mock capture path. It is not yet a data-collection tool. Read
-[What works today](#what-works-today) and
-[What is not implemented yet](#what-is-not-implemented-yet) before relying on
-anything here.
-
-Project context, long-term goals and permanent decisions live in
-[`MEMORY.md`](MEMORY.md). Read it before making changes.
+Windows · Python 3.11 · PySide6 · ZED SDK 5.4
 
 ---
 
-## What works today
+## Durum
 
-Verified by running the code (see [Verification status](#verification-status)):
+Uçtan uca dikey dilim çalışır durumda: **proje → katılımcı → oturum → kayıt →
+oynatma → tekrar segmentasyonu → etiketleme → dataset sürümü.** Akış hem
+gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışır.
 
-* The package imports and the application starts **without** the ZED SDK.
-* `--diagnose` prints a real environment report (OS, Python, PySide6, NumPy,
-  PyYAML, `pyzed`, ZED backend, mock backend).
-* A deterministic **mock camera backend** produces synthetic RGB frames and one
-  moving synthetic skeleton - same seed, same bytes, every run.
-* A **PySide6 main window** with backend selection, connect/disconnect,
-  start/stop preview, live RGB preview, live 2D skeleton preview, capture state,
-  frame index, measured vs. target FPS, dropped-frame counter and a status bar.
-* A **capture service** between GUI and backend: bounded frame buffer, real
-  drop counting, idempotent stop/shutdown, and no blocking loop on the Qt main
-  thread (a `QTimer` polls the service).
-* A tested **capture state machine** (`DISCONNECTED / READY / PREVIEWING /
-  RECORDING / STOPPING / ERROR`) that raises on invalid transitions.
-* **Session and annotation skeletons**: versioned schemas, atomic JSON writes,
-  refusal to overwrite existing recordings, annotations kept as sidecar files.
-* A test suite that needs neither hardware nor the ZED SDK.
-
-## What is not implemented yet
-
-Listed explicitly so nothing here looks finished when it is not:
-
-* **The ZED backend.** `camera/zed.py` contains no capture or body-tracking
-  calls. It only reports availability and fails loudly if used. No `pyzed` API
-  was written from memory - see [ZED integration status](#zed-integration-status).
-* **Recording.** `SessionWriter` creates the folder layout and writes
-  `session.json`; `write_frame()` raises `NotImplementedError`. The recording
-  buttons in the GUI are visible but disabled on purpose.
-* **Depth capture and depth view.**
-* **Playback, frame stepping and the annotation timeline UI.**
-* **Dataset validation and export**, including any KineSynthV3 joint mapping.
-* **Multi-person handling** beyond carrying a list of bodies through the pipeline.
-* **ZED skeleton topologies** (BODY_18 / BODY_34 / BODY_38). Only the 16-joint
-  mock skeleton is registered; ZED joint orders must be read from a verified
-  local SDK, never reproduced from memory.
-* **Packaging and distribution.**
+| Bileşen | Durum |
+|---|---|
+| Sentetik (mock) backend | Çalışıyor, deterministik, testlerin temeli |
+| ZED 2i backend (RGB / derinlik / vücut takibi / SVO2) | Çalışıyor, gerçek donanımda doğrulandı |
+| Kayıt, finalize, checksum, yarım kayıt kurtarma | Çalışıyor |
+| Senkron oynatma + zaman çizelgesi | Çalışıyor |
+| Tekrar segmentasyonu (oluştur/böl/birleştir/dışla, undo/redo) | Çalışıyor |
+| Etiketleme + autosave | Çalışıyor |
+| Dataset paneli + kalite bulguları | Çalışıyor |
+| Sürümlü export (manifest / spec / mapping / fingerprint / doğrulama) | Çalışıyor |
+| KineSynthV3 26-eklem eşleştirmesi | **Kısmi** — 23/26 eklem; 3 eklem eşleşmiyor ve NaN yazılıyor |
+| Otomatik tekrar algılama, çok kameralı kayıt, çok uzmanlı consensus | Uygulanmadı |
 
 ---
 
-## Requirements
+## Kurulum
 
-* Windows (the platform target; the code itself avoids OS-specific paths)
-* Anaconda or Miniconda on `PATH`
-* Python 3.10 - pinned in `environment.yml`, see the note under
-  [ZED integration status](#zed-integration-status)
-* PySide6, NumPy, PyYAML (installed by the editable install)
-* pytest, pytest-qt (dev extra)
-* **The ZED SDK is a separate, out-of-band dependency.** It is not installed by
-  pip and is not required to run the mock backend, the tests or `--diagnose`.
-
-## Setup (Windows)
-
-Everything runs in a **project-specific Conda environment** named
-`KineCaptureStudio`. Never install this project into `base`, `Kinesynth` or any
-other existing environment.
+Bu proje bilgisayarda hâlihazırda bulunan **`KineSynth`** conda
+environment'ında çalışır. Yeni environment oluşturulmaz.
 
 ```powershell
-# from the project root
-powershell -ExecutionPolicy Bypass -File scripts\setup_env.ps1
+conda run -n KineSynth python -m pip install -e ".[dev]"
 ```
 
-`setup_env.ps1`:
+Bağımlılıklar (`KineSynth` içinde zaten mevcut): PySide6 6.10.1, NumPy 2.4.6,
+PyYAML 6.0.3, opencv-python 4.12, pytest 9.0.1.
 
-1. creates `KineCaptureStudio` from `environment.yml` if it does not exist, and
-   marks it as this project's environment;
-2. refuses to modify an existing environment of the same name that it does not
-   own - pass `-EnvName KineCaptureStudio-ZED2i` (and update `environment.yml`,
-   this README and the scripts) or `-AdoptExisting` if you are sure;
-3. installs the project editable with dev extras;
-4. prints `sys.executable` and the installed package versions so you can see
-   which interpreter actually ran.
+`pyzed` **bilinçli olarak pip bağımlılığı değildir**: ZED SDK ayrı kurulur ve
+Python bağlaması SDK'nın `get_python_api.py` betiğiyle environment'a eklenir.
+SDK yoksa uygulama yine açılır, sentetik backend ile tam olarak çalışır ve
+tanılama ekranı eksiği açıkça bildirir.
 
-The equivalent manual commands:
+## Çalıştırma
 
 ```powershell
-conda env create -f environment.yml
-conda run -n KineCaptureStudio python -m pip install -e ".[dev]"
+.\scripts\run_app.ps1                 # GUI
+.\scripts\run_app.ps1 -Backend zed    # ZED backend seçili açılır
+.\scripts\diagnose.ps1                # ortam + SDK + kamera + iskelet tablosu
+.\scripts\run_tests.ps1               # testler
 ```
 
-## Running
+Betikler `KineSynth` bulunamazsa başka bir environment'a düşmez; ne yapılması
+gerektiğini yazıp durur.
+
+Doğrudan CLI:
 
 ```powershell
-# mock backend GUI
-powershell -ExecutionPolicy Bypass -File scripts\run_app.ps1
-
-# environment report, no GUI
-powershell -ExecutionPolicy Bypass -File scripts\run_app.ps1 -Diagnose
-
-# tests
-powershell -ExecutionPolicy Bypass -File scripts\run_tests.ps1
+conda run -n KineSynth python -m kinecapture --diagnose
+conda run -n KineSynth python -m kinecapture --list-devices
+conda run -n KineSynth python -m kinecapture --self-test
+conda run -n KineSynth python -m kinecapture --backend mock
 ```
 
-Equivalent direct commands:
+---
 
-```powershell
-conda run -n KineCaptureStudio python -m kinecapture --backend mock
-conda run -n KineCaptureStudio python -m kinecapture --diagnose
-conda run -n KineCaptureStudio python -m pytest
-```
+## Uygulama akışı
 
-If you chose a different environment name, use that real name everywhere.
+Sol gezinme çubuğunda sekiz çalışma alanı var (`Ctrl+1` … `Ctrl+8`,
+`Ctrl+B` daraltır):
 
-## Configuration
+1. **Ana Sayfa** — sayımlar, yarım kayıtlar, etiket bekleyenler, sistem durumu.
+2. **Projeler ve Protokoller** — proje oluştur/aç, çekim planı tanımla.
+3. **Katılımcılar ve Oturumlar** — anonim katılımcı (`P0001`), oturum formu.
+4. **Capture** — canlı RGB/derinlik, 3B iskelet, ön kontrol paneli, kayıt.
+5. **İnceleme ve Etiketleme** — senkron oynatma, zaman çizelgesi, tekrarlar, etiketler.
+6. **Dataset** — bileşim, filtreler, kalite bulguları.
+7. **Export** — sürümlü dataset yayını.
+8. **Ayarlar ve Tanılama** — tercihler, yakalama profili, etiket şeması, tanı.
 
-`configs/default.yaml` holds the starting defaults: app name, default backend,
-target preview FPS, mock frame size and seed, log level, and the output and log
-directories. Runtime data never lives inside the source tree - the defaults
-point at `~/KineCaptureStudio/data` and `~/KineCaptureStudio/logs`, and those
-paths (plus `logs/`, `data/`, `*.svo`) are git-ignored.
+### Capture kısayolları
 
-Override the file with `--config path\to\file.yaml`; override single values with
-`--backend` and `--log-level`.
+| Tuş | İşlem |
+|---|---|
+| `R` | Kaydı başlat / durdur |
+| `Boşluk` | Önizlemeyi aç / kapat |
+| `M` | Marker bırak |
+| `Esc` | Kaydı durdur |
 
-## Project layout
+Metin alanına yazarken bu kısayollar tetiklenmez.
+
+### İnceleme kısayolları
+
+| Tuş | İşlem |
+|---|---|
+| `Boşluk` | Oynat / duraklat |
+| `,` / `.` | Bir kare geri / ileri |
+| `N` | Konumda yeni tekrar |
+| `S` | Seçili tekrarı böl |
+| `X` | Dışla / geri al |
+| `C` | Önceki tekrarın etiketini kopyala |
+| `1`–`4` | Doğru / Hatalı / Kararsız / Etiketlenmedi |
+| `Ctrl+Z`, `Ctrl+Y` | Geri al / yinele |
+| `Ctrl+S` | Hemen kaydet |
+
+---
+
+## Disk yapısı
 
 ```text
-src/kinecapture/
-├── core/           config, logging, diagnostics, capture state machine
-├── domain/         enums and dataclasses (no Qt, no pyzed)
-├── camera/         backend contract, mock backend, ZED adapter stub
-├── services/       capture service - the GUI/backend boundary
-├── recording/      session folder layout and atomic metadata writing
-├── annotations/    annotation sidecar store
-├── visualization/  skeleton topology (SkeletonSpec)
-└── gui/            PySide6 main window and widgets
-tests/              hardware-free unit tests
-scripts/            PowerShell entry points (project environment only)
-configs/            default.yaml
+dataset_root/
+└── projects/<project_id>/
+    ├── project.json
+    ├── label_schema.json
+    ├── participants/<participant_id>/          # P0001, P0002, ... (anonim)
+    │   ├── participant.json
+    │   └── sessions/<session_id>/
+    │       ├── session.json
+    │       └── takes/<take_id>/
+    │           ├── take.json                   # yakalama metadata + provenance
+    │           ├── raw/capture.svo2            # ZED native kayıt (değişmez)
+    │           ├── derived/skeleton.jsonl      # kare başına iskelet (append-safe)
+    │           ├── derived/proxy.mp4           # inceleme için küçültülmüş kopya
+    │           ├── annotations/segments.json   # insan kararları (sidecar)
+    │           ├── quality/quality.json        # ölçülen kalite metrikleri
+    │           └── checksums.json
+    └── releases/dataset_v001/ ...
 ```
 
-Architectural rules that must survive future changes:
+### Veri bütünlüğü kararları
 
-* the GUI never imports `pyzed` and never calls a backend directly;
-* `pyzed` is imported lazily, inside the ZED backend, never at module import;
-* raw data and display-only transforms stay separate - the skeleton view's axis
-  flip and scaling never touch stored coordinates;
-* annotations are sidecar files and never modify a raw recording;
-* every recording and annotation file carries a schema version;
-* nothing blocks the Qt main thread.
+- **Ham kayıt değişmez.** Etiketleme `take.json` dosyasına dokunmaz.
+- **Atomik yazım.** Geçici dosya + `os.replace`; yarım JSON bırakılmaz.
+  Mevcut dosyanın üzerine sessizce yazılmaz.
+- **Append-safe iskelet akışı.** Her kare sonrası flush edilir. Elektrik
+  kesilse bile o ana kadarki kareler okunabilir; yarım kalan son satır
+  tolere edilir ve `truncated` olarak bildirilir.
+- **Derinlik iki kez saklanmaz.** SVO2 derinliği yeniden üretebildiği için
+  kare başına derinlik varsayılan olarak yazılmaz (`store_depth_frames`).
+- **Yarım kayıtlar kaybolmaz.** Finalize edilmemiş kayıt `PARTIAL` kalır,
+  açılışta bulunur ve kurtarılabilir.
+- **Uzun yol desteği.** Windows 260 karakter sınırı `\\?\` önekiyle aşılır
+  (`kinecapture.core.paths`).
 
-## ZED integration status
+---
 
-**Not implemented.** This is deliberate, not an oversight.
+## Dataset sürümleri
 
-The ZED SDK version, its Python binding and the exact body format have not been
-verified on the target machine yet. Writing plausible-looking `pyzed.sl` calls
-from memory would produce code that looks finished and fails on first contact
-with real hardware. Instead:
+Her sürüm (`dataset_v001`, `dataset_v002`, …) şunları içerir:
 
-* `camera/zed.py` imports `pyzed` lazily and only inside its own functions;
-* `is_available()` returns a machine-readable reason (`pyzed_missing` or
-  `not_implemented`) plus a message a user can act on;
-* `connect()`, `start_preview()` and `grab_frame()` raise
-  `CameraUnavailableError` rather than returning fake data;
-* `--diagnose` shows this state honestly.
+| Dosya | İçerik |
+|---|---|
+| `samples/*.npz` | Tekrar başına `float32 [T, J, 3]` + güven + kare indeksi + kamera zaman damgası |
+| `manifest.json` | Örnek listesi, ilişkiler, provenance, dizi sözleşmesi |
+| `skeleton_spec.json` | Eklem adları, sırası, kenarlar, koordinat sistemi, birim |
+| `label_mapping.json` | Sınıf kodları ve sabit indeksleri |
+| `dataset_fingerprint.json` | Bileşen bazlı + birleşik parmak izi |
+| `validation_report.json` | Doğrulama sonucu, hatalar, uyarılar |
+| `excluded.json` | Dışlanan örnekler ve nedenleri |
 
-The Python 3.10 pin in `environment.yml` is an **assumption** based on the ZED
-SDK 4.x Python binding supporting CPython 3.8-3.11. It has not been checked
-against a local SDK installation. Verify it before treating it as final.
+**Ham koordinatlar yazılır.** Root centering, ölçek normalizasyonu,
+interpolasyon ve augmentation uygulanmaz — bunlar eğitim katmanına aittir.
+Görülemeyen eklem NaN kalır.
 
-To install the binding once the SDK is present, run Stereolabs'
-`get_python_api.py` **inside the project environment**:
+`participant_id`, `session_id` ve `take_id` her örnekte korunur; katılımcı
+bazlı ayrım yapılabilsin ve rastgele split sızıntısı fark edilebilsin diye.
+
+### KineSynthV3 uyumluluğu
+
+ZED'in native `BODY_34` formatı KineSynthV3'ün 26 eklemli `rehab24_6_mocap`
+yapısıyla **aynı değildir**. Sürümlü bir adapter tanımlıdır
+(`zed_body_34__to__rehab24_6_mocap` v0.1.0-partial):
+
+- 26 hedef eklemin **23'ü** doğrudan eşleşiyor.
+- 3 eklem eşleşmiyor ve **NaN yazılıyor**: `Head_end`, `LeftToeBase_end`,
+  `RightToeBase_end`. Bunlar mocap uç işaretçileridir ve ZED'de karşılığı
+  yoktur; uydurulmak yerine boş bırakılır.
+- Eşleştirmenin durumu, kapsamı ve eşleşmeyen eklemlerin gerekçesi manifeste
+  yazılır ve Export ekranında gösterilir.
+
+Varsayılan export **native** eklem sırasındadır.
+
+---
+
+## Mimari
+
+```text
+GUI (PySide6)          gui/pages/*, gui/widgets/*, gui/main_window.py
+   │  yalnız okur; kamera veya diske dokunmaz
+AppState               gui/state.py
+   │
+CaptureService         capture/service.py
+   ├── acquisition thread ── backend.grab_frame()
+   │        ├── preview slot (son kare kazanır → GUI QTimer okur)
+   │        └── recording queue (sınırlı) ── writer thread ── TakeWriter
+CameraBackend          camera/base.py → camera/mock.py, camera/zed.py
+Depolama               dataset/workspace.py, recording/, playback/, annotations/
+Export                 export/release.py
+Domain                 domain/ (Qt ve pyzed içermez)
+```
+
+- Kamera okuma ve disk yazımı GUI thread'inde **değildir**.
+- Önizleme kuyruğu tek karelik: GUI geride kalırsa kare atlanır ve
+  *önizleme kaybı* olarak sayılır.
+- Kayıt kuyruğu sınırlıdır: taşarsa bu *veri kaybıdır*, ayrıca sayılır,
+  ekranda kırmızı gösterilir ve kaydın kalite metriklerine yazılır.
+- Bu iki sayı asla birbirine karıştırılmaz.
+
+---
+
+## Test
 
 ```powershell
-conda run -n KineCaptureStudio python "C:\Program Files (x86)\ZED SDK\get_python_api.py"
-conda run -n KineCaptureStudio python -m kinecapture --diagnose
+.\scripts\run_tests.ps1
+conda run -n KineSynth python -m pytest -k export
 ```
 
-Installing `pyzed` alone does not make the ZED backend work - the adapter still
-has to be written.
+**223 test, tamamı geçiyor** (~29 s). Testler gerçek kamera gerektirmez ve
+gerçek zaman beklemez; GUI testleri `QT_QPA_PLATFORM=offscreen` ile çalışır.
 
-## Verification status
+Kapsam: ortam ve opsiyonel `pyzed` importu, config doğrulama, domain
+shape/dtype, ZED iskelet tabloları, eklem eşleştirme, mock determinizmi,
+çok gövde ve takip kaybı senaryoları, state machine, capture servisi,
+atomik yazım ve overwrite koruması, checksum, yarım kayıt kurtarma,
+oynatma, segmentasyon, etiketleme, undo/redo, autosave, dataset index,
+export manifest/fingerprint/doğrulama, iptal ve hata atomikliği,
+ZED gövde dönüşümü (donanımsız stub ile), GUI kurulumu ve temalar,
+ve her özel widget ile her sayfanın gerçekten çizdirilmesi (paint testleri).
 
-The scaffold's Python behaviour was verified by execution:
+---
 
-* full test suite: **63 passed**;
-* `python -m kinecapture --diagnose`: exit code 0, correctly reporting `pyzed`
-  and the ZED backend as unavailable;
-* offscreen GUI smoke run: window built, mock backend connected, preview timer
-  delivered 29 frames in ~1 s at a 30 FPS target, recording buttons disabled,
-  clean shutdown.
+## Gizlilik
 
-The PowerShell scripts were parsed and exercised on PowerShell 7.4 (Linux) with
-a stub that emulates `conda run`: `run_app.ps1 -Diagnose`, `run_tests.ps1` and
-`run_tests.ps1 -k <expr>` all worked, and `setup_env.ps1` correctly refused to
-touch an existing environment it did not own.
+- Katılımcılar varsayılan olarak anonim kod ile temsil edilir (`P0001`).
+- Dosya adlarında ve loglarda kişisel bilgi bulunmaz.
+- Onam yalnızca durum olarak saklanır; onam metni bu uygulamada tutulmaz.
+- Veri silme yalnızca açık hedef ve tekrar onayla yapılır; sessiz/otomatik
+  silme yoktur.
 
-What is still **unverified**, because it needs the target machine:
+## Sorumluluk reddi
 
-* real Conda environment creation, and therefore `python=3.10` resolution on
-  Windows;
-* the scripts running against a real `conda` on Windows PowerShell 5.1;
-* anything involving the ZED SDK or the camera itself.
-
-Run `scripts\setup_env.ps1` and `scripts\run_tests.ps1` on the Windows machine to
-close those gaps, and record the result in `MEMORY.md`.
-
-## Next development step
-
-Verify the real ZED SDK environment and build a single-frame prototype:
-confirm the SDK version and the Python version it supports, install `pyzed`
-into `KineCaptureStudio`, open the camera once, grab one frame plus one body,
-and record the actual joint count, joint order, coordinate system and length
-unit in `MEMORY.md`. Only then implement `ZedCameraBackend` and decide the
-recording format.
-
-## Relationship to KineSynthV3
-
-This project is intentionally separate from the KineSynthV3 repository. It does
-not import KineSynthV3 code, does not assume it is present on the machine, and
-does not reference its datasets by path. Compatibility will be provided later by
-an explicit, tested, versioned export adapter - not by a code dependency. The
-ZED native joint layout must not be assumed to match KineSynthV3's 26-joint
-skeleton.
+Bu bir **araştırma ve dataset üretim aracıdır**. Ölçümler ve türetilen
+çıktılar klinik olarak doğrulanmış bir değerlendirme değildir ve öyle
+sunulmamalıdır.

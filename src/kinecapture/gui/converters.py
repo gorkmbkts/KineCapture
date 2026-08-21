@@ -72,16 +72,19 @@ def depth_to_qimage(
         high = float(far) if far is not None else float(np.percentile(finite, 95))
         if high - low < 1e-6:
             high = low + 1e-6
-        normalised = np.clip((values - low) / (high - low), 0.0, 1.0)
+        # Colourise only the measured pixels. Running the ramp over NaN would
+        # both warn on the uint8 cast and produce a meaningless colour that the
+        # mask then discards.
+        measured = values[valid]
+        normalised = np.clip((measured - low) / (high - low), 0.0, 1.0)
         # Near is bright and warm, far is dark and cool: a perceptually
         # monotonic ramp so relative distance reads correctly at a glance.
         red = np.clip(1.35 - 1.5 * normalised, 0.0, 1.0)
         green = np.clip(1.15 - 1.05 * np.abs(normalised - 0.35) * 2.0, 0.0, 1.0)
         blue = np.clip(0.25 + 0.85 * normalised, 0.0, 1.0)
-        ramp = np.stack([red, green, blue], axis=2)
-        shade = (0.25 + 0.75 * (1.0 - normalised))[..., None]
-        coloured = (ramp * shade * 255.0).astype(np.uint8)
-        output[valid] = coloured[valid]
+        ramp = np.stack([red, green, blue], axis=1)
+        shade = (0.25 + 0.75 * (1.0 - normalised))[:, None]
+        output[valid] = (ramp * shade * 255.0).astype(np.uint8)
 
     return rgb_to_qimage(output)
 

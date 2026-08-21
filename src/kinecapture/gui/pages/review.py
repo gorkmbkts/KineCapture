@@ -42,7 +42,7 @@ from kinecapture.domain.labels import LabelSchema
 from kinecapture.domain.project import RepetitionSegment, Take
 from kinecapture.playback.take_reader import LoadedTake, load_take
 from kinecapture.gui.icons import get_icon
-from kinecapture.gui.pages.base import Page
+from kinecapture.gui.pages.base import Page, scrollable
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
 from kinecapture.gui.widgets.common import (
@@ -125,10 +125,13 @@ class ReviewPage(Page):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_viewer(theme))
-        splitter.addWidget(self._build_side(theme))
+        # The side column carries take details, the repetition list and the
+        # whole annotation form - more than fits at 1366x768. Scrolling it keeps
+        # every card at its natural height instead of crushing all of them.
+        splitter.addWidget(scrollable(self._build_side(theme)))
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([880, 480])
+        splitter.setSizes([860, 500])
         body.addWidget(splitter, 1)
 
         body.addWidget(self._build_transport(theme))
@@ -193,6 +196,7 @@ class ReviewPage(Page):
 
     def _build_side(self, theme: Theme) -> QWidget:
         wrapper = QWidget()
+        wrapper.setMinimumWidth(400)
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.space_md)
@@ -221,6 +225,7 @@ class ReviewPage(Page):
             icon="list",
         )
         self._segment_list = QListWidget()
+        self._segment_list.setMinimumHeight(150)
         self._segment_list.currentItemChanged.connect(
             lambda current, _: self._segment_selected(current)
         )
@@ -261,9 +266,10 @@ class ReviewPage(Page):
         extra_container = QWidget()
         extra_container.setLayout(extra)
         rep_card.add_widget(extra_container)
-        layout.addWidget(rep_card, 1)
+        layout.addWidget(rep_card)
 
         layout.addWidget(self._build_annotation_card(theme))
+        layout.addStretch(1)
         return wrapper
 
     def _build_annotation_card(self, theme: Theme) -> QWidget:

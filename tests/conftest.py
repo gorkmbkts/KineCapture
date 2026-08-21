@@ -29,6 +29,27 @@ from kinecapture.domain.project import Participant, Session  # noqa: E402
 setup_logging("WARNING", None)
 
 
+@pytest.fixture(autouse=True)
+def isolated_user_state(tmp_path, monkeypatch):
+    """Never let a test write to the real user's settings file.
+
+    ``AppState`` persists preferences whenever the theme or the open project
+    changes, which the GUI tests do constantly. Without this redirection those
+    writes land in ``~/.kinecapture/user_state.yaml`` and a test's temporary
+    dataset root becomes the user's configured one - user data modified by a
+    test run, which is exactly what this project promises never to do.
+    """
+    state_dir = tmp_path / "_user_state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    state_path = state_dir / "user_state.yaml"
+    for module in ("kinecapture.core.config", "kinecapture.gui.pages.settings"):
+        monkeypatch.setattr(f"{module}.USER_STATE_PATH", state_path, raising=False)
+    monkeypatch.setattr(
+        "kinecapture.core.config.USER_STATE_DIR", state_dir, raising=False
+    )
+    yield state_path
+
+
 @pytest.fixture
 def dataset_root(tmp_path: Path) -> Path:
     root = tmp_path / "datasets"

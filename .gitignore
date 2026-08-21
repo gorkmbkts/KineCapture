@@ -9,26 +9,26 @@ dist/
 .mypy_cache/
 .ruff_cache/
 
-# Environments
+# Environments — this project uses the pre-existing KineSynth conda env
 .venv/
 venv/
 env/
 .conda/
 
-# Runtime data - never commit captured data or logs
+# Runtime data — never commit captured data, recordings or logs
 logs/
 data/
 datasets/
 output/
 recordings/
 sessions/
-cache/
+releases/
 *.svo
 *.svo2
 *.log
+~kc*.tmp
 
 # OS / editors
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/

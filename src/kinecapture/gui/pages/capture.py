@@ -39,7 +39,7 @@ from kinecapture.domain.enums import (
 )
 from kinecapture.domain.models import FramePacket
 from kinecapture.domain.project import ProtocolTask, Take
-from kinecapture.gui.pages.base import Page
+from kinecapture.gui.pages.base import Page, scrollable
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
 from kinecapture.gui.widgets.common import (
@@ -228,7 +228,9 @@ class CapturePage(Page):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self._build_views(theme))
-        splitter.addWidget(self._build_side_panel(theme))
+        # Health panel + protocol + take form exceed the available height
+        # on a 768px screen; scrolling beats clipping the controls.
+        splitter.addWidget(scrollable(self._build_side_panel(theme)))
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
         splitter.setSizes([900, 460])
@@ -302,6 +304,7 @@ class CapturePage(Page):
 
     def _build_side_panel(self, theme: Theme) -> QWidget:
         wrapper = QWidget()
+        wrapper.setMinimumWidth(400)
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.space_md)

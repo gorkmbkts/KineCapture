@@ -34,6 +34,7 @@ from PySide6.QtGui import (
     QPainter,
     QPaintEvent,
     QPen,
+    QPolygonF,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
@@ -547,9 +548,13 @@ class TimelineWidget(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             top = lane.top() + 1
             painter.drawPolygon(
-                QPointF(x, lane.bottom() - 1),
-                QPointF(x - 4, top),
-                QPointF(x + 4, top),
+                QPolygonF(
+                    [
+                        QPointF(x, lane.bottom() - 1),
+                        QPointF(x - 4, top),
+                        QPointF(x + 4, top),
+                    ]
+                )
             )
 
     def _paint_segments(self, painter: QPainter, lane: QRectF) -> None:
@@ -629,8 +634,11 @@ class TimelineWidget(QWidget):
         painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
         painter.setBrush(QColor(theme.text_primary))
         painter.setPen(Qt.PenStyle.NoPen)
+        # Always pass a QPolygonF. Handing QPainter loose QPointF arguments
+        # binds to Qt's (const QPointF *, int) overload, which walks past the
+        # arguments and faults.
         painter.drawPolygon(
-            QPointF(x, 9), QPointF(x - 5, 0), QPointF(x + 5, 0)
+            QPolygonF([QPointF(x, 9), QPointF(x - 5, 0), QPointF(x + 5, 0)])
         )
 
     def _segment_colour(self, segment: RepetitionSegment) -> str:
