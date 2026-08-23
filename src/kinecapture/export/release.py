@@ -45,7 +45,7 @@ import re
 import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -59,9 +59,40 @@ from kinecapture.core.paths import ensure_dir, long_path, path_exists
 from kinecapture.dataset.index import DatasetIndex, TakeRow, exportable_rows
 from kinecapture.dataset.workspace import ProjectWorkspace
 from kinecapture.domain.project import MovementSample, evaluate_sample
+from kinecapture.features.base import Availability, SourceField
+from kinecapture.features.compute import FeatureContext, compute_features
+from kinecapture.features.registry import get_feature, order_features
+from kinecapture.features.spec import availability_counter, build_feature_spec
 from kinecapture.playback.take_reader import load_skeleton_stream
 from kinecapture.visualization.mapping import JointMapping, find_mapping
 from kinecapture.visualization.skeleton_spec import SkeletonSpec, try_get_skeleton_spec
+
+#: Optional tracker fields, and how each one survives a joint mapping.
+#: ``BodyPose`` attribute -> (:class:`SourceField` key, per-joint?).
+_RAW_FIELDS: tuple[tuple[str, str, bool], ...] = (
+    ("joint_orientations", SourceField.JOINT_ORIENTATIONS.value, True),
+    ("joint_positions_2d", SourceField.JOINT_POSITIONS_2D.value, True),
+    (
+        "joint_position_covariances",
+        SourceField.JOINT_POSITION_COVARIANCES.value,
+        True,
+    ),
+    ("local_joint_positions_xyz", SourceField.LOCAL_JOINT_POSITIONS.value, True),
+    ("root_position", SourceField.ROOT_POSITION.value, False),
+    ("root_orientation", SourceField.ROOT_ORIENTATION.value, False),
+    ("tracker_root_velocity_xyz", SourceField.ROOT_VELOCITY.value, False),
+    ("root_position_covariance", SourceField.ROOT_POSITION_COVARIANCE.value, False),
+)
+
+#: Per-joint raw fields whose meaning survives a pure index permutation. A
+#: field not listed here is dropped when a mapping is active rather than being
+#: carried onto a skeleton whose parent chain it does not describe.
+_MAPPABLE_RAW_FIELDS: frozenset[str] = frozenset(
+    {
+        SourceField.JOINT_POSITIONS_2D.value,
+        SourceField.JOINT_POSITION_COVARIANCES.value,
+    }
+)
 
 logger = get_logger(__name__)
 
@@ -91,10 +122,37 @@ class ExportOptions:
     #: interval list. Costs ``T x C`` bytes per sample and saves every consumer
     #: from rebuilding the same thing.
     store_error_target_arrays: bool = True
+    #: Additional feature ids from :mod:`kinecapture.features.registry`. Empty
+    #: by default, so an export that ticks nothing produces exactly the
+    #: canonical release it always produced.
+    feature_ids: tuple[str, ...] = ()
+    #: Which preset the selection came from, for provenance only. The resolved
+    #: ids above are authoritative; a stale preset name can never change what
+    #: gets written.
+    feature_preset: Optional[str] = None
     notes: str = ""
 
+    def __post_init__(self) -> None:
+        self.feature_ids = tuple(self.feature_ids or ())
+
+    def resolved_feature_ids(self) -> tuple[str, ...]:
+        """The full, ordered selection actually computed.
+
+        ``store_confidences`` predates the registry and stays the switch for
+        the confidence array, so the two cannot disagree about it.
+        """
+        wanted = set(self.feature_ids)
+        if self.store_confidences:
+            wanted.add("joint_confidences")
+        else:
+            wanted.discard("joint_confidences")
+        return order_features(wanted)
+
     def to_dict(self) -> dict[str, Any]:
-        return dict(self.__dict__)
+        payload = dict(self.__dict__)
+        payload["feature_ids"] = list(self.feature_ids)
+        payload["resolved_feature_ids"] = list(self.resolved_feature_ids())
+        return payload
 
 
 @dataclass
@@ -335,6 +393,13 @@ class ReleaseBuilder:
         completed = 0
         interval_total = 0
 
+        feature_ids = self.options.resolved_feature_ids()
+        availability: dict[str, dict[str, int]] = {
+            feature_id: availability_counter() for feature_id in feature_ids
+        }
+        source_fields: dict[str, int] = {}
+        resolved_angles: Optional[list[dict[str, Any]]] = None
+
         for row in selected:
             take = row.take
             samples, rejected = self._partition_samples(row)
@@ -404,6 +469,8 @@ class ReleaseBuilder:
             spec_seen[output_spec.name] = output_spec
 
             tracking_id = self._preferred_tracking_id(stream)
+            for field_name in stream.optional_field_names(tracking_id):
+                source_fields[field_name] = source_fields.get(field_name, 0) + 1
             for sample in samples:
                 completed += 1
                 # Bounds are stream positions, inclusive. Clamping guards a
@@ -457,17 +524,42 @@ class ReleaseBuilder:
 
                 sample_id = f"{take.take_id}__{sample.sample_id}"
                 sample_path = samples_dir / f"{sample_id}.npz"
+                frame_indices = np.asarray(
+                    [f.frame_index for f in frame_window], dtype=np.int64
+                )
+                timestamps = np.asarray(
+                    [f.camera_timestamp_ns for f in frame_window], dtype=np.int64
+                )
                 payload: dict[str, np.ndarray] = {
                     "joints_xyz": joints.astype(np.float32),
-                    "frame_indices": np.asarray(
-                        [f.frame_index for f in frame_window], dtype=np.int64
-                    ),
-                    "camera_timestamps_ns": np.asarray(
-                        [f.camera_timestamp_ns for f in frame_window], dtype=np.int64
-                    ),
+                    "frame_indices": frame_indices,
+                    "camera_timestamps_ns": timestamps,
                 }
-                if confidences is not None:
-                    payload["joint_confidences"] = confidences.astype(np.float32)
+
+                # ---- selected features -------------------------------
+                context = FeatureContext(
+                    spec=output_spec,
+                    joints=joints.astype(np.float32),
+                    timestamps_ns=timestamps,
+                    frame_indices=frame_indices,
+                    target_fps=float(take.capture_profile.fps or 0.0),
+                    confidences=(
+                        confidences.astype(np.float32)
+                        if confidences is not None
+                        else None
+                    ),
+                    raw=self._raw_arrays(stream, tracking_id, start, end, mapping),
+                    mapping_active=mapping is not None,
+                    **stream.body_state_arrays(tracking_id, start=start, end=end),
+                )
+                computed = compute_features(context, feature_ids)
+                payload.update(computed.arrays)
+                if not self.options.store_confidences:
+                    payload.pop("joint_confidences", None)
+                for feature_id, level in computed.availability.items():
+                    availability[feature_id][level.value] += 1
+                if resolved_angles is None:
+                    resolved_angles = context.resolved_angles
 
                 # (class index, relative start, relative end), inclusive.
                 payload["error_intervals"] = np.asarray(
@@ -495,11 +587,20 @@ class ReleaseBuilder:
                     file_name=f"samples/{sample_path.name}",
                     positions=(start, end),
                     camera_frame_range=(
-                        int(payload["frame_indices"][0]),
-                        int(payload["frame_indices"][-1]),
+                        int(frame_indices[0]),
+                        int(frame_indices[-1]),
                     ),
                     intervals=intervals,
                 )
+                entry["features"] = computed.availability_dict()
+                entry["feature_availability_ratio"] = dict(computed.ratios)
+                entry["feature_notes"] = dict(computed.reasons)
+                entry["array_keys"] = sorted(payload)
+                # Hashed here, while the file is the thing that was just
+                # written. Computing it after the fingerprint - as an earlier
+                # version did - left the fingerprint blind to the array
+                # contents it is supposed to identify.
+                entry["checksum"] = hash_file(sample_path)
                 manifest_samples.append(entry)
                 fingerprint_keys.append(self._fingerprint_key(entry))
                 report(completed, f"{row.participant_code} / hareket {sample.index}")
@@ -537,7 +638,46 @@ class ReleaseBuilder:
             mapping=mapping_used,
             error_classes=error_classes,
             interval_total=interval_total,
+            feature_ids=feature_ids,
+            availability=availability,
+            source_fields=source_fields,
+            resolved_angles=resolved_angles,
         )
+
+    # --------------------------------------------------------- raw fields
+    @staticmethod
+    def _raw_arrays(
+        stream: Any,
+        tracking_id: Optional[int],
+        start: int,
+        end: int,
+        mapping: Optional[JointMapping],
+    ) -> dict[str, Optional[np.ndarray]]:
+        """Collect the optional tracker arrays for one sample's frame window.
+
+        Per-joint fields are carried through an active joint mapping only when
+        a pure index permutation preserves their meaning. Local joint
+        quaternions and parent-relative positions are described relative to the
+        *source* skeleton's parent chain, so on a target skeleton with a
+        different chain they would be numerically present and semantically
+        wrong; they are dropped instead, and the feature that needs them
+        reports itself unavailable with that reason.
+        """
+        arrays: dict[str, Optional[np.ndarray]] = {}
+        for attribute, key, per_joint in _RAW_FIELDS:
+            values = stream.optional_body_array(
+                tracking_id, attribute, start=start, end=end
+            )
+            if values is None:
+                arrays[key] = None
+                continue
+            if per_joint and mapping is not None:
+                if key not in _MAPPABLE_RAW_FIELDS:
+                    arrays[key] = None
+                    continue
+                values = mapping.apply_per_joint(values)
+            arrays[key] = values
+        return arrays
 
     # ------------------------------------------------------- error intervals
     def _resolve_intervals(
@@ -671,6 +811,10 @@ class ReleaseBuilder:
         mapping: Optional[JointMapping],
         error_classes: Sequence[str],
         interval_total: int,
+        feature_ids: Sequence[str],
+        availability: Mapping[str, Mapping[str, int]],
+        source_fields: Mapping[str, int],
+        resolved_angles: Optional[Sequence[Mapping[str, Any]]],
     ) -> ExportResult:
         project = self.workspace.project
         schema = self.workspace.label_schema
@@ -688,15 +832,36 @@ class ReleaseBuilder:
             "app_version": APP_VERSION,
             "schema_version": RELEASE_SCHEMA_VERSION,
         }
+        feature_spec = build_feature_spec(
+            feature_ids=feature_ids,
+            specs=specs,
+            preset_id=self.options.feature_preset,
+            availability=availability,
+            sample_count=len(samples),
+            mapping=mapping.to_dict() if mapping else None,
+            resolved_angles=resolved_angles,
+            source_fields=source_fields,
+        )
+        # The feature component carries the definitions and their parameters,
+        # so bumping a feature's version or changing an algorithm parameter
+        # changes the release fingerprint even when every sample is identical.
         fingerprint = dataset_fingerprint(
             fingerprint_keys,
             export_config=export_config,
             skeleton_spec=skeleton_block["formats"],
             label_schema=label_mapping,
+            features={
+                "selected": list(feature_ids),
+                "definitions": [
+                    get_feature(feature_id).fingerprint_key()
+                    for feature_id in feature_ids
+                ],
+            },
         )
 
         write_json(staging / "skeleton_spec.json", skeleton_block)
         write_json(staging / "label_mapping.json", label_mapping)
+        write_json(staging / "feature_spec.json", feature_spec)
         write_json(staging / "dataset_fingerprint.json", fingerprint)
         write_json(
             staging / "manifest.json",
@@ -759,6 +924,33 @@ class ReleaseBuilder:
                         "etiket modelinde kaldırılmıştır."
                     ),
                 },
+                "feature_contract": {
+                    "document": "feature_spec.json",
+                    "preset": self.options.feature_preset,
+                    "selected_feature_ids": list(feature_ids),
+                    "feature_versions": {
+                        feature_id: get_feature(feature_id).version
+                        for feature_id in feature_ids
+                    },
+                    "array_keys": [
+                        key
+                        for feature_id in feature_ids
+                        for key in get_feature(feature_id).array_keys
+                    ],
+                    "availability": {
+                        feature_id: dict(counts)
+                        for feature_id, counts in sorted(availability.items())
+                    },
+                    "source_field_availability": dict(sorted(source_fields.items())),
+                    "note": (
+                        "Canonical diziler (joints_xyz, frame_indices, "
+                        "camera_timestamps_ns) her sürümde bulunur; buradaki "
+                        "özellikler onların yerine geçmez, yanlarına yazılır. "
+                        "Seçilen anahtar kümesi bütün örnek dosyalarında "
+                        "aynıdır; bir örnekte üretilemeyen özellik NaN/False "
+                        "olarak yazılır ve availability'de raporlanır."
+                    ),
+                },
                 "export_config": export_config,
                 "counts": {
                     "samples": len(samples),
@@ -775,7 +967,9 @@ class ReleaseBuilder:
             staging / "excluded.json", {"count": len(excluded), "items": excluded}
         )
 
-        report = self._validate(staging, samples, warnings, error_classes)
+        report = self._validate(
+            staging, samples, warnings, error_classes, feature_ids, availability
+        )
         write_json(staging / "validation_report.json", report)
         return ExportResult(
             release_name=name,
@@ -814,6 +1008,11 @@ class ReleaseBuilder:
                 ]
                 for interval in entry["error_intervals"]
             ],
+            # The written file's own digest. This is what makes the fingerprint
+            # sensitive to the array *contents*, not merely to the metadata
+            # describing them.
+            "checksum": entry.get("checksum"),
+            "array_keys": list(entry.get("array_keys") or ()),
         }
 
     def _sample_entry(
@@ -887,6 +1086,8 @@ class ReleaseBuilder:
         samples: list[dict[str, Any]],
         warnings: list[str],
         error_classes: Sequence[str],
+        feature_ids: Sequence[str] = (),
+        availability: Optional[Mapping[str, Mapping[str, int]]] = None,
     ) -> dict[str, Any]:
         """Re-read every written sample and check it against its manifest entry."""
         errors: list[dict[str, Any]] = []
@@ -941,9 +1142,27 @@ class ReleaseBuilder:
                     self._validate_intervals(entry, payload, frames, vocabulary)
                 )
 
+                errors.extend(
+                    self._validate_features(entry, payload, frames, feature_ids)
+                )
+
             if entry["error_intervals"]:
                 localised += 1
-            entry["checksum"] = hash_file(path)
+            # The checksum was taken when the file was written and hashed into
+            # the fingerprint; re-hashing here proves the published bytes are
+            # still the ones the fingerprint covers.
+            recorded = entry.get("checksum")
+            actual = hash_file(path)
+            if recorded and recorded != actual:
+                errors.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "checksum_changed_after_write",
+                        "expected": recorded,
+                        "actual": actual,
+                    }
+                )
+            entry["checksum"] = actual
 
         # --- label-level consistency, mirroring the UI's readiness rule ------
         for entry in samples:
@@ -1041,6 +1260,52 @@ class ReleaseBuilder:
                 ),
             }
         )
+        # --- feature availability across the whole release ------------------
+        counts = dict(availability or {})
+        never: list[str] = []
+        partial: list[str] = []
+        for feature_id in feature_ids:
+            entry_counts = counts.get(feature_id) or {}
+            absent = int(entry_counts.get(Availability.ABSENT.value, 0))
+            partly = int(entry_counts.get(Availability.PARTIAL.value, 0))
+            if samples and absent >= len(samples):
+                never.append(feature_id)
+            elif partly:
+                partial.append(feature_id)
+        for feature_id in never:
+            # A selected feature that came out nowhere is a failed export, not
+            # a quiet success: the user asked for data that does not exist.
+            errors.append(
+                {
+                    "issue": "feature_never_available",
+                    "feature_id": feature_id,
+                    "detail": (
+                        f"'{get_feature(feature_id).label}' hiçbir örnekte "
+                        "üretilemedi."
+                    ),
+                }
+            )
+        if partial:
+            all_warnings.append(
+                "Bazı özellikler yalnız kısmen üretilebildi: "
+                + ", ".join(sorted(partial))
+                + ". Ayrıntı feature_spec.json içindeki availability bloğunda."
+            )
+        if feature_ids:
+            checks.append(
+                {
+                    "check": "feature_contract",
+                    "passed": not any(
+                        e["issue"].startswith("feature_") for e in errors
+                    ),
+                    "detail": (
+                        "Seçilen her özellik bütün örneklerde aynı anahtarlarla, "
+                        "beyan edilen dtype ve şekilde yazıldı; maskeler NaN "
+                        "düzeniyle tutarlı."
+                    ),
+                }
+            )
+
         checks.append(
             {
                 "check": "participant_grouping_preserved",
@@ -1064,6 +1329,99 @@ class ReleaseBuilder:
             "warnings": all_warnings,
             "checks": checks,
         }
+
+    #: Float array -> the mask that must agree with its NaN pattern.
+    _MASK_PAIRS: tuple[tuple[str, str], ...] = (
+        ("joint_displacement_xyz", "joint_displacement_valid_mask"),
+        ("joint_velocity_xyz", "joint_velocity_valid_mask"),
+        ("joint_acceleration_xyz", "joint_acceleration_valid_mask"),
+        ("joint_jerk_magnitude", "joint_jerk_valid_mask"),
+        ("joint_angles_rad", "joint_angle_valid_mask"),
+        ("joint_angular_velocity_rad_s", "joint_angular_velocity_valid_mask"),
+        ("bone_vectors_xyz", "bone_valid_mask"),
+        ("segment_distances", "segment_distance_valid_mask"),
+        ("bilateral_angle_difference_rad", "bilateral_angle_valid_mask"),
+        ("bilateral_speed_difference", "bilateral_speed_valid_mask"),
+        ("bilateral_mirror_distance", "bilateral_mirror_valid_mask"),
+        ("quaternion_angular_speed_rad_s", "quaternion_angular_speed_valid_mask"),
+    )
+
+    @classmethod
+    def _validate_features(
+        cls,
+        entry: dict[str, Any],
+        payload: Any,
+        frames: int,
+        feature_ids: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """Check one sample's feature arrays against their declared contracts.
+
+        Three things are checked, because each has silently produced wrong
+        datasets elsewhere: a declared array that is simply not there, an array
+        whose dtype is not what the spec says it is, and a validity mask that
+        disagrees with its own array's NaN pattern.
+        """
+        sample_id = entry["sample_id"]
+        problems: list[dict[str, Any]] = []
+        stored = set(payload.files) if hasattr(payload, "files") else set(payload)
+
+        for feature_id in feature_ids:
+            definition = get_feature(feature_id)
+            for contract in definition.arrays:
+                if contract.key not in stored:
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "feature_array_missing",
+                            "feature_id": feature_id,
+                            "array": contract.key,
+                        }
+                    )
+                    continue
+                array = np.asarray(payload[contract.key])
+                if str(array.dtype) != contract.dtype:
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "feature_dtype_mismatch",
+                            "array": contract.key,
+                            "expected": contract.dtype,
+                            "actual": str(array.dtype),
+                        }
+                    )
+                if (
+                    contract.time_alignment == "per_frame"
+                    and array.ndim >= 1
+                    and int(array.shape[0]) != frames
+                ):
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "feature_frame_count_mismatch",
+                            "array": contract.key,
+                            "expected": frames,
+                            "actual": int(array.shape[0]),
+                        }
+                    )
+
+        for value_key, mask_key in cls._MASK_PAIRS:
+            if value_key not in stored or mask_key not in stored:
+                continue
+            values = np.asarray(payload[value_key])
+            mask = np.asarray(payload[mask_key], dtype=bool)
+            finite = np.isfinite(values)
+            if finite.ndim > mask.ndim:
+                finite = finite.all(axis=-1)
+            if finite.shape != mask.shape or not np.array_equal(finite, mask):
+                problems.append(
+                    {
+                        "sample_id": sample_id,
+                        "issue": "feature_mask_nan_mismatch",
+                        "array": value_key,
+                        "mask": mask_key,
+                    }
+                )
+        return problems
 
     @staticmethod
     def _validate_intervals(

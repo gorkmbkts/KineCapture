@@ -250,8 +250,20 @@ def run_self_test(config: AppConfig) -> int:
             f"{summary.error_intervals} hata aralığı)"
         )
 
+        # A feature-carrying selection, so the self test proves the whole
+        # export path rather than only its canonical core.
         builder = ReleaseBuilder(
-            workspace, index, ExportOptions(include_synthetic=True)
+            workspace,
+            index,
+            ExportOptions(
+                include_synthetic=True,
+                feature_ids=(
+                    "validity_masks",
+                    "joint_velocity",
+                    "joint_angles",
+                    "summary_vector",
+                ),
+            ),
         )
         result = builder.build()
         print(
@@ -264,13 +276,17 @@ def run_self_test(config: AppConfig) -> int:
             "manifest.json",
             "skeleton_spec.json",
             "label_mapping.json",
+            "feature_spec.json",
             "dataset_fingerprint.json",
             "validation_report.json",
         ):
             if not (result.path / name).is_file():
                 print(f"  eksik sürüm dosyası: {name}", file=sys.stderr)
                 return 1
-        print("  sürüm dosyaları           : OK (manifest, spec, mapping, fingerprint, rapor)")
+        print(
+            "  sürüm dosyaları           : OK (manifest, skeleton spec, "
+            "feature spec, mapping, fingerprint, rapor)"
+        )
         print("\nUçtan uca sentetik akış başarıyla tamamlandı.")
         return 0
     except Exception as exc:

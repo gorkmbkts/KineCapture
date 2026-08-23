@@ -15,12 +15,17 @@ Design rules (MEMORY.md sections 4 and 7):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional
+from typing import Any, ClassVar, Mapping, Optional
 
 import numpy as np
 
 from kinecapture.core.errors import ValidationError
-from kinecapture.domain.enums import CaptureStatus, DataOrigin, TrackingState
+from kinecapture.domain.enums import (
+    BodyActionState,
+    CaptureStatus,
+    DataOrigin,
+    TrackingState,
+)
 
 
 @dataclass(frozen=True)
@@ -100,12 +105,33 @@ class CameraInfo:
 class BodyPose:
     """One detected person in one frame.
 
-    Shapes:
+    Required shapes:
         ``joint_positions_xyz``  float32 ``[J, 3]``  - raw source coordinates
         ``joint_confidences``    float32 ``[J]``     - 0..1, NaN when unknown
-        ``joint_orientations``   float32 ``[J, 4]``  - optional quaternions
-        ``root_position``        float32 ``[3]``     - optional
-        ``root_orientation``     float32 ``[4]``     - optional
+
+    Optional tracker outputs. Every one of them is genuinely optional: a body
+    format or an SDK version that does not produce a field leaves it ``None``
+    rather than carrying a plausible-looking substitute.
+
+        ``joint_orientations``           float32 ``[J, 4]`` - **xyzw** order,
+            parent-relative ("local") joint rotations
+        ``joint_positions_2d``           float32 ``[J, 2]`` - image pixels in
+            the left camera's image, valid only together with the resolution
+            and intrinsics recorded in the take's camera provenance
+        ``joint_position_covariances``   float32 ``[J, 6]`` - per-joint 3D
+            position covariance in the tracker's **native element order**,
+            stored verbatim because that order is not documented in a form
+            this project has verified
+        ``local_joint_positions_xyz``    float32 ``[J, 3]`` - parent-relative
+            joint positions from the SDK's body fitting
+        ``root_position``                float32 ``[3]``
+        ``root_orientation``             float32 ``[4]``    - **xyzw**, global
+        ``tracker_root_velocity_xyz``    float32 ``[3]``    - the tracker's own
+            root velocity, in length unit per second. Kept separate from any
+            velocity this application derives from coordinates.
+        ``root_position_covariance``     float32 ``[6]``    - native order
+        ``action_state``                 tracker motion state, never a clinical
+            or biomechanical judgement
 
     ``body_format`` records which skeleton definition the joint order belongs
     to (``"zed_body_34"``, ``"mock_16"``, ...). It must travel with the data:
@@ -121,6 +147,27 @@ class BodyPose:
     root_position: Optional[np.ndarray] = None
     root_orientation: Optional[np.ndarray] = None
     body_confidence: float = float("nan")
+    joint_positions_2d: Optional[np.ndarray] = None
+    joint_position_covariances: Optional[np.ndarray] = None
+    local_joint_positions_xyz: Optional[np.ndarray] = None
+    tracker_root_velocity_xyz: Optional[np.ndarray] = None
+    root_position_covariance: Optional[np.ndarray] = None
+    action_state: BodyActionState = BodyActionState.UNKNOWN
+
+    #: Optional per-joint arrays: attribute name -> trailing dimension.
+    _PER_JOINT_OPTIONAL: ClassVar[tuple[tuple[str, int], ...]] = (
+        ("joint_orientations", 4),
+        ("joint_positions_2d", 2),
+        ("joint_position_covariances", 6),
+        ("local_joint_positions_xyz", 3),
+    )
+    #: Optional per-body vectors: attribute name -> length.
+    _PER_BODY_OPTIONAL: ClassVar[tuple[tuple[str, int], ...]] = (
+        ("root_position", 3),
+        ("root_orientation", 4),
+        ("tracker_root_velocity_xyz", 3),
+        ("root_position_covariance", 6),
+    )
 
     def __post_init__(self) -> None:
         pos = np.asarray(self.joint_positions_xyz, dtype=np.float32)
@@ -137,48 +184,43 @@ class BodyPose:
                 code="joint_count_zero",
             )
         self.joint_positions_xyz = pos
+        joints = pos.shape[0]
 
         conf = np.asarray(self.joint_confidences, dtype=np.float32)
-        if conf.shape != (pos.shape[0],):
+        if conf.shape != (joints,):
             raise ValidationError(
-                f"joint_confidences [{pos.shape[0]}] olmalı, gelen: {conf.shape}",
+                f"joint_confidences [{joints}] olmalı, gelen: {conf.shape}",
                 field="joint_confidences",
                 code="confidence_shape_invalid",
             )
         self.joint_confidences = conf
 
-        if self.joint_orientations is not None:
-            ori = np.asarray(self.joint_orientations, dtype=np.float32)
-            if ori.shape != (pos.shape[0], 4):
-                raise ValidationError(
-                    f"joint_orientations [{pos.shape[0]}, 4] olmalı, gelen: {ori.shape}",
-                    field="joint_orientations",
-                    code="orientation_shape_invalid",
-                )
-            self.joint_orientations = ori
-
-        if self.root_position is not None:
-            root = np.asarray(self.root_position, dtype=np.float32)
-            if root.shape != (3,):
-                raise ValidationError(
-                    f"root_position [3] olmalı, gelen: {root.shape}",
-                    field="root_position",
-                    code="root_shape_invalid",
-                )
-            self.root_position = root
-
-        if self.root_orientation is not None:
-            rot = np.asarray(self.root_orientation, dtype=np.float32)
-            if rot.shape != (4,):
-                raise ValidationError(
-                    f"root_orientation [4] olmalı, gelen: {rot.shape}",
-                    field="root_orientation",
-                    code="root_orientation_shape_invalid",
-                )
-            self.root_orientation = rot
+        for name, width in self._PER_JOINT_OPTIONAL:
+            self._coerce(name, (joints, width))
+        for name, width in self._PER_BODY_OPTIONAL:
+            self._coerce(name, (width,))
 
         if isinstance(self.tracking_state, str):
             self.tracking_state = TrackingState(self.tracking_state)
+        self.action_state = BodyActionState.parse(self.action_state)
+
+    def _coerce(self, name: str, shape: tuple[int, ...]) -> None:
+        """Validate one optional array in place, or leave it ``None``.
+
+        A wrong shape is an error, not something to reshape around: silently
+        reinterpreting a tracker array would re-index every joint in it.
+        """
+        value = getattr(self, name)
+        if value is None:
+            return
+        array = np.asarray(value, dtype=np.float32)
+        if array.shape != shape:
+            raise ValidationError(
+                f"{name} {list(shape)} olmalı, gelen: {array.shape}",
+                field=name,
+                code=f"{name}_shape_invalid",
+            )
+        setattr(self, name, array)
 
     @property
     def num_joints(self) -> int:
@@ -199,6 +241,17 @@ class BodyPose:
         finite = self.joint_confidences[np.isfinite(self.joint_confidences)]
         return float(finite.mean()) if finite.size else float("nan")
 
+    def available_fields(self) -> tuple[str, ...]:
+        """Names of the optional tracker fields this body actually carries."""
+        names = [
+            name
+            for name, _ in (*self._PER_JOINT_OPTIONAL, *self._PER_BODY_OPTIONAL)
+            if getattr(self, name) is not None
+        ]
+        if self.action_state is not BodyActionState.UNKNOWN:
+            names.append("action_state")
+        return tuple(sorted(names))
+
     def to_record(self) -> dict[str, Any]:
         """Compact JSON projection used by the per-frame skeleton sidecar.
 
@@ -206,19 +259,23 @@ class BodyPose:
         metres) purely to keep the sidecar small; that is a storage decision on
         already-raw values, not a normalisation of them. Non-finite values
         become ``null`` so a missing joint stays missing after a round trip.
+
+        Optional fields are written only when present, so a take recorded
+        without them is exactly as small as it was before they existed.
         """
 
         def _clean(values: np.ndarray, decimals: int) -> list[Any]:
             rounded = np.round(values.astype(np.float64), decimals)
             return [None if not np.isfinite(v) else float(v) for v in rounded.ravel()]
 
+        def _rows(values: np.ndarray, decimals: int) -> list[list[Any]]:
+            return [_clean(values[i], decimals) for i in range(values.shape[0])]
+
         record: dict[str, Any] = {
             "id": int(self.tracking_id),
             "state": self.tracking_state.value,
             "format": self.body_format,
-            "joints": [
-                _clean(self.joint_positions_xyz[i], 5) for i in range(self.num_joints)
-            ],
+            "joints": _rows(self.joint_positions_xyz, 5),
             "conf": _clean(self.joint_confidences, 4),
         }
         if np.isfinite(self.body_confidence):
@@ -226,38 +283,66 @@ class BodyPose:
         if self.root_position is not None:
             record["root"] = _clean(self.root_position, 5)
         if self.joint_orientations is not None:
-            record["quat"] = [
-                _clean(self.joint_orientations[i], 5) for i in range(self.num_joints)
-            ]
+            record["quat"] = _rows(self.joint_orientations, 5)
+        if self.root_orientation is not None:
+            record["rquat"] = _clean(self.root_orientation, 5)
+        if self.tracker_root_velocity_xyz is not None:
+            record["rvel"] = _clean(self.tracker_root_velocity_xyz, 5)
+        if self.root_position_covariance is not None:
+            record["rcov"] = _clean(self.root_position_covariance, 7)
+        if self.joint_positions_2d is not None:
+            record["kp2d"] = _rows(self.joint_positions_2d, 2)
+        if self.joint_position_covariances is not None:
+            record["kpcov"] = _rows(self.joint_position_covariances, 7)
+        if self.local_joint_positions_xyz is not None:
+            record["ljoints"] = _rows(self.local_joint_positions_xyz, 5)
+        if self.action_state is not BodyActionState.UNKNOWN:
+            record["action"] = self.action_state.value
         return record
 
     @classmethod
     def from_record(cls, payload: Mapping[str, Any]) -> "BodyPose":
-        """Inverse of :meth:`to_record`. ``null`` becomes NaN again."""
+        """Inverse of :meth:`to_record`. ``null`` becomes NaN again.
+
+        A record written by an older version simply has fewer keys; nothing is
+        migrated and nothing is invented for the fields it never carried.
+        """
 
         def _to_array(values: Any, shape: tuple[int, ...]) -> np.ndarray:
             flat = [np.nan if v is None else float(v) for v in np.ravel(values).tolist()]
             return np.asarray(flat, dtype=np.float32).reshape(shape)
 
+        def _optional(key: str, shape: tuple[int, ...]) -> Optional[np.ndarray]:
+            raw = payload.get(key)
+            if raw is None:
+                return None
+            try:
+                return _to_array(raw, shape)
+            except ValueError:
+                # A record whose stored shape disagrees with the joint count is
+                # unusable; dropping the field keeps the rest of the frame.
+                return None
+
         joints = payload.get("joints") or []
         num_joints = len(joints)
         positions = _to_array(joints, (num_joints, 3))
         confidences = _to_array(payload.get("conf") or [], (num_joints,))
-        orientations = None
-        if payload.get("quat"):
-            orientations = _to_array(payload["quat"], (num_joints, 4))
-        root = None
-        if payload.get("root"):
-            root = _to_array(payload["root"], (3,))
         return cls(
             tracking_id=int(payload.get("id", 0)),
             tracking_state=TrackingState(payload.get("state", TrackingState.OK.value)),
             body_format=str(payload.get("format", "unknown")),
             joint_positions_xyz=positions,
             joint_confidences=confidences,
-            joint_orientations=orientations,
-            root_position=root,
+            joint_orientations=_optional("quat", (num_joints, 4)),
+            root_position=_optional("root", (3,)),
+            root_orientation=_optional("rquat", (4,)),
             body_confidence=float(payload.get("body_conf", float("nan"))),
+            joint_positions_2d=_optional("kp2d", (num_joints, 2)),
+            joint_position_covariances=_optional("kpcov", (num_joints, 6)),
+            local_joint_positions_xyz=_optional("ljoints", (num_joints, 3)),
+            tracker_root_velocity_xyz=_optional("rvel", (3,)),
+            root_position_covariance=_optional("rcov", (6,)),
+            action_state=BodyActionState.parse(payload.get("action")),
         )
 
 

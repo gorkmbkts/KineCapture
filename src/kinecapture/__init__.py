@@ -19,7 +19,7 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.4.0"
+APP_VERSION: str = "0.5.0"
 
 #: Schema version for ``project.json``.
 PROJECT_SCHEMA_VERSION: str = "1.0.0"
@@ -31,7 +31,11 @@ SESSION_SCHEMA_VERSION: str = "1.0.0"
 TAKE_SCHEMA_VERSION: str = "1.0.0"
 
 #: Schema version for the append-safe per-frame skeleton sidecar (JSONL).
-SKELETON_STREAM_SCHEMA_VERSION: str = "1.0.0"
+#: 1.1 adds optional tracker fields (2D keypoints, per-joint covariances,
+#: parent-relative joint positions, root orientation and velocity, action
+#: state). Every one of them is optional, so a 1.0 stream stays readable
+#: without migration and a 1.1 reader loses nothing from either version.
+SKELETON_STREAM_SCHEMA_VERSION: str = "1.1.0"
 
 #: Schema version for the label sidecar (``annotations/segments.json``).
 #: 2.x introduces the two-level MovementSample / ErrorInterval hierarchy;
@@ -42,12 +46,19 @@ ANNOTATION_SCHEMA_VERSION: str = "2.0.0"
 LABEL_SCHEMA_VERSION: str = "2.0.0"
 
 #: Schema version for an exported dataset release manifest.
-RELEASE_SCHEMA_VERSION: str = "1.0.0"
+#: 2.x adds the selectable feature layer: the canonical raw arrays are
+#: unchanged, but a release may now carry additional named arrays described by
+#: ``feature_spec.json``.
+RELEASE_SCHEMA_VERSION: str = "2.0.0"
+
+#: Schema version of ``feature_spec.json`` inside a release.
+FEATURE_SPEC_SCHEMA_VERSION: str = "1.0.0"
 
 __all__ = [
     "APP_NAME",
     "APP_VERSION",
     "ANNOTATION_SCHEMA_VERSION",
+    "FEATURE_SPEC_SCHEMA_VERSION",
     "LABEL_SCHEMA_VERSION",
     "PACKAGE_NAME",
     "PROJECT_SCHEMA_VERSION",

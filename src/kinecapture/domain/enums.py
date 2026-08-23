@@ -65,6 +65,34 @@ class TrackingState(str, Enum):
     TERMINATE = "terminate"
 
 
+class BodyActionState(str, Enum):
+    """Coarse motion state the tracker reports for a body.
+
+    The ZED SDK's ``sl.OBJECT_ACTION_STATE`` has exactly two meaningful members
+    on this SDK version (``IDLE`` and ``MOVING``; ``LAST`` is an enum sentinel,
+    not a state). Anything else - including a tracker that does not report the
+    field at all - becomes :attr:`UNKNOWN` rather than being guessed at.
+
+    This is a *tracker* output, not a biomechanical classification. It says the
+    detector considered the body to be moving, nothing about movement quality.
+    """
+
+    IDLE = "idle"
+    MOVING = "moving"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def parse(cls, value: object) -> "BodyActionState":
+        if isinstance(value, cls):
+            return value
+        text = str(value or "").strip().upper().rsplit(".", 1)[-1]
+        if text == "IDLE":
+            return cls.IDLE
+        if text == "MOVING":
+            return cls.MOVING
+        return cls.UNKNOWN
+
+
 class CaptureMode(str, Enum):
     """How a take was driven."""
 
@@ -202,6 +230,7 @@ class HealthLevel(str, Enum):
 
 __all__ = [
     "BackendKind",
+    "BodyActionState",
     "CaptureMode",
     "CaptureState",
     "CaptureStatus",

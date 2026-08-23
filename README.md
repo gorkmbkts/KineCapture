@@ -25,6 +25,8 @@ gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışı
 | Autosave + undo/redo | Çalışıyor |
 | Dataset paneli + kalite bulguları | Çalışıyor |
 | Sürümlü export (manifest / spec / mapping / fingerprint / doğrulama) | Çalışıyor |
+| Seçilebilir iskelet özellikleri (kalite, tracker ham, koordinat, kemik, hız, açı, simetri, özet) | Çalışıyor |
+| Export ekranında aranabilir özellik seçimi + presetler | Çalışıyor |
 | KineSynthV3 26-eklem eşleştirmesi | **Kısmi** — 23/26 eklem; 3 eklem eşleşmiyor ve NaN yazılıyor |
 | Otomatik tekrar algılama, çok kameralı kayıt, çok uzmanlı consensus | Uygulanmadı |
 
@@ -206,6 +208,7 @@ Her sürüm (`dataset_v001`, `dataset_v002`, …) şunları içerir:
 | `samples/*.npz` | Hareket başına `float32 [T, J, 3]` + güven + kare indeksi + kamera zaman damgası + hata aralıkları |
 | `manifest.json` | Örnek listesi, ilişkiler, provenance, dizi sözleşmesi |
 | `skeleton_spec.json` | Eklem adları, sırası, kenarlar, koordinat sistemi, birim |
+| `feature_spec.json` | Seçilen özellikler, sürümleri, dizi sözleşmeleri, sütun adları, birim, eksik veri politikası, availability |
 | `label_mapping.json` | Sınıf kodları ve sabit indeksleri |
 | `dataset_fingerprint.json` | Bileşen bazlı + birleşik parmak izi |
 | `validation_report.json` | Doğrulama sonucu, hatalar, uyarılar |
@@ -264,6 +267,96 @@ Dışlanan her şey nedeniyle birlikte `excluded.json` içine yazılır.
 `participant_id`, `session_id` ve `take_id` her örnekte korunur; katılımcı
 bazlı ayrım yapılabilsin ve rastgele split sızıntısı fark edilebilsin diye.
 
+### Canonical veri ve seçilebilir özellikler
+
+Bir sürümde iki tür dizi bulunur.
+
+**Canonical (her zaman yazılır, kapatılamaz).** `joints_xyz`, `frame_indices`,
+`camera_timestamps_ns`. Bunlar tracker'ın ürettiği ham veridir. Root centering,
+ölçek normalizasyonu, interpolasyon, padding, resampling ve augmentation
+uygulanmaz.
+
+**Seçilebilir özellikler (varsa canonical'ın *yanına* yazılır).** Export
+ekranındaki "Veri ve özellik seçimi" alanından açılan aranabilir listeden
+seçilir. Kategoriler:
+
+| Kategori | Örnek diziler |
+|---|---|
+| Kalite ve maskeler | `joint_confidences`, `joint_valid_mask`, `frame_valid_mask`, `delta_time_s`, `tracking_state_code` |
+| Tracker ham çıktıları | `joint_orientations_xyzw`, `joint_positions_2d`, `joint_position_covariances_raw`, `local_joint_positions_xyz`, `root_orientation_xyzw`, `tracker_root_velocity_xyz` |
+| Koordinat temsilleri | `root_centered_xyz`, `body_aligned_xyz`, `body_frame_rotation`, `body_scale`, `scale_normalized_xyz` |
+| Kemik / geometri | `bone_vectors_xyz`, `bone_lengths`, `bone_unit_vectors_xyz`, `joint_centroid_proxy_xyz` |
+| Hız ve ivme | `joint_displacement_xyz`, `joint_velocity_xyz`, `joint_speed`, `joint_acceleration_xyz`, `root_speed`, `root_path_length` |
+| Açılar ve açısal hareket | `joint_angles_rad`, `joint_angles_deg`, `joint_angular_velocity_rad_s` |
+| Simetri ve oran proxy'leri | `segment_distances`, `segment_ratios`, `bilateral_angle_difference_rad`, `bilateral_mirror_distance` |
+| Klasik ML özetleri | `summary_features` (sabit uzunluklu vektör) |
+| Deneysel | `joint_jerk_magnitude`, `quaternion_angular_speed_rad_s` |
+
+Presetler: `Minimum canonical`, `KineSynth temel uyumluluk`,
+`Kinematik araştırma`, `Klasik ML`, `Desteklenen tüm araştırma özellikleri`.
+Preset yalnızca kutuları işaretler; sürüme yazılan şey her zaman çözülmüş
+özellik kimlikleri listesidir.
+
+**Varsayılan export değişmedi.** Hiçbir şey seçmezseniz sürüm, özellik katmanı
+eklenmeden önce ürettiği dosyanın aynısıdır.
+
+#### Kare farkı ile fiziksel hız aynı şey değildir
+
+| Dizi | Nedir | Birim |
+|---|---|---|
+| `joint_displacement_xyz` | `x[t] - x[t-1]`. FPS değişince değişir. | length_unit |
+| `joint_velocity_xyz` | Kamera zaman damgasına göre türev. | length_unit/saniye |
+
+KineSynthV3'ün mevcut "velocity" kanalı **kare farkıdır**; `joint_velocity_xyz`
+ile aynı kanal değildir. `KineSynth temel uyumluluk` preseti bu nedenle
+`joint_displacement` içerir, fiziksel hızı içermez. Tracker'ın kendi bildirdiği
+kök hızı da ayrı bir dizidir (`tracker_root_velocity_xyz`), koordinatlardan
+türetilenden (`root_velocity_derived_xyz`) ayrılmıştır.
+
+#### Türev ve eksik veri politikası
+
+- Fiziksel türevler kamera zaman damgalarından hesaplanır. Bir adım ancak
+  `0 < dt <= 2.5 / hedef_fps` ise kullanılır; takip boşluğunun üzerinden türev
+  alınmaz.
+- Birinci türev iç noktalarda merkezi fark, uçlarda tek yanlı farktır. İkinci
+  türevin uçları NaN'dır; ekstrapolasyon yapılmaz.
+- İlk hız/yer değiştirme karesi **sahte sıfırla doldurulmaz**.
+- Hiçbir yerde filtre veya yumuşatma uygulanmaz.
+- NaN sıfıra çevrilmez, önceki kareyle doldurulmaz. Her özellik mümkün olduğunda
+  kendi `*_valid_mask` dizisini yazar ve doğrulama maske ile NaN düzenini
+  karşılaştırır.
+- İskelette bulunmayan bir eklem için ilgili sütun/kemik NaN kalır; komşu eklem
+  yerine geçmez.
+
+#### Eklem eşleştirmesi ile ilişkisi
+
+Her özellik, eşleştirme altında ne olacağını kendisi beyan eder:
+
+- `recompute` — geometrik özellikler hedef iskeletin koordinatlarından yeniden
+  hesaplanır (açı, kemik, mesafe, hız, simetri).
+- `index_remap` — anlamı eklem indeksine bağlı olan diziler taşınır
+  (2B noktalar, eklem kovaryansları, güven değerleri).
+- `native_only` — parent zincirine bağlı olanlar taşınmaz: local quaternionlar
+  ve parent'a göre eklem konumları. Bir eşleştirme seçiliyken bunlar
+  yazılmaz; Export ekranı bunu seçimden önce gösterir ve sürüm nedenini yazar.
+
+#### Sürüm parmak izi
+
+Fingerprint bileşenleri: `samples`, `export_config`, `skeleton_spec`,
+`label_schema`, `features`. Örnek bileşeni, yazılan `.npz` dosyasının kendi
+sağlama toplamını da içerir; yani **dizi içeriği değişirse parmak izi değişir**.
+Özellik seçimini, bir özelliğin sürümünü veya algoritma parametresini
+değiştirmek de parmak izini değiştirir.
+
+#### Klinik doğrulama sınırı
+
+Bu dizilerin hiçbiri klinik olarak doğrulanmış bir ölçüm değildir. Tüketici
+sınıfı bir derinlik kamerasının iskelet tahmininden türetilmiş kinematik
+büyüklüklerdir. `joint_centroid_proxy_xyz` bir kütle merkezi değildir;
+doğrulanmış antropometrik model olmadığı için öyle adlandırılmamıştır. Zemin
+yüksekliği ve ayak teması gibi büyüklükler, doğrulanmış bir dünya/zemin
+kalibrasyonu gerektirdiği için hiç üretilmez.
+
 ### KineSynthV3 uyumluluğu
 
 ZED'in native `BODY_34` formatı KineSynthV3'ün 26 eklemli `rehab24_6_mocap`
@@ -295,6 +388,7 @@ CaptureService         capture/service.py
 CameraBackend          camera/base.py → camera/mock.py, camera/zed.py
 Depolama               dataset/workspace.py, recording/, playback/, annotations/
 Export                 export/release.py
+Features               features/ (registry, roller, açılar, türevler, özet)
 Domain                 domain/ (Qt ve pyzed içermez)
 ```
 
@@ -314,7 +408,7 @@ Domain                 domain/ (Qt ve pyzed içermez)
 conda run -n KineSynth python -m pytest -k export
 ```
 
-**314 test, tamamı geçiyor** (~93 s). Testler gerçek kamera gerektirmez ve
+**438 test, tamamı geçiyor** (~122 s). Testler gerçek kamera gerektirmez ve
 gerçek zaman beklemez; GUI testleri `QT_QPA_PLATFORM=offscreen` ile çalışır.
 
 Kapsam: ortam ve opsiyonel `pyzed` importu, config doğrulama, domain
@@ -329,6 +423,20 @@ dataset index, export manifest/mapping/fingerprint/doğrulama, iptal ve hata
 atomikliği, ZED gövde dönüşümü (donanımsız stub ile), RGB/iskelet/bindirilmiş
 görünüm modları, iki modlu zaman çizelgesi ve her sayfanın gerçekten
 çizdirilmesi (paint testleri).
+
+Özellik katmanı için ayrıca: düzensiz zaman damgasında fiziksel hızın kapalı
+form doğruluğu, aynı kare farkının farklı FPS'te farklı hız vermesi, takip
+boşluğunda türev maskesi, sabit ivmenin birebir geri elde edilmesi, bilinen
+90°/180° açılar, sıfır uzunluklu vektörde NaN, `q`/`-q` quaternion işaret
+değişiminin sahte açısal hız üretmemesi, kemik sırası, tam simetrik iskelette
+sıfıra yakın simetri değeri, bilinçli asimetride sıfırdan farklı sonuç,
+kameraya göre dönmenin asimetri üretmemesi, eksik bir eklemin yalnız bağımlı
+sütunları geçersiz yapması, eski v1 JSONL kaydının kayıpsız okunması, yeni
+opsiyonel alanların round-trip'i, yanlış şeklin reddedilmesi, eşleştirme
+altında native-only alanların düşürülmesi, bütün örneklerde aynı dizi anahtarı
+sözleşmesi, fingerprint'in özellik seçimine / sürümüne / dizi içeriğine
+duyarlılığı, hiç üretilemeyen özelliğin doğrulamayı düşürmesi ve export
+ekranının preset/bağımlılık/kullanılamaz durum davranışı.
 
 ---
 

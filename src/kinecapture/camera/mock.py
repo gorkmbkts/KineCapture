@@ -32,7 +32,12 @@ from kinecapture.camera.base import (
     CameraBackend,
 )
 from kinecapture.core.errors import CameraNotConnectedError
-from kinecapture.domain.enums import CaptureStatus, DataOrigin, TrackingState
+from kinecapture.domain.enums import (
+    BodyActionState,
+    CaptureStatus,
+    DataOrigin,
+    TrackingState,
+)
 from kinecapture.domain.models import BodyPose, CameraInfo, FramePacket
 from kinecapture.visualization.skeleton_spec import MOCK_SKELETON, SkeletonSpec
 
@@ -359,16 +364,14 @@ class MockCameraBackend(CameraBackend):
         depth[: max(1, h // 12), :] = np.nan
         return depth
 
-    def _render_body(self, index: int, slot: int) -> Optional[BodyPose]:
-        """One scripted skeleton. Returns ``None`` during a scripted dropout."""
+    def _pose_positions(self, index: int, slot: int) -> np.ndarray:
+        """The analytic joint positions of one scripted body, without dropouts.
+
+        Kept separate from :meth:`_render_body` so the same closed-form motion
+        can be evaluated at a neighbouring frame - which is how the synthetic
+        root velocity below is obtained, rather than by inventing a number.
+        """
         spec = self._skeleton
-        tracking_id = 1 + slot
-
-        if self._tracking_loss_every > 0 and index > 0:
-            # Lose the body for 10 consecutive frames on every cycle.
-            if index % self._tracking_loss_every < 10:
-                return None
-
         t = index / self._fps
         rate = 0.25 + 0.05 * slot
         swing = math.sin(2.0 * math.pi * rate * t)
@@ -389,7 +392,36 @@ class MockCameraBackend(CameraBackend):
             if joint_name.endswith("_knee"):
                 z += 0.10 * crouch
             joints[i] = (x, y, z)
+        return joints
 
+    def _parent_relative(self, joints: np.ndarray) -> np.ndarray:
+        """Parent-relative joint positions, mirroring an SDK fitting output.
+
+        Genuinely derived from this backend's own skeleton topology, so it is a
+        real property of the synthetic body rather than a stand-in for a
+        measurement. The root has no parent and stays at the origin.
+        """
+        spec = self._skeleton
+        parents = {child: parent for parent, child in spec.edges}
+        local = np.zeros_like(joints)
+        for i in range(spec.num_joints):
+            parent = parents.get(i)
+            if parent is None:
+                continue
+            local[i] = joints[i] - joints[parent]
+        return local
+
+    def _render_body(self, index: int, slot: int) -> Optional[BodyPose]:
+        """One scripted skeleton. Returns ``None`` during a scripted dropout."""
+        spec = self._skeleton
+        tracking_id = 1 + slot
+
+        if self._tracking_loss_every > 0 and index > 0:
+            # Lose the body for 10 consecutive frames on every cycle.
+            if index % self._tracking_loss_every < 10:
+                return None
+
+        joints = self._pose_positions(index, slot)
         confidences = np.full(spec.num_joints, 0.94, dtype=np.float32)
         confidences -= 0.05 * float(slot)
 
@@ -409,14 +441,48 @@ class MockCameraBackend(CameraBackend):
 
         root_index = spec.root_index
         root = joints[root_index]
+
+        # ---- optional tracker-like fields -------------------------------
+        # Only fields this backend can honestly derive from its own motion
+        # model are filled. The rest stay NaN, which is what a tracker that
+        # does not produce them looks like - and it keeps the NaN paths
+        # exercised end to end instead of only in unit tests.
+        previous = self._pose_positions(max(0, index - 1), slot)[root_index]
+        following = self._pose_positions(index + 1, slot)[root_index]
+        span = 2.0 if index > 0 else 1.0
+        root_velocity = ((following - previous) * (self._fps / span)).astype(np.float32)
+
+        points_2d = np.full((spec.num_joints, 2), np.nan, dtype=np.float32)
+        for i in range(spec.num_joints):
+            projected = self._project(joints[i])
+            if projected is not None:
+                points_2d[i] = projected
+
+        nan_quat = np.full((spec.num_joints, 4), np.nan, dtype=np.float32)
         return BodyPose(
             tracking_id=tracking_id,
             tracking_state=state,
             body_format=spec.name,
             joint_positions_xyz=joints,
             joint_confidences=confidences,
+            # No orientation model here: NaN says "not measured" rather than
+            # letting an identity quaternion pass for one.
+            joint_orientations=nan_quat,
             root_position=None if not np.isfinite(root).all() else root.copy(),
+            root_orientation=np.full(4, np.nan, dtype=np.float32),
             body_confidence=float(np.nanmean(confidences) * 100.0),
+            joint_positions_2d=points_2d,
+            joint_position_covariances=np.full(
+                (spec.num_joints, 6), np.nan, dtype=np.float32
+            ),
+            local_joint_positions_xyz=self._parent_relative(joints),
+            tracker_root_velocity_xyz=root_velocity,
+            root_position_covariance=np.full(6, np.nan, dtype=np.float32),
+            action_state=(
+                BodyActionState.MOVING
+                if float(np.linalg.norm(root_velocity)) > 0.02
+                else BodyActionState.IDLE
+            ),
         )
 
 

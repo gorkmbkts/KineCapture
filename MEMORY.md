@@ -1,9 +1,9 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: two_level_labelling_working
-last_updated: 2026-08-21
-app_version: 0.4.0
+status: feature_export_working
+last_updated: 2026-08-23
+app_version: 0.5.0
 ---
 
 # KineCapture Studio — Proje Hafızası
@@ -33,6 +33,10 @@ Kısa kalıcı talimatlar `CLAUDE.md` içindedir.
   **iki seviyeye** çıkarıldı (hareket sample'ı + zamansal hata aralığı),
   hareket fazı kaldırıldı, doğru/yanlış ikili hale getirildi, İnceleme ekranı
   ve export sözleşmesi yeniden yazıldı. Ayrıntı: bölüm 6B.
+- 2026-08-23: `CLAUDE_SKELETON_FEATURE_EXPORT_PROMPT.md` uygulandı. Ham kayıt
+  geriye uyumlu biçimde zenginleştirildi, `kinecapture/features/` altında
+  **sürümlü seçilebilir özellik katmanı** kuruldu, export ve Export ekranı bu
+  katmanı taşıyacak şekilde genişletildi. Ayrıntı: bölüm 6C.
 
 Önceki scaffold aşaması bu sürümle büyük ölçüde değiştirildi. "Değişen
 kararlar" bölümleri farkları kaydeder.
@@ -156,8 +160,13 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
 - Autosave; öncekini kopyala; tümüne uygula; sonraki eksik kayda geç.
 - Dataset paneli: sayımlar, filtreler, dağılımlar, kalite bulguları.
 - Sürümlü export: `[T,J,3] float32` + manifest + skeleton spec + label
-  mapping + fingerprint + validation report + excluded; staging → atomik
-  yayın; iptal ve hata durumunda hiçbir şey yayımlanmaz.
+  mapping + feature spec + fingerprint + validation report + excluded;
+  staging → atomik yayın; iptal ve hata durumunda hiçbir şey yayımlanmaz.
+- **Seçilebilir iskelet özellikleri**: kalite maskeleri, tracker ham çıktıları,
+  alternatif koordinat temsilleri, kemik geometrisi, zaman damgası tabanlı
+  kinematik, anatomik açılar, bilateral simetri, mesafe/oran proxy'leri ve
+  klasik ML için sabit uzunluklu özet vektörü. Export ekranında aranabilir
+  seçim + 5 preset.
 - Modern GUI: 8 çalışma alanı, daraltılabilir navigasyon, koyu **ve** açık
   tema, 43 vektör ikon (emoji yok), inline form doğrulama, hata bandı,
   klavye kısayolları, kalabalık yan panellerde kaydırma.
@@ -339,6 +348,213 @@ Aşağıdakiler çalıştırılarak doğrulanmıştır (bkz. bölüm 9).
 5. 1366x768'de yan panel taşıyordu; aktif modun kartı öne alınıyor, pasif modun
    kartı özet satırına daraltılıyor, transport zaman çizelgesi kartına taşındı.
 
+## 6C. Seçilebilir iskelet özellikleri (2026-08-23)
+
+### Ürün kararları
+
+1. **Canonical veri dokunulmazdır.** `joints_xyz`, `frame_indices`,
+   `camera_timestamps_ns` her sürümde yazılır, kapatılamaz ve hiçbir özellik
+   onların yerine geçmez. Türetilen her şey ayrı, açık isimli dizi olarak
+   *yanına* yazılır. Tek bir belirsiz `[T,J,C]` tensoruna concat yok.
+2. **Varsayılan export değişmedi.** Hiçbir özellik seçilmezse üretilen sürüm,
+   özellik katmanı yokken üretilenle birebir aynıdır (test edildi).
+3. **Kare farkı ile fiziksel hız ayrı kanallardır.**
+   `joint_displacement_xyz` = `x[t]-x[t-1]` (FPS'e bağlı), `joint_velocity_xyz`
+   = kamera zaman damgasına göre türev (`length_unit/saniye`). KineSynthV3'ün
+   mevcut "velocity" kanalı birincisidir; `KineSynth temel uyumluluk` preseti
+   bu nedenle fiziksel hızı içermez. Tracker'ın kendi kök hızı
+   (`tracker_root_velocity_xyz`) ile türetilen kök hızı
+   (`root_velocity_derived_xyz`) de ayrı dizilerdir.
+4. **Türev politikası tek yerde**: adım ancak `0 < dt <= 2.5/hedef_fps` ise
+   kullanılır; boşluk üzerinden türev alınmaz. Birinci türev iç noktalarda
+   merkezi fark, uçlarda tek yanlı; ikinci türevin uçları NaN. Filtre yok.
+   İlk hız karesi sahte sıfırla doldurulmaz.
+5. **Eksik veri uydurulmaz.** NaN sıfıra çevrilmez, önceki kareyle
+   doldurulmaz. Her özellik mümkünse kendi `*_valid_mask` dizisini yazar ve
+   doğrulama maske ile NaN düzenini karşılaştırır.
+6. **Rol tabloları** (`features/roles.py`) açı/mesafe/simetri tanımlarını
+   iskelet biçiminden ayırır. `zed_body_18`'de pelvis yok, `zed_body_38`'de tek
+   bir kafa eklemi yok, `mock_16`'da ayak yok — bunlar doldurulmaz, ilgili
+   sütun NaN kalır. Rol tabloları sürüm dosyasına yazılır.
+7. **Açı, mesafe ve oran tanımları sürümlüdür** (`ANGLE_SET_VERSION` vb.) ve
+   sütun sırasını sabitler. 11 açı, 14 mesafe, 3 oran, 10 bilateral çift.
+   Üç noktalı açı `atan2(|u x v|, u.v)` ile hesaplanır (0 ve pi civarında
+   arccos'tan daha kararlı); sıfıra yakın vektörde NaN.
+8. **Simetri gövde uzayında ölçülür.** Kamera koordinatında `sol - sağ` almak,
+   kişinin kameraya göre dönmesini asimetri gibi gösterirdi. Sagittal düzlem,
+   pelvisten kurulan gövde çerçevesinin `x = 0` düzlemidir. Sonuçlar
+   "asimetri teşhisi" olarak adlandırılmaz.
+9. **Gövde çerçevesinin ön ekseni sekans başına bir kez** belirlenir (varsa
+   boyun→burun/kafa referansıyla, yoksa yalnız sağ el kuralıyla ve bunu
+   `forward_source` alanında yazarak). Kare başına karar verilseydi tracker
+   gürültüsünde işaret değiştirebilirdi.
+10. **Quaternion sırası `xyzw`**, yerel SDK üzerinde doğrulandı: `sl.Rotation`
+    ile Y ekseninde +90 derece döndürülünce `[0, 0.7071, 0, 0.7071]` geliyor.
+    Quaternion kaynaklı açısal hız `2*arccos(|<qa,qb>|)/dt` ile hesaplanır;
+    mutlak iç çarpım `q`/`-q` çift örtüsünü doğrudan çözer, Euler açıları
+    hiçbir yerde farklanmaz.
+11. **Sabit uzunluklu özet vektörü (307 eleman)** rol/açı/mesafe listelerinden
+    üretilir, iskelet biçiminden bağımsızdır; hesaplanamayan eleman NaN kalır,
+    uzunluk değişmez. Template mesafesi, sınıf ortalaması, DTW ve dataset
+    scaler'ı **bilinçli olarak yoktur** — split leakage yaratırlar.
+12. **Klinik iddia yok.** Çıktılar "kinematik özellik" veya proxy olarak
+    adlandırılır. `joint_centroid_proxy_xyz` bir kütle merkezi DEĞİLDİR ve öyle
+    adlandırılmamıştır. Zemin yüksekliği / ayak teması doğrulanmış world-floor
+    kalibrasyonu gerektirdiği için hiç üretilmez.
+
+### Ham kayıt zenginleştirmesi
+
+`BodyPose` şu opsiyonel alanları kazandı; hepsi opsiyonel, eksikse `None`:
+`joint_positions_2d [J,2]`, `joint_position_covariances [J,6]`,
+`local_joint_positions_xyz [J,3]`, `root_orientation [4]`,
+`tracker_root_velocity_xyz [3]`, `root_position_covariance [6]`,
+`action_state` (`idle`/`moving`/`unknown`).
+
+- `SKELETON_STREAM_SCHEMA_VERSION` 1.0.0 → **1.1.0** (yalnız ekleme).
+  v1 JSONL **migration olmadan** okunur; alanı olmayan kayıtta özellik
+  "yok" olarak raporlanır, uydurulmaz.
+- Yanlış şekil **reddedilir** (`ValidationError`), asla yeniden şekillendirilmez.
+  ZED adapter tarafında ise yanlış/boş şekil `None` olur ve kayıt sürer;
+  `BODY_18` gibi biçimlerde fitting çıktılarının olmaması normaldir.
+- `root_orientation` daha önce modelde vardı fakat `to_record`/`from_record`
+  içinde kayboluyordu — düzeltildi (regresyon testi var).
+- **Kovaryansın altı elemanının sırası doğrulanmadı**, bu yüzden ham
+  saklanıyor ve "SDK native order" deniyor. Bundan std/belirsizlik
+  TÜRETİLMİYOR; prompt'un izin verdiği koşul (sıra doğrulanmışsa) sağlanmadı.
+- `keypoint_2d` piksel olduğu için anlamsız kalmasın diye **sol kamera iç
+  parametreleri** bağlantı sırasında bir kez okunup take provenance'ına
+  yazılıyor (`camera_info.extra.left_camera_calibration`): fx, fy, cx, cy,
+  görüntü boyutu, distortion, model. Gerçek kamerada doğrulandı.
+- Mock backend yalnız kendi modelinden dürüstçe türetebildiklerini üretir
+  (2B projeksiyon, parent'a göre konum, analitik kök hızı, action state);
+  quaternion ve kovaryanslar NaN'dır — "ölçülmedi" demek için.
+
+### Feature registry mimarisi
+
+```text
+features/base.py         FeatureDefinition, ArrayContract, MappingSupport, SourceField
+features/roles.py        anatomik rol -> eklem indeksi (5 iskelet biçimi)
+features/definitions.py  sürümlü açı / mesafe / oran listeleri (sütun sırası)
+features/temporal.py     dt, boşluk güvenli merkezi/ikinci fark, yol uzunluğu
+features/geometry.py     üç noktalı açı, gövde çerçevesi, kemikler, gövde ölçeği
+features/compute.py      özellik başına bir fonksiyon + FeatureContext
+features/summary.py      sabit uzunluklu özet vektörü ve eleman adları
+features/registry.py     sıralı katalog, uygulanabilirlik, presetler, boyut tahmini
+features/spec.py         feature_spec.json belgesi
+```
+
+Registry bir **tuple**'dır, set değil: fingerprint ve GUI sırası Python set
+sırasına bağlı olamaz. 31 özellik, 64 dizi anahtarı. Bağımlılıklar
+(`depends_on`) geçişli olarak çözülür; kullanıcı özet vektörünü seçince açılar
+otomatik gelir.
+
+### Eklem eşleştirmesi altında davranış
+
+Her özellik `mapping_support` beyan eder:
+- `recompute` — geometrik olanlar hedef iskeletin koordinatlarından yeniden
+  hesaplanır (test: aynı hareketin diz açısı native ve mapped exportta birebir
+  aynı çıkıyor).
+- `index_remap` — 2B noktalar, eklem kovaryansları, güven değerleri.
+- `native_only` — local quaternionlar ve parent'a göre konumlar. Eşleştirme
+  seçiliyken **yazılmaz** (dizi NaN, availability "absent", neden manifestte);
+  GUI bunu seçimden önce gri satır ve gerekçeyle gösterir.
+- Kısmi eşleştirmede yalnız ilgili kemik/sütun NaN kalır (test: 23/26
+  eşleşmede yalnız `Head_end`, `*ToeBase_end` bağlantılı kemikler geçersiz).
+
+### Export sözleşmesi eklemeleri
+
+- `feature_spec.json`: seçilen özellikler ve sürümleri, bütün dizi
+  sözleşmeleri, açı/mesafe/kemik/çift/özet sütun adları, birimler, koordinat
+  uzayları, zaman hizası, eksik veri politikası, türev politikası, algoritma
+  parametreleri, rol tabloları, örnek başına availability istatistiği,
+  mapping ve klinik doğrulama uyarısı.
+- Manifestte `array_contract` korundu, yanına `feature_contract` eklendi.
+- Örnek girdisinde `features` (full/partial/absent), `feature_availability_ratio`,
+  `feature_notes`, `array_keys` ve `checksum` var.
+- Seçili bir özellik **hiçbir örnekte** üretilemezse `feature_never_available`
+  doğrulama hatası verilir ve sürüm "geçti" sayılmaz. Kısmi availability
+  uyarıdır.
+- `RELEASE_SCHEMA_VERSION` 1.0.0 → **2.0.0**. Eski sürümler değiştirilmez.
+
+### Fingerprint düzeltmesi (gerçek hata)
+
+Örnek sağlama toplamları `_validate()` içinde, yani fingerprint hesaplandıktan
+**sonra** ekleniyordu; dolayısıyla fingerprint yazılan dizilerin içeriğine
+duyarlı değildi. Artık `.npz` yazılır yazılmaz hash alınıyor, fingerprint
+anahtarına giriyor ve doğrulama sırasında yeniden hesaplanıp karşılaştırılıyor.
+Fingerprint bileşenleri: `samples`, `export_config`, `skeleton_spec`,
+`label_schema`, **`features`**.
+
+### GUI
+
+Export ekranına "Veri ve özellik seçimi" kartı ve aranabilir bir dialog
+eklendi: kategori ağacı, satır başına Türkçe ad + şekil/birim + destek durumu
++ deneysel işareti + devre dışıysa gerekçe, 5 preset, arama, seçim özeti.
+Önizleme seçili özellik/dizi sayısını, üretilemeyecek özellik sayısını,
+filtrelenen kayıt sayısını ve sıkıştırma öncesi tahmini boyutu gösterir.
+Son seçim kullanıcı tercihlerine (`export_feature_ids`) yazılır; testler
+izole edilmiş `USER_STATE_PATH` kullandığı için gerçek ayar dosyasına
+dokunulmaz. Özellik hesapları export worker thread'inde çalışır.
+
+### Kendi araştırmamla EKLEDİKLERİM (promptta yoktu)
+
+1. **Sol kamera iç parametreleri take provenance'ında.** 2B eklem noktaları
+   piksel; görüntü boyutu ve intrinsics olmadan yeniden kullanılamaz.
+   Kayıttan sonra güvenilir biçimde geri üretilemediği için raw-capture
+   alanı yapıldı. Birim piksel, uzay sol kamera görüntüsü.
+2. **`body_state` ailesi** (`body_present_mask`, `body_confidence`,
+   `tracking_state_code`, `action_state_code`). Takip boşluğu ile "kişi
+   duruyor" ayrımı ancak böyle yapılabilir; maskesiz bir NaN neden NaN
+   olduğunu söylemez. Kod tablosu spec'te.
+3. **`frame_timing` / `delta_time_s`.** Gerçek örnekleme düzensizliğini
+   modele göstermenin tek yolu; hedef FPS'ten üretilemez.
+4. **`joint_centroid_proxy_xyz`.** COM istenirdi fakat antropometrik model
+   yok; dürüst isimle ve "COM değildir" açıklamasıyla eklendi.
+5. **`segment_ratios`.** Ham mesafeler kişi boyuna bağlı; kişinin kendi kalça
+   genişliğine oranlamak kişiler arası karşılaştırmayı mümkün kılar ve
+   dataset genelinden bir şey öğrenmez (leakage yok).
+6. **`body_frame_rotation` + `body_frame_valid_mask` ayrı diziler.** Kare
+   başına yönelim ile sekans düzeyi ölçek aynı isim altında karışmasın diye.
+7. **`root_path_length`** ve **`bone_unit_vectors_xyz`.** İkisi de ucuz,
+   yönden bağımsız ve birden çok yaklaşımda anlamlı.
+8. **Yazma anında checksum → fingerprint.** Yukarıdaki hata.
+
+### Değerlendirilip EKLENMEYENLER (gerekçeleriyle)
+
+1. **Kovaryanstan türetilen std / belirsizlik elipsoidi.** Altı elemanın sırası
+   yerel SDK'dan doğrulanamadı; yanlış sıra sessizce yanlış belirsizlik üretir.
+   Ham altı değer saklanıyor, yorum yapılmıyor.
+2. **Zemin yüksekliği, ayak teması, adım uzunluğu.** Doğrulanmış world/floor
+   kalibrasyonu yok; kamera koordinatındaki `y=0` zemin değildir.
+3. **Center of mass, eklem torku, ters dinamik.** Antropometrik model ve
+   kuvvet ölçümü gerektirir; uydurma olurdu.
+4. **Frekans alanı özellikleri (FFT, spektral güç).** Örnekleme düzensiz ve
+   sekanslar kısa; anlamlı bir pencere seçimi ürün kararı gerektirir.
+5. **Smoothing / Savitzky-Golay türevleri.** Sessiz yumuşatma yapılmaması
+   kuralına aykırı; ileride ayrı ve sürümlü bir özellik olarak eklenebilir.
+6. **DTW-to-correct-template, sınıf ortalamasına uzaklık, dataset scaler.**
+   Split leakage. Eğitim katmanına ait.
+7. **Mask / RGB crop / segmentasyon.** Prompt kapsam dışı bıraktı; boyut ve
+   gizlilik açısından da ayrı bir karar.
+8. **`bounding_box`, `head_bounding_box`, `dimensions`, `unique_object_id`.**
+   SDK'da var fakat iskelet tabanlı ML için yeni bilgi taşımıyor; koordinatlardan
+   yaklaşık üretilebilir.
+
+### Bu turda bulunan gerçek hatalar
+
+1. **Fingerprint dizi içeriğine duyarsızdı** (yukarıda).
+2. **`root_orientation` diske yazılmıyordu**; model alanı vardı, serileştirme
+   yoktu.
+3. **Export ekranı ilk açılışta `joint_confidences`'ı düşürüyordu**: kayıtlı
+   tercih yokken seçim boş kalıyor, `store_confidences` False oluyordu.
+   Tercih yoksa `DEFAULT_FEATURE_IDS` ile açılıyor.
+4. **`_build_into` içinde `name` gölgelendi**: opsiyonel alan sayacının döngü
+   değişkeni sürüm adının üzerine yazıyordu (self-test sürüm adını
+   `tracker_root_velocity_xyz` diye bastı).
+5. **Türev maskesinin rankı belirsizdi**: `[T,3]` bir dizi "üç skaler seri" mi
+   "bir 3-vektör serisi" mi olduğu tahmin ediliyordu. `vector` parametresi
+   zorunlu hale getirildi.
+
 ## 7. Mimari sınırlar
 
 ```text
@@ -351,6 +567,7 @@ playback/       skeleton stream okuma, proxy video okuma, kurtarma
 annotations/    AnnotationRepository (undo/redo, autosave)
 dataset/        ProjectWorkspace (disk), DatasetIndex (sorgu/özet/QA)
 export/         ReleaseBuilder (staging → atomik yayın)
+features/       sürümlü seçilebilir özellik katmanı ← Qt ve pyzed içermez
 domain/         enums, models, project, labels  ← Qt ve pyzed içermez
 visualization/  skeleton_spec (veri), mapping (sürümlü adapter)
 core/           errors, ids, jsonio, paths, config, logging, diagnostics,
@@ -384,7 +601,7 @@ Hepsi kullanıcının Windows makinesinde, `KineSynth` environment içinde
 | Doğrulama | Komut | Sonuç |
 |---|---|---|
 | Interpreter | `conda run -n KineSynth python -c "import sys; print(sys.executable)"` | `C:\Users\gorke\anaconda3\envs\KineSynth\python.exe`, Python 3.11.14 |
-| Test paketi | `python -m pytest` | **314 passed**, 0 warning, 92.9 s (2026-08-21) |
+| Test paketi | `python -m pytest` | **438 passed**, 0 warning, 121.9 s (2026-08-23) |
 | ZED'siz import | alt süreçte `sys.modules` kontrolü | `pyzed` hiç yüklenmedi |
 | Self test | `python -m kinecapture --self-test` | exit 0; proje→export tamamı OK |
 | Cihaz listesi | `python -m kinecapture --list-devices` | ZED SDK 5.4.1, ZED 2i S/N 31844341 AVAILABLE |
@@ -471,6 +688,54 @@ dördünde de değişiyor, sayfalar 1600x980 **ve** 1366x768'de taşmadan
 gerektirmiyor; bu turda 2026-08-20'deki gerçek ZED 2i kaydı yeniden
 alınmadı. Kayıt hattı (`camera/`, `capture/`) bu turda değişmedi.
 
+### Özellik katmanı doğrulaması (2026-08-23)
+
+```text
+python -m pytest                    438 passed, 121.9 s
+python -m kinecapture --self-test   exit 0, export doğrulama=geçti
+```
+
+**GERÇEK ZED 2i ile doğrulandı** (kullanıcı kameranın önünde, canlı önizleme
+penceresiyle kadraj kontrol edilerek):
+
+```text
+connect                3.8 s
+model/serial/sdk       ZED 2i / 31844341 / 5.4.1
+sol kamera intrinsics  fx=949.9 fy=949.9 cx=635.8 cy=350.7  1280x720  PINHOLE
+KAYIT                  362 kare / 12.07 s / 29.9 FPS
+VERİ KAYBI             YOK — dropped=0, missing=0, max_gap=66.6 ms
+GÖVDE TAKİBİ           coverage=1.00, mean_joint_conf=0.888, distinct_ids=1
+
+OPSİYONEL TRACKER ALANLARI (hepsi %100 sonlu, 362 kare x 34 eklem):
+  joint_orientations          (362,34,4)  aralık [-0.763, 1]
+  joint_positions_2d          (362,34,2)  aralık [34.5, 1311] piksel
+  joint_position_covariances  (362,34,6)  aralık [-0.084, 0.120]
+  local_joint_positions_xyz   (362,34,3)  aralık [-0.417, 0.264]
+  root_position               (362,3)
+  root_orientation            (362,4)
+  tracker_root_velocity_xyz   (362,3)     aralık [-0.436, 0.439] m/s
+  root_position_covariance    (362,6)
+  action_state_code           idle=310, moving=52   (tracker gerçekten ikisini de veriyor)
+  tracking_state_code         ok=362
+
+EXPORT                 dataset_v001 · 2 örnek · doğrulama GEÇTİ
+                       61 dizi / örnek, örnek şekli (120, 34, 3) float32
+ÖLÇÜLEN DEĞERLER       joint_speed mean=0.381 max=3.867 m/s
+                       sağ diz açısı 130.0°..180.0°, sol diz 172.1°..180.0°
+                       gövde eğimi 0.2°..7.5°, body_scale 1.289 m
+                       summary vector 307/307 eleman sonlu
+                       quaternion normları mean=1.0000 (4080 örnek)
+```
+
+Son satır kritik: quaternion normlarının tam 1.0000 çıkması, `xyzw` okumasının
+ve birim quaternion varsayımının gerçek veride doğrulandığını gösteriyor.
+`joint_positions_2d` aralığının 1280 pikseli birkaç piksel aşması, kadrajın
+kenarındaki eklemler için beklenen davranıştır.
+
+`frame_timing`, `joint_displacement` ve `joint_acceleration` "kısmi"
+raporlanıyor — tasarım gereği: ilk karede dt/yer değiştirme, ilk ve son karede
+ivme NaN'dır.
+
 ### Ek olarak: donanımsız gövde dönüşümü testleri
 
 `tests/test_zed_adapter.py` (17 test) `ZedCameraBackend._retrieve_bodies`
@@ -543,6 +808,13 @@ gerektirmeden regresyonu yakalar.
 - Zaman çizelgesinde reviewer yorum katmanı.
 - Hata sınıflarının hiyerarşisi/gruplanması (şu an düz liste).
 - Bir hata aralığını başka bir harekete taşıma (şu an sil + yeniden çiz).
+- Kovaryanstan türetilen belirsizlik (eleman sırası doğrulanmadı).
+- Zemin/dünya kalibrasyonu ve ona bağlı özellikler (ayak teması, adım).
+- Sürümlü ve açıkça işaretlenmiş smoothing/filtre özellikleri.
+- Hata aralığı başına etkilenen eklem / body region, şiddet rubriği,
+  annotator confidence ve zamansal faz aralıkları. Bunlar ayrı bir ontoloji
+  kararı gerektirir; feature/export mimarisi ileride bu hedef dizilerinin
+  eklenmesini engellemiyor (yeni FeatureDefinition + yeni array key yeter).
 - Paketleme / dağıtım (installer).
 
 ## 12. Sonraki önerilen adım
@@ -560,3 +832,10 @@ gerektirmeden regresyonu yakalar.
    ekleyin; insan onayı olmadan ground truth sayılmamalı (altyapı hazır).
 6. Zamansal hedefi (`error_multi_hot`) tüketen ilk eğitim betiğini yazıp
    sözleşmenin gerçekten kullanışlı olduğunu doğrulayın.
+7. `Klasik ML` presetiyle bir sürüm alıp `summary_features` üzerinde bir
+   Random Forest baseline'ı çalıştırın; 307 elemanın hangilerinin gerçekten
+   ayırt edici olduğunu ölçün ve işe yaramayanları bir sonraki summary
+   sürümünde ayıklayın.
+8. Kovaryans eleman sırasını Stereolabs dokümantasyonundan veya bilinen bir
+   duruşla deneysel olarak doğrulayın; doğrulanırsa `joint_position_std`
+   türetilmiş özelliği eklenebilir.

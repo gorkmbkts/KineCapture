@@ -132,6 +132,38 @@ class JointMapping:
         result[:, mapped, :] = array[:, indices[mapped], :]
         return result[0] if squeeze else result
 
+    def apply_per_joint(self, values: np.ndarray) -> np.ndarray:
+        """Remap any ``[T, source_J, ...]`` per-joint array onto the target order.
+
+        This is a pure index permutation, so it is only correct for quantities
+        whose meaning belongs to the *joint* rather than to the source
+        skeleton's parent chain. Positions, image points and per-joint position
+        covariances qualify; parent-relative positions and local joint
+        quaternions do not, and the exporter refuses to send those through
+        here. Unmapped target joints become NaN.
+        """
+        array = np.asarray(values, dtype=np.float32)
+        if array.ndim < 2:
+            raise ValidationError(
+                f"Eklem dizisi en az [T, J] olmalı, gelen: {array.shape}",
+                field="values",
+                code="mapping_input_shape",
+            )
+        source_joints = self.source_spec.num_joints
+        if array.shape[1] != source_joints:
+            raise ValidationError(
+                f"'{self.source_format}' {source_joints} eklem bekler, "
+                f"gelen: {array.shape[1]}",
+                field="values",
+                code="mapping_joint_count_mismatch",
+            )
+        indices = self.index_vector()
+        shape = (array.shape[0], indices.size, *array.shape[2:])
+        result = np.full(shape, np.nan, dtype=np.float32)
+        mapped = indices >= 0
+        result[:, mapped, ...] = array[:, indices[mapped], ...]
+        return result
+
     def apply_confidence(self, confidences: np.ndarray) -> np.ndarray:
         """Remap ``[T, source_J]`` confidences; unmapped joints become NaN."""
         array = np.asarray(confidences, dtype=np.float32)

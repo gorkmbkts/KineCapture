@@ -240,6 +240,9 @@ def test_fingerprint_is_stable_and_component_wise(labelled_project) -> None:
         "export_config",
         "skeleton_spec",
         "label_schema",
+        # The feature component identifies the derived-feature definitions that
+        # produced the release's optional arrays.
+        "features",
     }
 
 

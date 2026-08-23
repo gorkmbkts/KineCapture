@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Optional
 
 from kinecapture.core.errors import StorageError
 from kinecapture.core.jsonio import dumps
@@ -124,17 +124,21 @@ def dataset_fingerprint(
     export_config: Mapping[str, Any],
     skeleton_spec: Mapping[str, Any],
     label_schema: Mapping[str, Any],
+    features: Optional[Mapping[str, Any]] = None,
 ) -> dict[str, Any]:
     """Compute the fingerprint of a dataset release.
 
-    The fingerprint has four independent components so a difference between two
+    The fingerprint has independent components so a difference between two
     releases can be attributed instead of merely detected: samples, export
-    configuration, skeleton definition and label schema each get their own
-    digest, plus a combined digest over all four.
+    configuration, skeleton definition, label schema and - when a release
+    carries derived features - the feature definitions each get their own
+    digest, plus a combined digest over all of them.
 
     ``sample_keys`` must be small per-sample dictionaries (identifiers, frame
-    counts, label values) - never the pose arrays themselves. Array content is
-    covered by the per-file checksums.
+    counts, label values, and the **checksum of the written array file**) -
+    never the pose arrays themselves. Including that checksum is what ties the
+    fingerprint to the bytes actually published: without it two releases whose
+    metadata matched but whose arrays differed would fingerprint identically.
     """
     samples = sorted(
         (dict(entry) for entry in sample_keys),
@@ -146,6 +150,8 @@ def dataset_fingerprint(
         "skeleton_spec": hash_payload(dict(skeleton_spec)),
         "label_schema": hash_payload(dict(label_schema)),
     }
+    if features is not None:
+        components["features"] = hash_payload(dict(features))
     return {
         "algorithm": "sha256",
         "num_samples": len(samples),

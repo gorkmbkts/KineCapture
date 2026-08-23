@@ -17,6 +17,7 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QHBoxLayout,
     QHeaderView,
     QPlainTextEdit,
@@ -28,6 +29,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from kinecapture.core.config import save_user_state
 from kinecapture.core.errors import ExportCancelled, ExportError, KineCaptureError
 from kinecapture.core.jsonio import read_json
 from kinecapture.export.release import (
@@ -36,6 +38,15 @@ from kinecapture.export.release import (
     ReleaseBuilder,
     list_releases,
     next_release_name,
+)
+from kinecapture.features.registry import (
+    DEFAULT_FEATURE_IDS,
+    applicability,
+    array_keys_for,
+    estimate_bytes_per_frame,
+    get_feature,
+    match_preset,
+    order_features,
 )
 from kinecapture.gui.pages.base import Page
 from kinecapture.gui.state import AppState
@@ -49,8 +60,12 @@ from kinecapture.gui.widgets.common import (
     make_button,
     make_label,
 )
+from kinecapture.gui.widgets.feature_picker import (
+    FeatureSelectionDialog,
+    FeatureSummaryLabel,
+)
 from kinecapture.visualization.mapping import available_mappings
-from kinecapture.visualization.skeleton_spec import REHAB24_6_MOCAP
+from kinecapture.visualization.skeleton_spec import SkeletonSpec, try_get_skeleton_spec
 
 _NATIVE = "__native__"
 
@@ -111,6 +126,15 @@ class ExportPage(Page):
         theme = self.theme
         self._thread: Optional[QThread] = None
         self._worker: Optional[_ExportWorker] = None
+        # Restored from the user's preferences; unknown ids from an older
+        # version are dropped by the registry rather than carried forward.
+        # With no stored preference the screen opens on the canonical default,
+        # which is the release this application produced before features
+        # existed - a first run must not quietly change the export contract.
+        stored = list(state.config.export_feature_ids or ())
+        self._feature_ids: tuple[str, ...] = order_features(
+            stored or DEFAULT_FEATURE_IDS
+        )
 
         self._empty = EmptyState(
             "Önce bir proje açın",
@@ -177,10 +201,6 @@ class ExportPage(Page):
         self._include_excluded.toggled.connect(self._refresh_preview)
         card.add_widget(self._include_excluded)
 
-        self._store_confidence = QCheckBox("Eklem güven değerlerini yaz")
-        self._store_confidence.setChecked(True)
-        card.add_widget(self._store_confidence)
-
         self._store_targets = QCheckBox(
             "Kare başına hata hedefi dizisi yaz (error_multi_hot)"
         )
@@ -204,6 +224,23 @@ class ExportPage(Page):
         self._notes.setPlaceholderText("Bu sürümle ilgili not (manifeste yazılır)")
         card.add_widget(FieldRow("Sürüm notu", self._notes, theme=theme))
         layout.addWidget(card)
+
+        features = Card(
+            "Veri ve özellik seçimi",
+            subtitle=(
+                "Canonical iskelet her sürümde yazılır. Seçilenler onun yanına "
+                "ayrı dizilerle eklenir."
+            ),
+            theme=theme,
+            icon="dataset",
+        )
+        self._feature_summary = FeatureSummaryLabel(theme)
+        self._feature_summary.edit_requested.connect(self._edit_features)
+        features.add_widget(self._feature_summary)
+        self._feature_note = make_label("", role="muted")
+        self._feature_note.setWordWrap(True)
+        features.add_widget(self._feature_note)
+        layout.addWidget(features)
 
         preview_card = Card("Önizleme", theme=theme, icon="eye")
         self._preview_chip = StatusChip("-", theme=theme, icon="info")
@@ -307,6 +344,7 @@ class ExportPage(Page):
             return
         self._set_empty(False)
         self._populate_skeleton_choices()
+        self._refresh_feature_summary()
         self._refresh_preview()
         self._refresh_releases()
 
@@ -366,20 +404,110 @@ class ExportPage(Page):
                 f"Tam eşleştirme: {mapping.mapping_id} v{mapping.version}."
             )
             self._mapping_note.setStyleSheet(f"color: {self.theme.success};")
+        # A mapping can make a native-only feature unavailable, so the summary
+        # has to be recomputed here, not only when the dialog closes.
+        self._refresh_feature_summary()
         self._refresh_preview()
 
     def _current_options(self) -> ExportOptions:
         target = self._skeleton_selector.currentData()
+        selection = self._effective_feature_ids()
         return ExportOptions(
             include_synthetic=self._include_synthetic.isChecked(),
             include_unready=self._include_unready.isChecked(),
             include_excluded_samples=self._include_excluded.isChecked(),
             min_frames_per_sample=self._min_frames.value(),
             target_skeleton_format=None if target == _NATIVE else target,
-            store_confidences=self._store_confidence.isChecked(),
+            # Confidences are a normal registry feature; this flag stays only so
+            # the two cannot disagree about the array.
+            store_confidences="joint_confidences" in selection,
             store_error_target_arrays=self._store_targets.isChecked(),
+            feature_ids=selection,
+            feature_preset=match_preset(selection),
             notes=self._notes.toPlainText().strip(),
         )
+
+    # --------------------------------------------------------- feature pick
+    def _output_spec(self) -> Optional[SkeletonSpec]:
+        """The skeleton a release would actually be written in."""
+        target = self._skeleton_selector.currentData()
+        if target and target != _NATIVE:
+            return try_get_skeleton_spec(target)
+        index = self.state.index
+        if index is None:
+            return None
+        for row in index.rows:
+            spec = try_get_skeleton_spec(row.take.skeleton_format)
+            if spec is not None:
+                return spec
+        return None
+
+    def _available_sources(self) -> Optional[tuple[str, ...]]:
+        """Optional tracker fields present in the takes, if that is knowable.
+
+        Answering it needs the pose streams, which is too expensive for a
+        preview, so the dialog is told ``None`` and reports availability from
+        the skeleton and mapping alone. What the takes really contain is
+        reported per feature in the release itself.
+        """
+        return None
+
+    def _effective_feature_ids(self) -> tuple[str, ...]:
+        return order_features(self._feature_ids)
+
+    def _edit_features(self) -> None:
+        dialog = FeatureSelectionDialog(
+            self.theme,
+            selected=self._feature_ids,
+            spec=self._output_spec(),
+            mapping_active=self._skeleton_selector.currentData() not in (None, _NATIVE),
+            available_sources=self._available_sources(),
+            parent=self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._feature_ids = dialog.selected_feature_ids()
+        self._remember_features()
+        self._refresh_feature_summary()
+        self._refresh_preview()
+
+    def _remember_features(self) -> None:
+        """Persist the selection through the normal user-state path.
+
+        Tests redirect ``USER_STATE_PATH``, so this never touches the real
+        user's settings file during a test run.
+        """
+        self.state.config.export_feature_ids = list(self._feature_ids)
+        try:
+            save_user_state(self.state.config)
+        except KineCaptureError as exc:  # a preference must never block export
+            self.state.notify(exc.message, 4000)
+
+    def _refresh_feature_summary(self) -> None:
+        selection = self._effective_feature_ids()
+        self._feature_summary.set_selection(selection)
+        spec = self._output_spec()
+        blocked: list[str] = []
+        if spec is not None:
+            mapping_active = self._skeleton_selector.currentData() not in (
+                None,
+                _NATIVE,
+            )
+            for feature_id in selection:
+                definition = get_feature(feature_id)
+                verdict = applicability(
+                    definition, spec, mapping_active=mapping_active
+                )
+                if not verdict.supported:
+                    blocked.append(f"{definition.label}: {verdict.reason}")
+        keys = array_keys_for(selection)
+        lines = [
+            f"Oluşacak dizi anahtarları: {', '.join(keys[:8])}"
+            + (f" (+{len(keys) - 8})" if len(keys) > 8 else ""),
+        ]
+        if blocked:
+            lines.append("Seçili ama bu yapılandırmada üretilemeyecek: " + "; ".join(blocked))
+        self._feature_note.setText("\n".join(lines))
 
     def _refresh_preview(self) -> None:
         workspace = self.state.workspace
@@ -395,15 +523,53 @@ class ExportPage(Page):
         )
         participants = {row.take.participant_id for row in rows}
         synthetic = sum(1 for row in rows if row.take.is_synthetic)
+        rejected = len(index.rows) - len(rows)
+        frames = sum(
+            max(0, sample.end_frame - sample.start_frame + 1)
+            for group in selected
+            for sample in group
+        )
+
+        selection = self._effective_feature_ids()
+        keys = array_keys_for(selection)
+        spec = self._output_spec()
+        unsupported = 0
+        if spec is not None:
+            mapping_active = self._skeleton_selector.currentData() not in (
+                None,
+                _NATIVE,
+            )
+            unsupported = sum(
+                1
+                for feature_id in selection
+                if not applicability(
+                    get_feature(feature_id), spec, mapping_active=mapping_active
+                ).supported
+            )
+            estimate = estimate_bytes_per_frame(
+                selection,
+                num_joints=spec.num_joints,
+                num_bones=len(spec.edges),
+            ) * frames
+            size_text = f"~{estimate / (1024 * 1024):.1f} MB (sıkıştırma öncesi)"
+        else:
+            size_text = "-"
 
         self._preview.set_items(
             [
                 ("Sonraki sürüm", next_release_name(workspace.releases_dir)),
                 ("Uygun kayıt", str(len(rows))),
+                ("Filtrelenen kayıt", str(max(0, rejected))),
                 ("Örnek (hareket)", str(samples)),
                 ("Hata aralığı", str(intervals)),
                 ("Katılımcı", str(len(participants))),
                 ("Sentetik kayıt", str(synthetic)),
+                ("Seçili özellik", f"{len(selection)} özellik · {len(keys)} dizi"),
+                (
+                    "Üretilemeyecek özellik",
+                    str(unsupported) if unsupported else "yok",
+                ),
+                ("Tahmini boyut", size_text),
                 ("Hedef klasör", str(workspace.releases_dir)),
             ]
         )

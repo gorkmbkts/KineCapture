@@ -185,6 +185,91 @@ class SkeletonStream:
                 result[offset] = body.joint_confidences
         return result
 
+    def optional_body_array(
+        self,
+        tracking_id: Optional[int],
+        attribute: str,
+        *,
+        start: int = 0,
+        end: Optional[int] = None,
+    ) -> Optional[np.ndarray]:
+        """One optional tracker array over a playback range, or ``None``.
+
+        Returns ``float32 [T, ...]`` shaped like the per-frame field, with
+        all-NaN rows where the body was absent or never carried that field.
+        ``None`` means *no* frame in the window carried it at all, which is
+        what an older recording looks like - and is reported as an unavailable
+        feature rather than as an array of zeros.
+        """
+        stop = len(self.frames) if end is None else min(end + 1, len(self.frames))
+        window = self.frames[start:stop]
+        if not window:
+            return None
+
+        tail: Optional[tuple[int, ...]] = None
+        for frame in window:
+            body = frame.body(tracking_id)
+            value = getattr(body, attribute, None) if body is not None else None
+            if value is not None:
+                tail = tuple(int(dimension) for dimension in np.shape(value))
+                break
+        if tail is None:
+            return None
+
+        result = np.full((len(window), *tail), np.nan, dtype=np.float32)
+        for offset, frame in enumerate(window):
+            body = frame.body(tracking_id)
+            value = getattr(body, attribute, None) if body is not None else None
+            if value is not None and tuple(np.shape(value)) == tail:
+                result[offset] = np.asarray(value, dtype=np.float32)
+        return result
+
+    def body_state_arrays(
+        self,
+        tracking_id: Optional[int],
+        *,
+        start: int = 0,
+        end: Optional[int] = None,
+    ) -> dict[str, np.ndarray]:
+        """Per-frame presence, tracker confidence, tracking state and action."""
+        from kinecapture.domain.enums import BodyActionState  # local: avoids a cycle
+
+        stop = len(self.frames) if end is None else min(end + 1, len(self.frames))
+        window = self.frames[start:stop]
+        count = len(window)
+        present = np.zeros(count, dtype=bool)
+        confidence = np.full(count, np.nan, dtype=np.float32)
+        tracking = np.zeros(count, dtype=np.uint8)
+        action = np.zeros(count, dtype=np.uint8)
+        states = {"ok": 1, "searching": 2, "off": 3, "terminate": 4}
+        actions = {
+            BodyActionState.IDLE.value: 1,
+            BodyActionState.MOVING.value: 2,
+        }
+        for offset, frame in enumerate(window):
+            body = frame.body(tracking_id)
+            if body is None:
+                continue
+            present[offset] = True
+            confidence[offset] = body.body_confidence
+            tracking[offset] = states.get(body.tracking_state.value, 0)
+            action[offset] = actions.get(body.action_state.value, 0)
+        return {
+            "body_present": present,
+            "body_confidence": confidence,
+            "tracking_state": tracking,
+            "action_state": action,
+        }
+
+    def optional_field_names(self, tracking_id: Optional[int]) -> tuple[str, ...]:
+        """Which optional tracker fields appear anywhere in this stream."""
+        found: set[str] = set()
+        for frame in self.frames:
+            body = frame.body(tracking_id)
+            if body is not None:
+                found.update(body.available_fields())
+        return tuple(sorted(found))
+
     def coverage_curve(self, tracking_id: Optional[int]) -> np.ndarray:
         """``float32 [T]`` fraction of usable joints per frame, for the timeline."""
         values = np.zeros(len(self.frames), dtype=np.float32)

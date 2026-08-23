@@ -37,6 +37,7 @@ from kinecapture.camera.base import (
 from kinecapture.core.errors import CameraError, CameraNotConnectedError
 from kinecapture.core.logging import get_logger
 from kinecapture.domain.enums import (
+    BodyActionState,
     CaptureStatus,
     DataOrigin,
     HealthLevel,
@@ -373,6 +374,43 @@ class ZedCameraBackend(CameraBackend):
         self._spec = spec_for_zed_body_format(profile.body_format)
         self._body_tracking_enabled = True
 
+    @staticmethod
+    def _left_camera_calibration(configuration: Any) -> Optional[dict[str, Any]]:
+        """Intrinsics of the left camera, or ``None`` when unavailable.
+
+        2D keypoints are pixel coordinates and are meaningless without the
+        image size and intrinsics they were produced against, so this is read
+        once per connection and stored in the take's provenance. Every value is
+        read from the device; nothing is derived or assumed.
+        """
+        calibration = getattr(configuration, "calibration_parameters", None)
+        left = getattr(calibration, "left_cam", None) if calibration else None
+        if left is None:
+            return None
+        try:
+            size = left.image_size
+            block: dict[str, Any] = {
+                "camera": "left",
+                "fx": float(left.fx),
+                "fy": float(left.fy),
+                "cx": float(left.cx),
+                "cy": float(left.cy),
+                "image_width": int(size.width),
+                "image_height": int(size.height),
+                "distortion": [float(v) for v in np.ravel(left.disto).tolist()],
+                "distortion_model": str(
+                    getattr(left, "lens_distortion_model", "unspecified")
+                ),
+                "note": (
+                    "2D eklem noktaları bu görüntü boyutu ve iç parametrelerle "
+                    "birlikte anlamlıdır."
+                ),
+            }
+        except Exception as exc:  # pragma: no cover - depends on device state
+            logger.warning("Kamera kalibrasyonu okunamadı: %s", exc)
+            return None
+        return block
+
     def _build_camera_info(
         self, sl: Any, camera: Any, profile: CaptureProfile
     ) -> CameraInfo:
@@ -383,6 +421,7 @@ class ZedCameraBackend(CameraBackend):
             int(configuration.resolution.width),
             int(configuration.resolution.height),
         )
+        calibration = self._left_camera_calibration(configuration)
         return CameraInfo(
             backend=self.name,
             model=str(information.camera_model),
@@ -404,6 +443,8 @@ class ZedCameraBackend(CameraBackend):
                 "body_tracking_model": profile.body_tracking_model,
                 "body_fitting": profile.enable_body_fitting,
                 "input_type": str(information.input_type),
+                "left_camera_calibration": calibration,
+                "quaternion_order": "xyzw",
             },
         )
 
@@ -509,6 +550,25 @@ class ZedCameraBackend(CameraBackend):
             backend_dropped_frames=int(camera.get_frame_dropped_count()),
         )
 
+    @staticmethod
+    def _optional_array(
+        body: Any, attribute: str, shape: tuple[int, ...]
+    ) -> Optional[np.ndarray]:
+        """Read one optional SDK array, or ``None`` if it is absent or wrong.
+
+        Some body formats simply do not produce some of these arrays (body
+        fitting outputs are empty for ``BODY_18``, for instance). A field that
+        is missing, empty or the wrong shape becomes ``None`` - never a
+        reshaped or padded value, which would silently re-index joints.
+        """
+        raw = getattr(body, attribute, None)
+        if raw is None:
+            return None
+        array = np.asarray(raw, dtype=np.float32)
+        if array.shape != shape:
+            return None
+        return array
+
     def _retrieve_bodies(self, sl: Any, camera: Any) -> tuple[BodyPose, ...]:
         if not self._body_tracking_enabled or self._spec is None:
             return ()
@@ -536,14 +596,7 @@ class ZedCameraBackend(CameraBackend):
                 # uses 0..1. NaN marks a joint the tracker could not see.
                 confidences = confidences / 100.0
 
-            orientations = None
-            raw_orientations = np.asarray(
-                body.local_orientation_per_joint, dtype=np.float32
-            )
-            if raw_orientations.shape == (expected_joints, 4):
-                orientations = raw_orientations
-
-            root = np.asarray(body.position, dtype=np.float32)
+            per_joint = (expected_joints,)
             poses.append(
                 BodyPose(
                     tracking_id=int(body.id),
@@ -551,9 +604,38 @@ class ZedCameraBackend(CameraBackend):
                     body_format=self._spec.name,
                     joint_positions_xyz=joints,
                     joint_confidences=confidences,
-                    joint_orientations=orientations,
-                    root_position=root if root.shape == (3,) else None,
+                    # Quaternion component order is xyzw, verified against this
+                    # SDK: sl.Rotation for +90 deg about Y yields
+                    # [0, 0.7071, 0, 0.7071].
+                    joint_orientations=self._optional_array(
+                        body, "local_orientation_per_joint", (*per_joint, 4)
+                    ),
+                    root_position=self._optional_array(body, "position", (3,)),
+                    root_orientation=self._optional_array(
+                        body, "global_root_orientation", (4,)
+                    ),
                     body_confidence=float(body.confidence),
+                    joint_positions_2d=self._optional_array(
+                        body, "keypoint_2d", (*per_joint, 2)
+                    ),
+                    # Six values per joint, stored in the SDK's own element
+                    # order. This project has not verified which order that is,
+                    # so it is never interpreted as a named 3x3 covariance.
+                    joint_position_covariances=self._optional_array(
+                        body, "keypoints_covariance", (*per_joint, 6)
+                    ),
+                    local_joint_positions_xyz=self._optional_array(
+                        body, "local_position_per_joint", (*per_joint, 3)
+                    ),
+                    tracker_root_velocity_xyz=self._optional_array(
+                        body, "velocity", (3,)
+                    ),
+                    root_position_covariance=self._optional_array(
+                        body, "position_covariance", (6,)
+                    ),
+                    action_state=BodyActionState.parse(
+                        getattr(getattr(body, "action_state", None), "name", None)
+                    ),
                 )
             )
         return tuple(poses)

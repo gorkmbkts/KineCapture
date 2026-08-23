@@ -89,6 +89,10 @@ class AppConfig:
     )
     log_dir: Path = field(default_factory=lambda: Path.home() / "KineCapture" / "logs")
     last_project_path: Optional[Path] = None
+    #: Feature ids the export screen was last configured with. A preference,
+    #: not a contract: unknown ids are dropped when the registry loads them, so
+    #: a stale settings file can never inject a feature that no longer exists.
+    export_feature_ids: list[str] = field(default_factory=list)
     capture: CaptureProfile = field(default_factory=CaptureProfile)
     mock: MockSettings = field(default_factory=MockSettings)
     extra: dict[str, Any] = field(default_factory=dict)
@@ -157,6 +161,7 @@ class AppConfig:
             "last_project_path": (
                 str(self.last_project_path) if self.last_project_path else None
             ),
+            "export_feature_ids": list(self.export_feature_ids),
             "capture": self.capture.to_dict(),
             "mock": asdict(self.mock),
             **self.extra,
@@ -237,6 +242,7 @@ def save_user_state(config: AppConfig) -> Path:
         "last_project_path": (
             str(config.last_project_path) if config.last_project_path else None
         ),
+        "export_feature_ids": list(config.export_feature_ids),
         "capture": config.capture.to_dict(),
         "mock": asdict(config.mock),
     }
