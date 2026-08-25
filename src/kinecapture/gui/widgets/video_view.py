@@ -38,7 +38,11 @@ LOW_CONFIDENCE = 0.4
 class VideoView(QWidget):
     """Displays one frame plus, optionally, the projected skeleton over it."""
 
-    clicked = Signal()
+    #: Emitted with the click position in **source image pixels**, so the page
+    #: can ask the domain layer who was clicked. The widget deliberately does
+    #: not decide that itself: picking a person is a capture decision, not a
+    #: painting one.
+    clicked = Signal(float, float)
 
     def __init__(
         self,
@@ -55,6 +59,7 @@ class VideoView(QWidget):
         self._active_id: Optional[int] = None
         self._overlay_enabled = True
         self._placeholder_text = placeholder_text
+        self._highlight_subject = False
         self._badge_text = ""
         self._badge_colour = ""
         #: Intrinsics used to project 3D joints back onto the image. Filled from
@@ -97,6 +102,11 @@ class VideoView(QWidget):
         self._overlay_enabled = enabled
         self.update()
 
+    def set_highlight_subject(self, enabled: bool) -> None:
+        """Draw the selection ring. On during capture, off during review."""
+        self._highlight_subject = bool(enabled)
+        self.update()
+
     def set_badge(self, text: str, colour: str = "") -> None:
         """Corner badge - used for the RECORDING dot and the synthetic marker."""
         self._badge_text = text
@@ -120,9 +130,29 @@ class VideoView(QWidget):
         return QPixmap.fromImage(self._image) if self._image else None
 
     # ---------------------------------------------------------------- paint
+    def widget_to_image(self, x: float, y: float) -> Optional[tuple[float, float]]:
+        """Turn a widget coordinate into a source-image pixel.
+
+        Accounts for the letterbox and for whatever scale the image is being
+        drawn at, so a click lands on the same pixel at any window size or DPI
+        setting. Returns ``None`` for a click on the letterbox bars, which is a
+        click on nothing rather than on the nearest edge pixel.
+        """
+        if self._image is None or self._image.isNull():
+            return None
+        target = self._letterbox()
+        if not target.contains(x, y) or target.width() <= 0 or target.height() <= 0:
+            return None
+        scale_x = self._image.width() / target.width()
+        scale_y = self._image.height() / target.height()
+        return ((x - target.left()) * scale_x, (y - target.top()) * scale_y)
+
     def mousePressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if event.button() == Qt.MouseButton.LeftButton:
-            self.clicked.emit()
+            point = event.position()
+            image_point = self.widget_to_image(point.x(), point.y())
+            if image_point is not None:
+                self.clicked.emit(image_point[0], image_point[1])
         super().mousePressEvent(event)
 
     def paintEvent(self, event: QPaintEvent) -> None:
@@ -205,6 +235,42 @@ class VideoView(QWidget):
             return None
         return QPointF(u, v)
 
+    def _project_2d(
+        self, point, target: QRectF
+    ) -> Optional[QPointF]:
+        """Place a tracker-reported image pixel onto the drawn rectangle.
+
+        Exact, unlike :meth:`_project`: these are the camera's own 2D
+        keypoints, so the skeleton lands where the person actually is instead
+        of where a guessed focal length would put them.
+        """
+        if self._image is None or self._image.isNull():
+            return None
+        u, v = float(point[0]), float(point[1])
+        if not np.isfinite((u, v)).all():
+            return None
+        scale_x = target.width() / max(1, self._image.width())
+        scale_y = target.height() / max(1, self._image.height())
+        x = target.left() + u * scale_x
+        y = target.top() + v * scale_y
+        if not (target.left() - 40 <= x <= target.right() + 40):
+            return None
+        if not (target.top() - 40 <= y <= target.bottom() + 40):
+            return None
+        return QPointF(x, y)
+
+    def _body_points(self, body, target: QRectF) -> list[Optional[QPointF]]:
+        """Screen points for one body, exactly when the tracker gave them."""
+        count = body.num_joints
+        if body.joint_positions_2d is not None:
+            return [
+                self._project_2d(body.joint_positions_2d[i], target)
+                for i in range(count)
+            ]
+        return [
+            self._project(body.joint_positions_xyz[i], target) for i in range(count)
+        ]
+
     def _paint_skeletons(self, painter: QPainter, target: QRectF) -> None:
         spec = self._spec
         assert spec is not None
@@ -215,10 +281,9 @@ class VideoView(QWidget):
             if body.num_joints != spec.num_joints:
                 continue
             is_active = self._active_id is None or body.tracking_id == self._active_id
-            points = [
-                self._project(body.joint_positions_xyz[i], target)
-                for i in range(spec.num_joints)
-            ]
+            points = self._body_points(body, target)
+            if is_active and self._active_id is not None and self._highlight_subject:
+                self._paint_subject_halo(painter, points, scale)
 
             for a, b in spec.edges:
                 pa, pb = points[a], points[b]
@@ -249,6 +314,30 @@ class VideoView(QWidget):
             head = self._head_anchor(spec, points)
             if head is not None:
                 self._paint_body_label(painter, head, body, is_active)
+
+    def _paint_subject_halo(
+        self, painter: QPainter, points: list[Optional[QPointF]], scale: float
+    ) -> None:
+        """Ring the selected person so the choice is visible at a glance."""
+        visible = [point for point in points if point is not None]
+        if len(visible) < 2:
+            return
+        xs = [point.x() for point in visible]
+        ys = [point.y() for point in visible]
+        margin = 14.0 * scale
+        box = QRectF(
+            min(xs) - margin,
+            min(ys) - margin,
+            (max(xs) - min(xs)) + 2 * margin,
+            (max(ys) - min(ys)) + 2 * margin,
+        )
+        painter.save()
+        pen = QPen(QColor(self._theme.accent))
+        pen.setWidthF(2.4 * scale)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(box, 10.0, 10.0)
+        painter.restore()
 
     def _paint_body_label(
         self, painter: QPainter, anchor: QPointF, body: BodyPose, is_active: bool

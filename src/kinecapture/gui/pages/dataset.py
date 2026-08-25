@@ -237,6 +237,13 @@ class DatasetPage(Page):
             ("duration", "Toplam süre", "clock"),
             ("coverage", "Ort. takip kapsamı", "target"),
             ("synthetic", "Sentetik kayıt", "flask"),
+            # The continuous layer is counted apart: "ready movements" and
+            # "takes ready for continuous export" are different questions and
+            # adding them would be meaningless.
+            ("continuous", "Sürekli export hazır", "timeline"),
+            ("negatives", "Egzersizsiz kayıt", "info"),
+            ("unlabelled_time", "Etiketsiz süre", "review"),
+            ("subject", "Ort. kişi kapsamı", "participant"),
         ]
         for position, (key, caption, icon) in enumerate(specs):
             tile = MetricTile(caption, "0", theme=theme, icon=icon)
@@ -495,6 +502,35 @@ class DatasetPage(Page):
             f"%{summary.mean_tracking_coverage * 100:.0f}"
             if summary.mean_tracking_coverage
             else "-"
+        )
+        self._tiles["continuous"].set_value(
+            str(summary.continuous_ready_takes),
+            colour=theme.success if summary.continuous_ready_takes else None,
+        )
+        self._tiles["continuous"].set_detail(
+            f"{summary.continuous_unlabelled_takes} kayıtta aktivite etiketi yok"
+        )
+        self._tiles["negatives"].set_value(str(summary.negative_takes))
+        self._tiles["negatives"].set_detail("hiç hedef egzersiz içermeyen")
+        self._tiles["unlabelled_time"].set_value(
+            format_duration(summary.unlabelled_activity_seconds)
+            if summary.unlabelled_activity_seconds
+            else "-",
+            colour=theme.warning if summary.unlabelled_activity_seconds else None,
+        )
+        self._tiles["unlabelled_time"].set_detail("arka plan SAYILMAZ")
+        self._tiles["subject"].set_value(
+            f"%{summary.mean_subject_coverage * 100:.0f}"
+            if summary.takes_with_subject_lock
+            else "-"
+        )
+        self._tiles["subject"].set_detail(
+            f"{summary.takes_with_subject_lock} kayıtta kişi kilidi"
+            + (
+                f" · {summary.takes_with_raw_archive_loss} ham arşiv eksik"
+                if summary.takes_with_raw_archive_loss
+                else ""
+            )
         )
         self._tiles["synthetic"].set_value(
             str(summary.synthetic_takes),

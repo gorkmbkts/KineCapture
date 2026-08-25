@@ -34,13 +34,20 @@ from pathlib import Path
 from typing import Any, Callable, Optional
 
 from kinecapture.camera.base import AvailabilityResult, CameraBackend
-from kinecapture.core.errors import CameraError, KineCaptureError
+from kinecapture.capture.subject_lock import (
+    SubjectLock,
+    SubjectLockState,
+    is_ambiguous_pick,
+    pick_body_at_pixel,
+)
+from kinecapture.core.errors import CameraError, KineCaptureError, StorageError
 from kinecapture.core.logging import get_logger
 from kinecapture.core.state_machine import CaptureStateMachine, InvalidStateTransition
 from kinecapture.dataset.workspace import ProjectWorkspace
-from kinecapture.domain.enums import CaptureState, TakeState
-from kinecapture.domain.models import CameraInfo, CaptureStatistics, FramePacket
+from kinecapture.domain.enums import CaptureState, DataOrigin, TakeState
+from kinecapture.domain.models import BodyPose, CameraInfo, CaptureStatistics, FramePacket
 from kinecapture.domain.project import Session, Take
+from kinecapture.recording.rgbd_archive import DepthCodec, estimate_bytes_per_second
 from kinecapture.recording.take_writer import TakeWriter
 from kinecapture.visualization.skeleton_spec import SkeletonSpec
 
@@ -102,6 +109,13 @@ class CaptureService:
         self._last_error: Optional[KineCaptureError] = None
         self._acquisition_times: list[float] = []
 
+        # The lock lives here rather than in the GUI: it is a capture concern,
+        # it has to be consulted on the writer thread, and it must survive a
+        # page being rebuilt.
+        self._subject_lock = SubjectLock()
+        self._subject_candidates: list[tuple[BodyPose, float]] = []
+        self._last_dataset_root: Optional[Path] = None
+
     # -------------------------------------------------------------- exposure
     @property
     def backend(self) -> CameraBackend:
@@ -155,6 +169,170 @@ class CaptureService:
         # only a switch away from an established one is worth recording.
         if writer is not None and previous is not None and previous != tracking_id:
             writer.record_body_id_change(writer.frames_written, previous, tracking_id)
+
+    # --------------------------------------------------------- subject lock
+    @property
+    def subject_lock(self) -> SubjectLock:
+        """The take-local identity of the person being recorded."""
+        return self._subject_lock
+
+    @property
+    def subject_candidates(self) -> list[tuple[BodyPose, float]]:
+        """Bodies near the last click, nearest first, with pixel distances."""
+        return list(self._subject_candidates)
+
+    def select_subject_at_pixel(
+        self,
+        x: float,
+        y: float,
+        *,
+        radius: float = 60.0,
+        packet: Optional[FramePacket] = None,
+    ) -> tuple[Optional[BodyPose], bool]:
+        """Pick the person under an image pixel.
+
+        ``packet`` should be the frame the operator was actually looking at.
+        Resolving the click against a newer frame would mean the person had
+        already moved, and at the edge of two overlapping bodies that is enough
+        to pick the wrong one.
+
+        Returns the chosen body and whether the pick was ambiguous. When two
+        people overlap the choice is *not* made here - guessing which of two
+        adjacent skeletons was meant is exactly how the wrong person ends up in
+        the dataset.
+        """
+        packet = packet or self.peek_frame()
+        if packet is None or not packet.bodies:
+            self._subject_candidates = []
+            return None, False
+        body, candidates = pick_body_at_pixel(
+            packet.bodies, x, y, radius=radius, spec=self.skeleton_spec
+        )
+        self._subject_candidates = candidates
+        if body is None:
+            return None, False
+        if is_ambiguous_pick(candidates):
+            return None, True
+        self.select_subject(body)
+        return body, False
+
+    def select_subject(self, body: BodyPose, *, method: str = "click") -> str:
+        """Lock onto a specific detected body."""
+        packet = self.peek_frame()
+        frame_index = packet.frame_index if packet else 0
+        timestamp = packet.camera_timestamp_ns if packet else 0
+        subject_id = self._subject_lock.select(
+            body,
+            frame_index=frame_index,
+            timestamp_ns=timestamp,
+            method=method,
+            spec=self.skeleton_spec,
+        )
+        self._active_body_id = int(body.tracking_id)
+        return subject_id
+
+    def confirm_subject(self, body: BodyPose) -> None:
+        """Operator re-confirms the subject after an ambiguous stretch."""
+        packet = self.peek_frame()
+        self._subject_lock.confirm(
+            body,
+            frame_index=packet.frame_index if packet else 0,
+            timestamp_ns=packet.camera_timestamp_ns if packet else 0,
+        )
+        self._active_body_id = int(body.tracking_id)
+
+    def clear_subject(self) -> None:
+        packet = self.peek_frame()
+        self._subject_lock.clear(
+            frame_index=packet.frame_index if packet else -1,
+            timestamp_ns=packet.camera_timestamp_ns if packet else 0,
+        )
+        self._active_body_id = None
+
+    # ------------------------------------------------------- raw archive
+    def raw_archive_estimate(self, session: Optional[Session] = None) -> dict[str, Any]:
+        """What the immutable archive will cost, and whether the disk can take it.
+
+        Answered before recording rather than discovered during it. The figures
+        come from measurements on this camera, and the shortfall is reported as
+        minutes of recording rather than as bytes, because minutes is what the
+        operator is deciding about.
+        """
+        import shutil
+
+        profile = session.capture_profile if session else None
+        info = self._camera_info
+        width, height = (info.resolution if info else (1280, 720)) or (1280, 720)
+        fps = float(info.target_fps if info else 30.0) or 30.0
+        codec = DepthCodec.FLOAT32_LOSSLESS
+        archives_depth = True
+        if profile is not None:
+            archives_depth = profile.archives_depth
+            if str(profile.depth_archive).lower().startswith("uint16"):
+                codec = DepthCodec.UINT16_QUANTISED
+
+        native = self._backend.supports_native_recording()
+        estimate = estimate_bytes_per_second(
+            width=int(width) or 1280,
+            height=int(height) or 720,
+            fps=fps,
+            depth_codec=codec,
+            store_color=not native,
+            native_recording=native,
+        )
+        if not archives_depth:
+            estimate["depth_mb_per_minute"] = 0.0
+            estimate["total_mb_per_minute"] = (
+                estimate["color_mb_per_minute"] + estimate["native_mb_per_minute"]
+            )
+            estimate["total_bytes_per_second"] = (
+                estimate["total_mb_per_minute"] * 1e6 / 60.0
+            )
+        free_bytes = 0
+        try:
+            root = self._last_dataset_root or Path.home()
+            free_bytes = shutil.disk_usage(str(root)).free
+        except OSError:  # pragma: no cover - platform dependent
+            free_bytes = 0
+        per_minute = max(1e-6, estimate["total_mb_per_minute"] * 1e6)
+        estimate["free_bytes"] = free_bytes
+        estimate["free_minutes"] = free_bytes / per_minute
+        estimate["depth_codec"] = codec.value
+        estimate["depth_lossless"] = codec.is_lossless
+        estimate["archives_depth"] = archives_depth
+        estimate["color_source"] = "native_svo2" if native else "rgbd_chunks"
+        return estimate
+
+
+    def _guard_disk_space(
+        self, workspace: ProjectWorkspace, session: Session
+    ) -> None:
+        """Refuse to start a recording the disk cannot hold.
+
+        Solving a storage shortfall by quietly lowering the resolution, the
+        frame rate or the depth archive would corrupt the dataset's provenance.
+        The honest options are: record less, or free space.
+        """
+        estimate = self.raw_archive_estimate(session)
+        required = float(session.capture_profile.min_free_disk_minutes)
+        available = float(estimate.get("free_minutes", 0.0))
+        if required > 0 and available < required:
+            raise StorageError(
+                f"Disk alanı yetersiz: ham arşiv dakikada yaklaşık "
+                f"{estimate['total_mb_per_minute'] / 1000:.1f} GB yazıyor ve "
+                f"boş alan yalnız {available:.1f} dakikaya yetiyor "
+                f"(en az {required:.0f} dakika gerekli).",
+                code="insufficient_disk_space",
+                remedy=(
+                    "Yer açın veya Ayarlar'dan derinlik arşivini nicemlenmiş "
+                    "profile alın. Çözünürlük ve FPS sessizce düşürülmez."
+                ),
+                details={
+                    "free_bytes": estimate.get("free_bytes"),
+                    "mb_per_minute": estimate.get("total_mb_per_minute"),
+                    "free_minutes": available,
+                },
+            )
 
     def check_availability(self) -> AvailabilityResult:
         return self._backend.is_available()
@@ -325,6 +503,9 @@ class CaptureService:
         if self.state is not CaptureState.PREVIEWING:
             raise InvalidStateTransition(self.state, CaptureState.RECORDING)
 
+        self._last_dataset_root = workspace.root
+        self._guard_disk_space(workspace, session)
+
         spec = self._backend.skeleton_spec()
         extra: dict[str, Any] = {}
         if capture_mode is not None:
@@ -341,23 +522,65 @@ class CaptureService:
             **extra,
         )
 
-        writer = TakeWriter(workspace, take, paths)
-
-        if (
-            take.capture_profile.store_native_recording
-            and self._backend.supports_native_recording()
-        ):
+        # A ZED keeps its stereo images in the SVO2, so colour is archived
+        # separately only when the backend has no recording of its own.
+        native_supported = self._backend.supports_native_recording()
+        native_started = False
+        if native_supported:
             try:
-                self._backend.start_native_recording(paths.native_recording)
+                native_started = bool(
+                    self._backend.start_native_recording(paths.native_recording)
+                )
             except KineCaptureError as exc:
-                # Native recording is the immutable raw copy; failing to start it
-                # is a real problem, so recording does not begin at all.
-                writer.close_streams()
+                # Native recording is part of the immutable raw source; failing
+                # to start it is a real problem, so recording does not begin.
                 take.state = TakeState.FAILED
                 take.notes = f"{take.notes}\n[Native kayıt başlatılamadı: {exc}]".strip()
                 workspace.save_take(take)
                 self._fail(exc)
                 raise
+        elif self._backend.origin is not DataOrigin.SYNTHETIC:
+            # A real capture with no immutable source at all cannot be a
+            # dataset recording. Refuse rather than produce one that can never
+            # be reprocessed.
+            error = StorageError(
+                "Bu backend değişmez ham kayıt üretemiyor; gerçek kayıt "
+                "başlatılmadı.",
+                code="raw_archive_unavailable",
+                remedy=(
+                    "ZED backend'ini kullanın veya açıkça sentetik bir test "
+                    "profiliyle çalışın."
+                ),
+            )
+            take.state = TakeState.FAILED
+            workspace.save_take(take)
+            self._fail(error)
+            raise error
+
+        try:
+            writer = TakeWriter(
+                workspace,
+                take,
+                paths,
+                subject_lock=self._subject_lock,
+                archive_color=not native_started,
+                native_recording_active=native_started,
+            )
+        except Exception as exc:
+            if native_started:
+                try:
+                    self._backend.stop_native_recording()
+                except Exception:  # pragma: no cover - shutdown path
+                    logger.exception("Native kayıt durdurulamadı")
+            error = StorageError(
+                f"Ham arşiv başlatılamadı: {exc}",
+                code="raw_archive_start_failed",
+                remedy="Disk alanını ve yazma iznini kontrol edin.",
+            )
+            take.state = TakeState.FAILED
+            workspace.save_take(take)
+            self._fail(error)
+            raise error from exc
 
         with self._writer_guard:
             self._writer = writer
@@ -379,10 +602,15 @@ class CaptureService:
         if self.state is CaptureState.RECORDING:
             self._state.transition(CaptureState.STOPPING)
 
+        native_stop_failure = ""
         try:
             self._backend.stop_native_recording()
         except Exception as exc:
-            logger.warning("Native kayıt durdurulurken hata: %s", exc)
+            # Swallowing this used to let a take look successful while its
+            # immutable source was in an unknown state. It is now carried into
+            # the take, which cannot then be FINALIZED.
+            native_stop_failure = f"{type(exc).__name__}: {exc}"
+            logger.error("Native kayıt durdurulurken hata: %s", exc)
 
         # Tell the writer thread to finish what is already queued, then stop.
         self._recording_queue.put(_SHUTDOWN)
@@ -397,6 +625,10 @@ class CaptureService:
         if writer is None:
             return None
 
+        if native_stop_failure:
+            writer.note_raw_failure(
+                f"Native kayıt düzgün durdurulamadı: {native_stop_failure}"
+            )
         take = writer.abort(abort_reason) if abort_reason else writer.finalize()
         self._active_take = take
 

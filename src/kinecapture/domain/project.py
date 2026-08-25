@@ -89,8 +89,23 @@ class CaptureProfile:
     coordinate_system: str = "RIGHT_HANDED_Y_UP"
     length_unit: str = "METER"
     store_native_recording: bool = True
-    store_depth_frames: bool = False
+    #: How the exact measured depth is archived. Never off for a real capture:
+    #: replaying an SVO2 was verified not to reproduce the depth that was
+    #: measured, so a take without this stream has permanently lost it. Only an
+    #: explicitly synthetic profile may set this to ``"none"``.
+    depth_archive: str = "float32_lossless"
+    #: SVO2 compression, verified against this SDK. ``H264`` is *lossy*; the
+    #: lossless modes cost roughly 12x and 30x more. Recorded honestly rather
+    #: than being described as lossless.
+    native_compression: str = "H264"
     proxy_video_width: int = 640
+    #: Refuse to start a recording that could not run this long on the free
+    #: space of the target disk.
+    min_free_disk_minutes: float = 3.0
+
+    #: Historical name for the depth archive switch. Kept only so an old
+    #: ``take.json`` still loads; the archive itself is no longer optional.
+    store_depth_frames: bool = True
 
     def __post_init__(self) -> None:
         if self.fps <= 0:
@@ -103,6 +118,11 @@ class CaptureProfile:
                 field="proxy_video_width",
                 code="proxy_width_invalid",
             )
+
+    @property
+    def archives_depth(self) -> bool:
+        """Whether this profile keeps the measured depth."""
+        return str(self.depth_archive or "none").lower() != "none"
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
@@ -426,9 +446,47 @@ class TakeQualityMetrics:
     distinct_body_ids: int = 0
     max_frame_gap_ms: float = 0.0
 
+    # --- raw archive, counted per stream ------------------------------
+    # One number cannot honestly represent four different losses: a preview
+    # frame thrown away to keep the GUI responsive, a pose record that never
+    # reached the sidecar, a colour frame the archive could not take and a
+    # depth frame the archive could not take are four different problems.
+    color_frames_archived: int = 0
+    color_frames_dropped: int = 0
+    depth_frames_archived: int = 0
+    depth_frames_dropped: int = 0
+    raw_archive_failure: str = ""
+
+    # --- selected subject ---------------------------------------------
+    subject_locked_frames: int = 0
+    subject_lost_frames: int = 0
+    subject_ambiguous_frames: int = 0
+    subject_reassociations: int = 0
+    subject_manual_confirmations: int = 0
+    frames_with_other_people: int = 0
+
     @property
     def has_capture_loss(self) -> bool:
         return self.frames_dropped_recording > 0 or self.missing_frame_indices > 0
+
+    @property
+    def has_raw_archive_loss(self) -> bool:
+        """True when the immutable RGB-D source is incomplete.
+
+        This is not the same as capture loss: the pose stream can be perfect
+        while the archive that would allow reprocessing is not.
+        """
+        return (
+            self.color_frames_dropped > 0
+            or self.depth_frames_dropped > 0
+            or bool(self.raw_archive_failure)
+        )
+
+    @property
+    def subject_coverage(self) -> float:
+        """Fraction of recorded frames where the selected person was found."""
+        total = self.subject_locked_frames + self.subject_lost_frames
+        return self.subject_locked_frames / total if total else 0.0
 
     def to_dict(self) -> dict[str, Any]:
         return {

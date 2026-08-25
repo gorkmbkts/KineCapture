@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 )
 
 from kinecapture.core.config import save_user_state
+from kinecapture.domain.activity import evaluate_continuous
 from kinecapture.core.errors import ExportCancelled, ExportError, KineCaptureError
 from kinecapture.core.jsonio import read_json
 from kinecapture.export.release import (
@@ -181,6 +182,35 @@ class ExportPage(Page):
         self._mapping_note = make_label("", role="muted")
         self._mapping_note.setWordWrap(True)
         card.add_widget(self._mapping_note)
+
+        # --- which dataset(s) this release contains -------------------
+        self._movement_mode = QCheckBox("Hareket örnekleri (mevcut biçim)")
+        self._movement_mode.setChecked(True)
+        self._movement_mode.setToolTip(
+            "Etiketli her tekrar ayrı bir örnek. Varsayılan; eski sürümlerle "
+            "aynı sözleşme."
+        )
+        self._movement_mode.toggled.connect(self._refresh_preview)
+        card.add_widget(self._movement_mode)
+
+        self._continuous_mode = QCheckBox("Sürekli aktivite (kaydın tamamı)")
+        self._continuous_mode.setToolTip(
+            "Bir örnek = bir kayıt. Egzersiz dışı zaman, geçişler ve "
+            "başlangıç/bitiş anları kare bazında etiketlenir."
+        )
+        self._continuous_mode.toggled.connect(self._refresh_preview)
+        card.add_widget(self._continuous_mode)
+
+        self._require_coverage = QCheckBox(
+            "Sürekli export için tam etiket kapsamı şart"
+        )
+        self._require_coverage.setToolTip(
+            "Açıkken, zaman çizelgesinde etiketlenmemiş kare kalan kayıtlar "
+            "sürüme girmez. Kapalıyken girerler ve etiketsiz kareler "
+            "activity_label_mask ile işaretlenir."
+        )
+        self._require_coverage.toggled.connect(self._refresh_preview)
+        card.add_widget(self._require_coverage)
 
         self._include_synthetic = QCheckBox("Sentetik kayıtları dahil et")
         self._include_synthetic.setToolTip(
@@ -424,6 +454,9 @@ class ExportPage(Page):
             store_error_target_arrays=self._store_targets.isChecked(),
             feature_ids=selection,
             feature_preset=match_preset(selection),
+            export_movement_samples=self._movement_mode.isChecked(),
+            export_continuous=self._continuous_mode.isChecked(),
+            require_full_activity_coverage=self._require_coverage.isChecked(),
             notes=self._notes.toPlainText().strip(),
         )
 
@@ -514,6 +547,12 @@ class ExportPage(Page):
         index = self.state.index
         if workspace is None or index is None:
             return
+        if not (self._movement_mode.isChecked() or self._continuous_mode.isChecked()):
+            self._preview_chip.set_status(
+                "Biçim seçilmedi", icon="warning", colour=self.theme.warning
+            )
+            self._build_button.setEnabled(False)
+            return
         builder = ReleaseBuilder(workspace, index, self._current_options())
         rows = builder.select_rows()
         selected = [builder._selected_samples(row) for row in rows]
@@ -529,6 +568,17 @@ class ExportPage(Page):
             for group in selected
             for sample in group
         )
+
+        continuous_ready = 0
+        if self._continuous_mode.isChecked():
+            for row in rows:
+                readiness, _coverage = evaluate_continuous(
+                    workspace.load_activity_intervals(row.take),
+                    row.take.metrics.frames_written,
+                    known_exercises=workspace.label_schema.exercise_codes(),
+                    require_full_coverage=self._require_coverage.isChecked(),
+                )
+                continuous_ready += int(readiness.is_ready)
 
         selection = self._effective_feature_ids()
         keys = array_keys_for(selection)
@@ -560,7 +610,11 @@ class ExportPage(Page):
                 ("Sonraki sürüm", next_release_name(workspace.releases_dir)),
                 ("Uygun kayıt", str(len(rows))),
                 ("Filtrelenen kayıt", str(max(0, rejected))),
-                ("Örnek (hareket)", str(samples)),
+                ("Örnek (hareket)", str(samples) if self._movement_mode.isChecked() else "-"),
+                (
+                    "Örnek (sürekli)",
+                    str(continuous_ready) if self._continuous_mode.isChecked() else "-",
+                ),
                 ("Hata aralığı", str(intervals)),
                 ("Katılımcı", str(len(participants))),
                 ("Sentetik kayıt", str(synthetic)),
@@ -573,7 +627,10 @@ class ExportPage(Page):
                 ("Hedef klasör", str(workspace.releases_dir)),
             ]
         )
-        if samples == 0:
+        total_examples = (samples if self._movement_mode.isChecked() else 0) + (
+            continuous_ready if self._continuous_mode.isChecked() else 0
+        )
+        if total_examples == 0:
             self._preview_chip.set_status(
                 "Örnek yok", icon="warning", colour=self.theme.warning
             )
@@ -583,9 +640,9 @@ class ExportPage(Page):
             )
         else:
             self._preview_chip.set_status(
-                f"{samples} örnek", icon="check", colour=self.theme.success
+                f"{total_examples} örnek", icon="check", colour=self.theme.success
             )
-        self._build_button.setEnabled(samples > 0 and self._thread is None)
+        self._build_button.setEnabled(total_examples > 0 and self._thread is None)
 
     def _refresh_releases(self) -> None:
         workspace = self.state.workspace

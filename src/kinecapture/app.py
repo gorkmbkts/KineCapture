@@ -160,11 +160,14 @@ def run_self_test(config: AppConfig) -> int:
     from kinecapture.annotations.repository import AnnotationRepository
     from kinecapture.camera.mock import MockCameraBackend
     from kinecapture.capture.service import CaptureService
+    from kinecapture.core.jsonio import read_json_mapping
     from kinecapture.dataset.index import DatasetIndex
     from kinecapture.dataset.workspace import ProjectWorkspace
+    from kinecapture.domain.activity import ActivityState
     from kinecapture.domain.enums import Correctness, TakeQuality
     from kinecapture.export.release import ExportOptions, ReleaseBuilder
     from kinecapture.playback.take_reader import load_take
+    from kinecapture.recording.rgbd_archive import RgbdArchiveReader
 
     root = Path(tempfile.mkdtemp(prefix="kinecapture_selftest_"))
     print(f"Geçici çalışma alanı: {root}")
@@ -242,6 +245,50 @@ def run_self_test(config: AppConfig) -> int:
             "(2 hareket, 1 zamansal hata aralığı)"
         )
 
+        # --- the activity strip over the whole take -------------------
+        frames = loaded.frame_count
+        activity = repository.activity_from_samples()
+        created = len(activity)
+        gaps = repository.unlabelled_activity_gaps()
+        if gaps:
+            repository.create_activity_interval(
+                gaps[0][0], gaps[0][1], state=ActivityState.BACKGROUND
+            )
+            created += 1
+        repository.save()
+        readiness, coverage = repository.continuous_readiness()
+        if not readiness.is_ready:
+            print(
+                f"  aktivite etiketleme       : BAŞARISIZ ({readiness.value})",
+                file=sys.stderr,
+            )
+            return 1
+        print(
+            f"  aktivite etiketleme       : OK ({created} aralık, kapsam "
+            f"%{coverage.ratio * 100:.0f}, {coverage.unlabelled_frames} kare "
+            "etiketsiz)"
+        )
+
+        # --- the immutable raw archive --------------------------------
+        paths = workspace.take_paths(take)
+        archive = RgbdArchiveReader(paths.rgbd_dir)
+        problems = archive.verify()
+        stored = archive.positions()
+        if problems or len(stored["depth"]) != take.metrics.frames_written:
+            print(
+                f"  ham RGB-D arşivi          : BAŞARISIZ "
+                f"({len(problems)} sorun, {len(stored['depth'])}/"
+                f"{take.metrics.frames_written} derinlik karesi)",
+                file=sys.stderr,
+            )
+            return 1
+        manifest = read_json_mapping(paths.raw_manifest)
+        codec = manifest["rgbd_archive"]["depth"]["codec"]
+        print(
+            f"  ham RGB-D arşivi          : OK ({len(stored['depth'])} derinlik, "
+            f"{len(stored['color'])} renk karesi, {codec})"
+        )
+
         index = DatasetIndex(workspace).refresh()
         summary = index.summary()
         print(
@@ -257,6 +304,7 @@ def run_self_test(config: AppConfig) -> int:
             index,
             ExportOptions(
                 include_synthetic=True,
+                export_continuous=True,
                 feature_ids=(
                     "validity_masks",
                     "joint_velocity",
@@ -268,15 +316,16 @@ def run_self_test(config: AppConfig) -> int:
         result = builder.build()
         print(
             f"  export                    : OK ({result.release_name}, "
-            f"{result.sample_count} örnek, {result.error_interval_count} hata "
-            f"aralığı, doğrulama="
-            f"{'geçti' if result.validation_passed else 'HATA'})"
+            f"{result.sample_count} hareket örneği, {result.continuous_count} "
+            f"sürekli örnek, {result.error_interval_count} hata aralığı, "
+            f"doğrulama={'geçti' if result.validation_passed else 'HATA'})"
         )
         for name in (
             "manifest.json",
             "skeleton_spec.json",
             "label_mapping.json",
             "feature_spec.json",
+            "activity_spec.json",
             "dataset_fingerprint.json",
             "validation_report.json",
         ):
@@ -285,7 +334,7 @@ def run_self_test(config: AppConfig) -> int:
                 return 1
         print(
             "  sürüm dosyaları           : OK (manifest, skeleton spec, "
-            "feature spec, mapping, fingerprint, rapor)"
+            "feature spec, activity spec, mapping, fingerprint, rapor)"
         )
         print("\nUçtan uca sentetik akış başarıyla tamamlandı.")
         return 0

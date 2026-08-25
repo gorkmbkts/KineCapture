@@ -47,6 +47,7 @@ from kinecapture.core.jsonio import read_json_mapping, write_json
 from kinecapture.core.paths import ensure_dir, long_path, path_exists
 from kinecapture.core.logging import get_logger
 from kinecapture.domain.enums import TakeState
+from kinecapture.domain.activity import ActivityInterval
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.domain.project import (
     CaptureProfile,
@@ -74,6 +75,12 @@ CHECKSUMS_FILE = "checksums.json"
 #: File names inside a take directory. Kept in one place so the writer, the
 #: reader, the checksum manifest and the export all agree.
 SKELETON_STREAM_FILE = "skeleton.jsonl"
+#: Directory holding the exact colour/depth the recording measured.
+RGBD_DIR = "rgbd"
+#: One line per recorded frame, mapping every stream onto one position.
+RAW_INDEX_FILE = "index.jsonl"
+#: Versioned description of the raw archive: format, codec, provenance, sync.
+RAW_MANIFEST_FILE = "raw_capture_manifest.json"
 PROXY_VIDEO_FILE = "proxy.mp4"
 NATIVE_RECORDING_FILE = "capture.svo2"
 
@@ -109,6 +116,21 @@ class TakePaths:
         return self.raw_dir / NATIVE_RECORDING_FILE
 
     @property
+    def rgbd_dir(self) -> Path:
+        """Chunked colour/depth archive. Immutable once the take is finalised."""
+        return self.raw_dir / RGBD_DIR
+
+    @property
+    def raw_index(self) -> Path:
+        """Per-frame synchronisation index across every raw stream."""
+        return self.rgbd_dir / RAW_INDEX_FILE
+
+    @property
+    def raw_manifest(self) -> Path:
+        """What the raw archive is, how it was produced and what it contains."""
+        return self.raw_dir / RAW_MANIFEST_FILE
+
+    @property
     def skeleton_stream(self) -> Path:
         return self.derived_dir / SKELETON_STREAM_FILE
 
@@ -132,6 +154,7 @@ class TakePaths:
         for directory in (
             self.root,
             self.raw_dir,
+            self.rgbd_dir,
             self.derived_dir,
             self.annotations_dir,
             self.quality_dir,
@@ -140,12 +163,21 @@ class TakePaths:
 
     def checksum_targets(self) -> dict[str, Path]:
         """Relative-name -> path map for the take's checksum manifest."""
-        return {
+        targets: dict[str, Path] = {
             f"raw/{NATIVE_RECORDING_FILE}": self.native_recording,
+            f"raw/{RAW_MANIFEST_FILE}": self.raw_manifest,
+            f"raw/{RGBD_DIR}/{RAW_INDEX_FILE}": self.raw_index,
             f"derived/{SKELETON_STREAM_FILE}": self.skeleton_stream,
             f"derived/{PROXY_VIDEO_FILE}": self.proxy_video,
             TAKE_FILE: self.metadata,
         }
+        # Every archive chunk is checksummed individually, so a single
+        # corrupted chunk is identified rather than invalidating the take.
+        if self.rgbd_dir.is_dir():
+            for chunk in sorted(self.rgbd_dir.iterdir()):
+                if chunk.suffix in (".kcd", ".kcc"):
+                    targets[f"raw/{RGBD_DIR}/{chunk.name}"] = chunk
+        return targets
 
 
 class ProjectWorkspace:
@@ -503,27 +535,68 @@ class ProjectWorkspace:
                 )
         return sorted(samples, key=lambda s: (s.start_frame, s.end_frame))
 
+    def load_activity_intervals(self, take: Take) -> list[ActivityInterval]:
+        """Load the take's activity strip, if it has one.
+
+        Purely additive: a sidecar written before this layer existed simply has
+        no ``activity_intervals`` key and yields an empty strip. Reading never
+        rewrites the file, so opening an old take cannot alter it.
+        """
+        path = self.take_paths(take).segments
+        if not path_exists(path):
+            return []
+        payload = read_json_mapping(path)
+        entries = payload.get("activity_intervals") or []
+        intervals: list[ActivityInterval] = []
+        for entry in entries:
+            try:
+                intervals.append(ActivityInterval.from_dict(entry))
+            except (ValidationError, KeyError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "Geçersiz aktivite aralığı atlandı (%s): %s", take.take_id, exc
+                )
+        return sorted(intervals, key=lambda i: (i.start_frame, i.end_frame))
+
     def save_samples(
-        self, take: Take, samples: Iterable[MovementSample]
+        self,
+        take: Take,
+        samples: Iterable[MovementSample],
+        activity_intervals: Optional[Iterable[ActivityInterval]] = None,
     ) -> list[MovementSample]:
-        """Write the annotation sidecar. Never touches ``take.json``."""
+        """Write the annotation sidecar. Never touches ``take.json``.
+
+        ``activity_intervals`` defaults to *keeping what is already on disk*,
+        so a caller that only knows about movement samples cannot delete an
+        activity strip it never loaded.
+        """
         ordered = sorted(samples, key=lambda s: (s.start_frame, s.end_frame))
         paths = self.take_paths(take)
         ensure_dir(paths.annotations_dir)
-        write_json(
-            paths.segments,
-            {
-                "schema_version": ANNOTATION_SCHEMA_VERSION,
-                "take_id": take.take_id,
-                "updated_at": utc_now_iso(),
-                "boundary_convention": (
-                    "start_frame ve end_frame, derived/skeleton.jsonl kare "
-                    "listesindeki 0 tabanlı konumlardır ve her iki uç dahildir."
-                ),
-                "samples": [sample.to_dict() for sample in ordered],
-            },
-            overwrite=True,
-        )
+        if activity_intervals is None:
+            activity = self.load_activity_intervals(take)
+        else:
+            activity = sorted(
+                activity_intervals, key=lambda i: (i.start_frame, i.end_frame)
+            )
+        document: dict[str, Any] = {
+            "schema_version": ANNOTATION_SCHEMA_VERSION,
+            "take_id": take.take_id,
+            "updated_at": utc_now_iso(),
+            "boundary_convention": (
+                "start_frame ve end_frame, derived/skeleton.jsonl kare "
+                "listesindeki 0 tabanlı konumlardır ve her iki uç dahildir."
+            ),
+            "samples": [sample.to_dict() for sample in ordered],
+        }
+        if activity:
+            document["activity_intervals"] = [
+                interval.to_dict() for interval in activity
+            ]
+            document["activity_note"] = (
+                "Aktivite durumları karşılıklı dışlayandır. Etiketlenmemiş "
+                "kareler burada hiç görünmez ve background sayılmaz."
+            )
+        write_json(paths.segments, document, overwrite=True)
         return ordered
 
     #: Pre-redesign names, kept so older call sites keep working.

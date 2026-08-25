@@ -42,6 +42,7 @@ from PySide6.QtWidgets import (
 
 from kinecapture.annotations.repository import AnnotationRepository
 from kinecapture.core.errors import KineCaptureError
+from kinecapture.domain.activity import ActivityInterval, ActivityState
 from kinecapture.domain.enums import (
     Correctness,
     SampleReadiness,
@@ -227,25 +228,41 @@ class ReviewPage(Page):
         layout.addWidget(self._build_mode_card(theme))
         layout.addWidget(self._build_movement_card(theme))
         layout.addWidget(self._build_error_card(theme))
+        layout.addWidget(self._build_activity_card(theme))
         layout.addWidget(self._build_take_card(theme))
         layout.addStretch(1)
         return wrapper
 
-    def _order_side_cards(self, editing_errors: bool) -> None:
+    def _order_side_cards(self, mode: TimelineMode) -> None:
         """Put the active mode's card directly under the mode switch.
 
         Scrolling to reach the tool the user just switched to is the one thing
         this column must never do, and at 1366x768 there is only room for one
         expanded card above the fold.
         """
-        first = self._error_card if editing_errors else self._movement_card
-        second = self._movement_card if editing_errors else self._error_card
-        if self._side_layout.indexOf(first) == 1:
+        order = {
+            TimelineMode.MOVEMENT: (
+                self._movement_card,
+                self._error_card,
+                self._activity_card,
+            ),
+            TimelineMode.ERROR: (
+                self._error_card,
+                self._movement_card,
+                self._activity_card,
+            ),
+            TimelineMode.ACTIVITY: (
+                self._activity_card,
+                self._movement_card,
+                self._error_card,
+            ),
+        }[mode]
+        if self._side_layout.indexOf(order[0]) == 1:
             return
-        for card in (first, second):
+        for card in order:
             self._side_layout.removeWidget(card)
-        self._side_layout.insertWidget(1, first)
-        self._side_layout.insertWidget(2, second)
+        for position, card in enumerate(order, start=1):
+            self._side_layout.insertWidget(position, card)
 
     def _build_mode_card(self, theme: Theme) -> QWidget:
         """The spine of the screen: which level am I editing?"""
@@ -266,6 +283,12 @@ class ReviewPage(Page):
                 TimelineMode.ERROR,
                 "target",
                 "Seçili hareketin İÇİNDE hatanın göründüğü aralıkları işaretleyin (F2)",
+            ),
+            (
+                TimelineMode.ACTIVITY,
+                "timeline",
+                "Kaydın tamamını zaman üzerinde etiketleyin: arka plan, geçiş, "
+                "hedef egzersiz, diğer hareket (F3)",
             ),
         ):
             button = make_button(mode.label, icon=icon, theme=theme, tooltip=tip)
@@ -460,6 +483,329 @@ class ReviewPage(Page):
         self._error_card = card
         return card
 
+
+    def _build_activity_card(self, theme: Theme) -> QWidget:
+        """Labelling the whole take, not the repetitions inside it."""
+        card = Card(
+            "Aktivite",
+            subtitle="",
+            theme=theme,
+            icon="timeline",
+        )
+        self._activity_card = card
+        self._activity_chip = StatusChip("kapsam -", theme=theme, icon="info")
+        card.add_header_widget(self._activity_chip)
+
+        self._activity_list = QListWidget()
+        self._activity_list.setMinimumHeight(84)
+        self._activity_list.currentItemChanged.connect(
+            lambda current, _: self._activity_row_selected(current)
+        )
+        card.add_widget(self._activity_list, 1)
+
+        detail = QWidget()
+        detail_layout = QVBoxLayout(detail)
+        detail_layout.setContentsMargins(0, 0, 0, 0)
+        detail_layout.setSpacing(theme.space_sm)
+        self._activity_detail = detail
+
+        row = QHBoxLayout()
+        row.setSpacing(theme.space_xs)
+        for state, tip in (
+            (ActivityState.BACKGROUND, "Bekleme, nötr duruş, oturma"),
+            (ActivityState.TRANSITION, "Başlangıç pozisyonuna geçiş"),
+            (ActivityState.TARGET_EXERCISE, "Tanınması istenen egzersiz"),
+            (ActivityState.OTHER_ACTIVITY, "Yürüme, eğilme, kıyafet düzeltme"),
+        ):
+            button = make_button(state.label, theme=theme, tooltip=tip)
+            button.clicked.connect(
+                lambda _=False, s=state: self._set_activity_state(s)
+            )
+            row.addWidget(button)
+        holder = QWidget()
+        holder.setLayout(row)
+        detail_layout.addWidget(holder)
+
+        self._activity_exercise = QComboBox()
+        self._activity_exercise.currentIndexChanged.connect(
+            self._activity_exercise_changed
+        )
+        detail_layout.addWidget(
+            FieldRow(
+                "Egzersiz",
+                self._activity_exercise,
+                theme=theme,
+                help_text="Yalnız hedef egzersiz aralıkları egzersiz taşır.",
+            )
+        )
+
+        actions = QHBoxLayout()
+        actions.setSpacing(theme.space_xs)
+        delete_button = make_button("Sil", variant="danger", theme=theme)
+        delete_button.clicked.connect(self._delete_activity)
+        actions.addWidget(delete_button)
+        link_button = make_button("Harekete bağla", theme=theme)
+        link_button.setToolTip(
+            "Seçili hareketin sınırlarını bu aralığa bağlar; ikisi bir daha "
+            "ayrışamaz."
+        )
+        link_button.clicked.connect(self._link_activity_to_sample)
+        actions.addWidget(link_button)
+        from_samples = make_button("Hareketlerden oluştur", theme=theme)
+        from_samples.setToolTip(
+            "Etiketli her hareket için bir hedef egzersiz aralığı oluşturur."
+        )
+        from_samples.clicked.connect(self._activity_from_samples)
+        actions.addWidget(from_samples)
+        actions.addStretch(1)
+        actions_holder = QWidget()
+        actions_holder.setLayout(actions)
+        detail_layout.addWidget(actions_holder)
+
+        self._fill_background_button = make_button(
+            "Boşlukları arka plan yap...", theme=theme
+        )
+        self._fill_background_button.setToolTip(
+            "Etiketlenmemiş zaman 'spor yapılmıyor' anlamına gelmez, bu yüzden "
+            "otomatik doldurulmaz. Bu düğme onay ister."
+        )
+        self._fill_background_button.clicked.connect(self._fill_background)
+        detail_layout.addWidget(self._fill_background_button)
+
+        self._activity_hint = make_label("", role="muted")
+        self._activity_hint.setWordWrap(True)
+        detail_layout.addWidget(self._activity_hint)
+
+        card.add_widget(detail)
+        return card
+
+    # ------------------------------------------------------ activity layer
+    def _current_activity(self) -> Optional[ActivityInterval]:
+        if self._repo is None:
+            return None
+        item = self._activity_list.currentItem()
+        if item is None:
+            return None
+        return self._repo.find_activity(str(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _refresh_activity_list(self) -> None:
+        if self._repo is None:
+            return
+        current = self._current_activity()
+        self._activity_list.blockSignals(True)
+        self._activity_list.clear()
+        for interval in self._repo.activity_intervals:
+            text = (
+                f"{interval.start_frame}-{interval.end_frame}  "
+                f"{interval.state.label}"
+            )
+            if interval.exercise:
+                text += f" · {interval.exercise}"
+            if interval.linked_sample_id:
+                text += "  (harekete bağlı)"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, interval.interval_id)
+            self._activity_list.addItem(item)
+            if current is not None and interval.interval_id == current.interval_id:
+                self._activity_list.setCurrentItem(item)
+        self._activity_list.blockSignals(False)
+
+        coverage = self._repo.activity_coverage()
+        readiness, _ = self._repo.continuous_readiness()
+        theme = self.theme
+        if coverage.frame_count:
+            percent = coverage.ratio * 100
+            colour = theme.success if coverage.is_complete else theme.warning
+            self._activity_chip.set_status(
+                f"kapsam %{percent:.0f}",
+                icon="check" if coverage.is_complete else "warning",
+                colour=colour,
+            )
+        fps = self._loaded.target_fps if self._loaded else 30.0
+        self._activity_hint.setText(
+            f"Etiketlenmemiş: {coverage.unlabelled_frames} kare "
+            f"({coverage.unlabelled_frames / max(fps, 1e-6):.1f} sn). "
+            "Bu kareler arka plan sayılmaz; export'ta maskeyle işaretlenir. "
+            f"Sürekli export durumu: {readiness.label}."
+        )
+        self._timeline.set_activity_intervals(
+            self._repo.activity_intervals,
+            selected_id=current.interval_id if current else "",
+        )
+        self._sync_activity_exercise()
+
+    def _sync_activity_exercise(self) -> None:
+        interval = self._current_activity()
+        schema = self.state.label_schema
+        self._activity_exercise.blockSignals(True)
+        self._activity_exercise.clear()
+        self._activity_exercise.addItem("-", "")
+        for option in schema.exercises:
+            self._activity_exercise.addItem(option.label, option.code)
+        if interval is not None and interval.exercise:
+            position = self._activity_exercise.findData(interval.exercise)
+            self._activity_exercise.setCurrentIndex(max(0, position))
+        self._activity_exercise.setEnabled(
+            interval is not None
+            and interval.state is ActivityState.TARGET_EXERCISE
+            and not interval.linked_sample_id
+        )
+        self._activity_exercise.blockSignals(False)
+
+    def _activity_row_selected(self, item: Optional[QListWidgetItem]) -> None:
+        if item is None or self._repo is None:
+            return
+        interval = self._repo.find_activity(str(item.data(Qt.ItemDataRole.UserRole)))
+        if interval is None:
+            return
+        self._timeline.set_selected_activity(interval.interval_id)
+        self._seek(interval.start_frame)
+        self._sync_activity_exercise()
+
+    def _activity_created(self, start: int, end: int) -> None:
+        if self._repo is None:
+            return
+        try:
+            interval = self._repo.create_activity_interval(
+                start, end, state=ActivityState.BACKGROUND
+            )
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
+            return
+        self._on_repo_changed()
+        self._select_activity(interval.interval_id)
+        self.state.notify(
+            "Aralık oluşturuldu. Durumunu seçin: arka plan / geçiş / hedef "
+            "egzersiz / diğer hareket.",
+            5000,
+        )
+
+    def _select_activity(self, interval_id: str) -> None:
+        for index in range(self._activity_list.count()):
+            item = self._activity_list.item(index)
+            if str(item.data(Qt.ItemDataRole.UserRole)) == interval_id:
+                self._activity_list.setCurrentItem(item)
+                return
+
+    def _set_activity_state(self, state: ActivityState) -> None:
+        interval = self._current_activity()
+        if interval is None or self._repo is None:
+            self.state.notify("Önce bir aktivite aralığı seçin.", 4000)
+            return
+        exercise = ""
+        if state is ActivityState.TARGET_EXERCISE:
+            exercise = str(self._activity_exercise.currentData() or "")
+            if not exercise:
+                schema = self.state.label_schema
+                if schema.exercises:
+                    exercise = schema.exercises[0].code
+                else:
+                    self.state.notify(
+                        "Önce Ayarlar'dan projeye bir egzersiz ekleyin.", 6000
+                    )
+                    return
+        try:
+            self._repo.set_activity_state(
+                interval.interval_id, state, exercise=exercise
+            )
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
+            return
+        self._on_repo_changed()
+        self._select_activity(interval.interval_id)
+
+    def _activity_exercise_changed(self) -> None:
+        interval = self._current_activity()
+        if interval is None or self._repo is None:
+            return
+        if interval.state is not ActivityState.TARGET_EXERCISE:
+            return
+        code = str(self._activity_exercise.currentData() or "")
+        if not code or code == interval.exercise:
+            return
+        self._repo.set_activity_state(
+            interval.interval_id, ActivityState.TARGET_EXERCISE, exercise=code
+        )
+        self._on_repo_changed()
+        self._select_activity(interval.interval_id)
+
+    def _delete_activity(self) -> None:
+        interval = self._current_activity()
+        if interval is None or self._repo is None:
+            return
+        self._repo.delete_activity_interval(interval.interval_id)
+        self._on_repo_changed()
+
+    def _link_activity_to_sample(self) -> None:
+        interval = self._current_activity()
+        sample = self._current_sample()
+        if interval is None or sample is None or self._repo is None:
+            self.state.notify("Bir aktivite aralığı ve bir hareket seçin.", 5000)
+            return
+        try:
+            self._repo.link_activity_to_sample(interval.interval_id, sample.sample_id)
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
+            return
+        self._on_repo_changed()
+        self._select_activity(interval.interval_id)
+        self.state.notify(
+            "Aralık harekete bağlandı; sınırlar tek kaynaktan yönetiliyor.", 5000
+        )
+
+    def _activity_from_samples(self) -> None:
+        if self._repo is None:
+            return
+        created = self._repo.activity_from_samples()
+        self._on_repo_changed()
+        self.state.notify(
+            f"{len(created)} hedef egzersiz aralığı oluşturuldu."
+            if created
+            else "Oluşturulacak yeni aralık yok.",
+            5000,
+        )
+
+    def _fill_background(self) -> None:
+        """Fill the gaps - but only after the user says so, explicitly."""
+        if self._repo is None:
+            return
+        gaps = self._repo.unlabelled_activity_gaps()
+        if not gaps:
+            self.state.notify("Etiketlenmemiş boşluk yok.", 4000)
+            return
+        frames = sum(high - low + 1 for low, high in gaps)
+        fps = self._loaded.target_fps if self._loaded else 30.0
+        answer = QMessageBox.question(
+            self,
+            "Boşlukları arka plan yap",
+            f"{len(gaps)} boşluktaki {frames} kare ({frames / max(fps, 1e-6):.1f} sn) "
+            "ARKA PLAN olarak işaretlensin mi?\n\n"
+            "Bu, o zamanlarda kişinin spor yapmadığını iddia eder. Emin "
+            "değilseniz etiketlenmemiş bırakın: export bu kareleri maskeyle "
+            "ayırır.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        created = self._repo.fill_gaps_with_background(confirmed=True)
+        self._on_repo_changed()
+        self.state.notify(f"{len(created)} boşluk arka plan yapıldı.", 5000)
+
+    def _activity_summary(self) -> str:
+        if self._repo is None:
+            return ""
+        coverage = self._repo.activity_coverage()
+        if not coverage.frame_count:
+            return ""
+        if not self._repo.activity_intervals:
+            return "Aktivite etiketi yok."
+        return (
+            f"{len(self._repo.activity_intervals)} aralık · kapsam "
+            f"%{coverage.ratio * 100:.0f} · {coverage.unlabelled_frames} kare "
+            "etiketsiz"
+        )
+
     def _build_take_card(self, theme: Theme) -> QWidget:
         card = Card("Kayıt bilgisi", theme=theme, icon="info")
         self._take_chip = StatusChip("-", theme=theme, icon="info")
@@ -543,6 +889,8 @@ class ReviewPage(Page):
         self._timeline.interval_selected.connect(self._select_interval_by_id)
         self._timeline.interval_bounds_changed.connect(self._interval_bounds_changed)
         self._timeline.interval_create_requested.connect(self._create_interval_range)
+        self._timeline.activity_create_requested.connect(self._activity_created)
+        self._timeline.activity_selected.connect(self._select_activity)
         self._timeline.interval_double_clicked.connect(self._select_interval_by_id)
         card.add_widget(self._timeline)
 
@@ -567,6 +915,7 @@ class ReviewPage(Page):
         add("C", self._guarded(self._copy_previous))
         add("F1", self._guarded(lambda: self._set_timeline_mode(TimelineMode.MOVEMENT)))
         add("F2", self._guarded(lambda: self._set_timeline_mode(TimelineMode.ERROR)))
+        add("F3", self._guarded(lambda: self._set_timeline_mode(TimelineMode.ACTIVITY)))
         add("1", self._guarded(lambda: self._set_verdict(Correctness.CORRECT)))
         add("2", self._guarded(lambda: self._set_verdict(Correctness.INCORRECT)))
         add("Ctrl+F", self._picker.focus_search)
@@ -623,7 +972,7 @@ class ReviewPage(Page):
                 "HAREKET şeridinde sürükle: tekrar çiz/taşı  ·  "
                 "Tekerlek: yakınlaştır  ·  Shift+Tekerlek: kaydır"
             )
-        else:
+        elif mode is TimelineMode.ERROR:
             name = f"Hareket {sample.index}" if sample else "Seçili hareket"
             self._mode_hint.setText(
                 f"{name} İÇİNDE, HATA şeridinde sürükleyip hata türünü seçin. "
@@ -633,25 +982,43 @@ class ReviewPage(Page):
                 "HATA şeridinde sürükle: hata aralığı çiz/taşı  ·  "
                 "Hareketin dışı maskelenir"
             )
+        else:
+            self._mode_hint.setText(
+                "AKTİVİTE şeridinde sürükleyerek kaydın tamamını etiketleyin. "
+                "Etiketlenmemiş zaman arka plan SAYILMAZ."
+            )
+            self._timeline_legend.setText(
+                "AKTİVİTE şeridinde sürükle: durum aralığı çiz  ·  "
+                "Taralı alan: henüz etiketlenmemiş"
+            )
         self._error_card.setEnabled(sample is not None)
 
         # Only the active mode's editing tools stay expanded. At 1366x768 the
-        # side column cannot hold both, and burying the tool the user just
+        # side column cannot hold them all, and burying the tool the user just
         # switched to would be the worst possible thing to hide.
         editing_errors = mode is TimelineMode.ERROR
-        self._movement_detail.setVisible(not editing_errors)
+        editing_activity = mode is TimelineMode.ACTIVITY
+        self._movement_detail.setVisible(mode is TimelineMode.MOVEMENT)
         self._error_detail.setVisible(editing_errors)
+        self._activity_detail.setVisible(editing_activity)
         # A collapsed list is a reference, not a workspace: three rows is plenty.
-        self._sample_list.setMaximumHeight(84 if editing_errors else 16777215)
+        self._sample_list.setMaximumHeight(
+            84 if mode is not TimelineMode.MOVEMENT else 16777215
+        )
         self._interval_list.setMaximumHeight(84 if not editing_errors else 16777215)
-        self._order_side_cards(editing_errors)
+        self._activity_list.setMaximumHeight(84 if not editing_activity else 16777215)
+        self._order_side_cards(mode)
         self._movement_card.set_subtitle(
-            self._movement_summary() if editing_errors else ""
+            "" if mode is TimelineMode.MOVEMENT else self._movement_summary()
         )
         self._error_card.set_subtitle(
             "" if editing_errors else self._error_summary()
         )
+        self._activity_card.set_subtitle(
+            "" if editing_activity else self._activity_summary()
+        )
         self._refresh_interval_list()
+        self._refresh_activity_list()
 
     def _error_summary(self) -> str:
         """One line about the selected movement's error intervals, collapsed."""
@@ -847,6 +1214,7 @@ class ReviewPage(Page):
         )
         if self._repo is not None:
             self._timeline.set_samples(self._repo.samples)
+            self._timeline.set_activity_intervals(self._repo.activity_intervals)
 
     def _refresh_take_info(self) -> None:
         if self._loaded is None:
@@ -988,6 +1356,7 @@ class ReviewPage(Page):
     # ------------------------------------------------------------ repository
     def _on_repo_changed(self) -> None:
         self._refresh_sample_list()
+        self._refresh_activity_list()
         if self._repo is not None:
             self._timeline.set_samples(self._repo.samples)
         self._mark_dirty()

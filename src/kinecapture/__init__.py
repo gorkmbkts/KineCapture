@@ -19,7 +19,7 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.5.0"
+APP_VERSION: str = "0.6.0"
 
 #: Schema version for ``project.json``.
 PROJECT_SCHEMA_VERSION: str = "1.0.0"
@@ -54,6 +54,10 @@ RELEASE_SCHEMA_VERSION: str = "2.0.0"
 #: Schema version of ``feature_spec.json`` inside a release.
 FEATURE_SPEC_SCHEMA_VERSION: str = "1.0.0"
 
+#: Schema version of ``raw/raw_capture_manifest.json``: the description of the
+#: immutable colour/depth archive and how its streams line up in time.
+RAW_ARCHIVE_SCHEMA_VERSION: str = "1.0.0"
+
 __all__ = [
     "APP_NAME",
     "APP_VERSION",
@@ -62,6 +66,7 @@ __all__ = [
     "LABEL_SCHEMA_VERSION",
     "PACKAGE_NAME",
     "PROJECT_SCHEMA_VERSION",
+    "RAW_ARCHIVE_SCHEMA_VERSION",
     "RELEASE_SCHEMA_VERSION",
     "SESSION_SCHEMA_VERSION",
     "SKELETON_STREAM_SCHEMA_VERSION",

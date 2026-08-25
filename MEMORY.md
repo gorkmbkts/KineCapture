@@ -1,9 +1,9 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: feature_export_working
-last_updated: 2026-08-23
-app_version: 0.5.0
+status: rgbd_archive_subject_lock_continuous_working
+last_updated: 2026-08-24
+app_version: 0.6.0
 ---
 
 # KineCapture Studio — Proje Hafızası
@@ -37,6 +37,16 @@ Kısa kalıcı talimatlar `CLAUDE.md` içindedir.
   geriye uyumlu biçimde zenginleştirildi, `kinecapture/features/` altında
   **sürümlü seçilebilir özellik katmanı** kuruldu, export ve Export ekranı bu
   katmanı taşıyacak şekilde genişletildi. Ayrıntı: bölüm 6C.
+- 2026-08-24: `CLAUDE_CONTINUOUS_ACTIVITY_RGBD_SUBJECT_LOCK_PROMPT.md`
+  uygulandı: **zorunlu ham RGB-D arşivi**, **görüntüye tıklayarak kişi seçimi
+  ve kalıcı kişi kilidi**, **sürekli aktivite etiketleme ve dataseti**.
+  Ayrıntı: bölüm 6D.
+- 2026-08-24: `CLAUDE_CONTINUOUS_ACTIVITY_RGBD_SUBJECT_LOCK_PROMPT.md`
+  hazırlandı, **henüz uygulanmadı**. Prompt; mevcut hareket-sample akışını
+  koruyarak isteğe bağlı sürekli aktivite/background etiketleme ve exportu,
+  zorunlu yeniden işlenebilir RGB-D ham arşivini ve Capture ekranında tıklamayla
+  seçilen kişiye kalıcı kimlik kilidini birlikte tarif ediyor. Uygulama kodu ve
+  schema sürümleri bu maddeyle değişmiş sayılmaz.
 
 Önceki scaffold aşaması bu sürümle büyük ölçüde değiştirildi. "Değişen
 kararlar" bölümleri farkları kaydeder.
@@ -555,6 +565,196 @@ dokunulmaz. Özellik hesapları export worker thread'inde çalışır.
    "bir 3-vektör serisi" mi olduğu tahmin ediliyordu. `vector` parametresi
    zorunlu hale getirildi.
 
+## 6D. Ham RGB-D arşivi, kişi kilidi ve sürekli aktivite (2026-08-24)
+
+### ÖLÇÜLEREK DOĞRULANAN GERÇEKLER (varsayım değil)
+
+Bu turun en önemli çıktısı bir kod değil, bir ölçüm:
+
+1. **SVO2 replay, ölçülen derinliği geri vermiyor.** Taze bir `capture.svo2`
+   yeniden açılıp aynı konumlardan `MEASURE.DEPTH` okunduğunda, kayıt anındaki
+   derinlikle **aynı değil**: yer yer 7-14 metre fark, geçersiz piksel maskesi
+   bile farklı. Gerçek kayıtta iki kez doğrulandı (3 sn'lik probe ve 20 sn'lik
+   canlı kayıt). Derinlik okuma anında yeniden hesaplanır ve depth mode, SDK
+   sürümü ve GPU'ya bağlıdır. **Ölçülen derinlik ayrıca arşivlenmezse kalıcı
+   olarak kaybolur.**
+2. **SVO2 RGB'yi geri veriyor.** Her probe edilen konumdan `(720,1280,4)` RGB
+   okundu. Bu yüzden ZED'de renk ikinci kez arşivlenmiyor.
+3. **`H264` KAYIPLIDIR.** Ölçülen boyutlar (HD720/30): `H264` 96 MB/dk,
+   `H264_LOSSLESS` 1116 MB/dk, `LOSSLESS` 2954 MB/dk. Önceki kod ve docstring
+   SVO2'yi "lossless-by-default" diye tanımlıyordu; bu **yanlıştı** ve
+   düzeltildi.
+4. **Kamera zaman damgası SVO2'ye mikrosaniye çözünürlüğünde yazılıyor**:
+   yeniden oynatmada son üç hane sıfırlanmış geliyor (ölçülen fark 300 ns).
+5. **SVO kare sayısı canlı kare sayısına eşit olmayabilir**: 601 canlı kareye
+   karşı `get_svo_number_of_frames()` 602 döndürdü. 1:1 sıra varsayılmıyor;
+   eşleme zaman damgasıyla doğrulanabilsin diye indeks her karede hem konumu
+   hem kamera kare numarasını hem zaman damgasını yazıyor.
+6. **`get_recording_status()` sayaçları hâlâ güvenilmez**: `ingested=0`,
+   `encoded=0` döndürüyor. Tek başarı kanıtı olarak kullanılmıyor.
+7. **`store_depth_frames` ölü bir ayardı.** Profilde ve Ayarlar ekranında
+   vardı, `TakeWriter` hiç okumuyordu; tooltip'i "SVO2 derinliği yeniden
+   üretebildiği için kapalı" diyordu ki bu da yanlıştı. Kaldırıldı, yerine
+   zorunlu arşiv politikası ve codec seçimi geldi.
+
+### Derinlik saklama kararı (ölçülerek)
+
+Gerçek ZED derinliği üzerinde, yeni bağımlılık kurmadan:
+
+| şema | MB/dk | kayıpsız |
+|---|---|---|
+| zlib float32 | 5153 | evet |
+| **byteshuffle + zlib-1 (varsayılan)** | **3534** | **evet** |
+| temporal XOR + byteshuffle + zlib-1 | 3286 | evet |
+| uint16 @1/4000 m + byteshuffle | 1612 | hayır (max hata 0.126 mm) |
+
+Kayıpsızın zayıf sıkışması veriden: bir karede 200 000 pikselin 196 010'u
+farklı değer, medyan komşu fark 9 mikrometre. Kodlama hızı ölçüldü: tek
+thread 14.6 fps, 3 thread 38.1 fps → chunk sıkıştırma **3 worker thread**'de
+çalışıyor (zlib GIL'i bırakıyor).
+
+Varsayılan **kayıpsız float32**. Nicemlenmiş profil isteğe bağlı ve her yerde
+"kayıplı" işaretli; ölçek, geçersiz sentinel, adım ve menzil chunk başlığında.
+
+### Ham arşiv mimarisi
+
+```text
+raw/capture.svo2                  ZED stereo görüntüleri (H264, kayıplı)
+raw/raw_capture_manifest.json     biçim, codec, provenance, senkron sözleşmesi
+raw/rgbd/depth_%06d.kcd           ölçülen derinlik, chunk'lı, bağımsız çözülür
+raw/rgbd/color_%06d.kcc           yalnız native kayıt yoksa (mock backend)
+raw/rgbd/index.jsonl              kare başına senkron indeksi
+```
+
+- Chunk = 15 kare (30 fps'te yarım saniye). Her chunk kendi JSON başlığını ve
+  payload uzunluğunu taşır; yarım kalan chunk **okurken tespit edilir** ve
+  yalnız o chunk kaybolur.
+- Her chunk ayrı checksum'lanıyor (`checksum_targets` genişletildi).
+- Kuyruk **bounded**; taşarsa kare kaybı sayılır ve gizlenmez.
+- `TakeQualityMetrics` beş ayrı sayaç taşıyor: preview, kayıt kuyruğu, renk
+  arşivi, derinlik arşivi, backend.
+- **Ham arşivi eksik take `FINALIZED` olmaz**, `PARTIAL` kalır ve hiçbir dosya
+  silinmez.
+- Native kayıt durdurulamazsa hata yutulmuyor; `note_raw_failure` ile take'e
+  taşınıyor ve finalize'ı düşürüyor.
+- Kayıttan önce disk ön kontrolü: GB/dakika ve kaç dakikaya yettiği gösteriliyor,
+  yetmiyorsa `insufficient_disk_space`. Çözünürlük/FPS **sessizce düşürülmüyor**.
+- `python -m kinecapture.tools.extract_raw <take> --verify | --out <dir>`
+  doğrulama ve çıkarım yapıyor, ham veriye dokunmuyor.
+
+`RAW_ARCHIVE_SCHEMA_VERSION = 1.0.0` eklendi, `APP_VERSION` 0.6.0.
+
+### Kişi kilidi (`capture/subject_lock.py`, algoritma sürümü 1.0.0)
+
+Qt'siz, deterministik, tamamen test edilebilir.
+
+- `subject_id`: kayda özel, seçimde üretilir, **hiç değişmez**.
+- `tracker_body_id`: o karede eşlenen SDK kimliği veya yok.
+- Durum makinesi: `UNSELECTED → LOCKED → TEMPORARILY_LOST → REIDENTIFYING →
+  LOCKED`, çıkmaz olarak `AMBIGUOUS`.
+- **En güçlü kanıt eş-görünürlük**: seçili kişiyle aynı karede görülmüş bir
+  tracker kimliği tanım gereği başka bir kişidir ve bir daha seçili kişi
+  olamaz. Bu, prompt'ta yazmıyordu; ilk sürümde benzer ölçülü ikinci kişiye
+  geçiş yaşandığı için eklendi ve gerçek donanımda çalıştığı doğrulandı.
+- Diğer kanıtlar: konum sürekliliği (2 sn'den kısa boşlukta, makul yürüme
+  hızıyla), uzuv oranları, boy. Ağırlıklar 0.4/0.4/0.2, eksik kanıt lehte
+  sayılmaz (coverage ile iskonto edilir).
+- Otomatik geçiş yalnız `skor >= 0.62` **ve** ikinci adaya fark `>= 0.15` ise.
+  0.5 sn'lik grace, 20 sn sonra tamamen vazgeçip kullanıcıya soruyor.
+- Bütün kararlar **ve reddedilen kararlar** audit'e yazılıyor: kare, zaman
+  damgası, eski/yeni kimlik, yöntem, skor, fark, gerekçe, adaylar.
+- **Gizlilik sınırı**: yüz tanıma yok, görünüm gömülmesi yok, kayıtlar arası
+  biyometrik veritabanı yok. İmza yalnız uzuv oranı + boy, kapsamı tek kayıt.
+- `VideoView.clicked` artık `(float, float)` görüntü pikseli taşıyor; letterbox
+  ve DPI hesaba katılıyor. Hit testing tracker'ın kendi `joint_positions_2d`
+  verisini kullanıyor (kesin), yoksa aday üretilmiyor. İki kişi 25 pikselden
+  yakınsa seçim yapılmıyor. Tıklama **görüntülenen** karede çözülüyor
+  (`packet=self._last_packet`), sonradan gelen karede değil.
+- Kayıt sırasında sıradan tıklama kişiyi değiştirmiyor; ayrı "Kimliği yeniden
+  doğrula" eylemi var ve olay üretiyor.
+- `skeleton.jsonl` bütün gövdeleri saklamaya devam ediyor; yanına kare başına
+  `subject` bloğu yazılıyor. `SkeletonFrame.subject_body()` **fallback
+  yapmıyor**; `body()` (görüntüleme yardımcısı) yapıyor ve docstring'i bunu
+  söylüyor.
+
+### Sürekli aktivite (`domain/activity.py`, `export/continuous.py`)
+
+- Dört karşılıklı dışlayan durum: `background`(0), `transition`(1),
+  `target_exercise`(2), `other_activity`(3). **Etiketlenmemiş = -1 ve bir sınıf
+  değil.**
+- Çakışma domain'de reddediliyor; yeni aralık boş alana kırpılıyor, tamamen
+  doluysa hata.
+- `target_exercise` bir `MovementSample`'a bağlanabiliyor; bağlıyken **sınırın
+  tek kaynağı hareket**. Bağlı aralığın sınırı doğrudan düzenlenemiyor, hareket
+  taşınınca birlikte taşınıyor. Bağlama, komşuyla çakışacaksa reddediliyor.
+- "Boşlukları arka plan yap" **açık onay** istiyor (`confirmed=True`), GUI'de
+  ayrıca ne iddia edildiğini anlatan bir onay kutusu var.
+- `evaluate_continuous` tek kural; hem İnceleme ekranı hem exporter kullanıyor.
+  Hareket-sample hazırlığından **bağımsız**.
+- Annotation şeması yalnız ekleme yönünde genişledi: sidecar'a
+  `activity_intervals` anahtarı eklendi, dosya adı ve `samples` değişmedi.
+  Anahtarı olmayan eski dosya boş strip olarak okunuyor ve **okurken yeniden
+  yazılmıyor**. `save_samples(activity_intervals=None)` diskte olanı koruyor,
+  yani aktivite katmanını bilmeyen bir çağıran onu silemiyor.
+- Undo/redo iki katmanı **birlikte** anlık görüntülüyor (`_State`).
+
+### Sürekli export sözleşmesi
+
+Bir örnek = bir kayıt, gerçek `T`. `continuous/` dizini + `activity_spec.json`.
+Diziler: `joints_xyz`, `frame_indices`, `camera_timestamps_ns`,
+`subject_present_mask`, `subject_source_tracking_id`,
+`subject_association_confidence`, `activity_state_code`, `activity_label_mask`,
+`exercise_active`, `exercise_class_index`, `exercise_class_valid_mask`,
+`exercise_start_target`, `exercise_end_target`, `correctness_code`,
+`error_label_mask`, `error_multi_hot` + seçilen feature dizileri.
+
+Üç ayrım hiç bulanıklaşmıyor ve doğrulamada kontrol ediliyor:
+etiketlenmemiş ≠ arka plan, kişi yok ≠ kişi hareketsiz, hata etiketi yok ≠
+hata yok.
+
+- Ham RGB-D **kopyalanmıyor**; manifest checksum'lu referans taşıyor.
+- `split_group_id = take_id`; aynı kayıttan türetilen pencereler bölünemez.
+- Fingerprint'e `dataset_modes` ve `activity_contract` sürümü girdi; sürekli
+  örneğin anahtarı aktivite aralıklarını, kişi özetini, ham kaynak
+  checksum'larını ve dosya checksum'unu içeriyor.
+- Varsayılan export **değişmedi**: yalnız hareket örnekleri.
+- Sürekli mod seçiliyken `select_rows` "hazır hareket" şartını kaldırıyor —
+  aksi hâlde hiç egzersiz içermeyen negatif kayıtlar hiç görünmezdi.
+- Kişi kilidinden önce alınmış kayıtlar `legacy_active_body: true` diye
+  işaretleniyor ve doğrulama uyarısı üretiyor; otomatik migration yok.
+
+### Bu turda bulunan gerçek hatalar
+
+1. **`store_depth_frames` ölü ayardı** ve tooltip'i yanlış bir iddia taşıyordu.
+2. **SVO2 "lossless" diye belgeleniyordu**; gerçekte H264 (kayıplı).
+3. **`stop_native_recording` hatası yutuluyordu**; take başarılı görünebiliyordu.
+4. **`link_activity_to_sample` sessizce çakışma yaratabiliyordu**: hareketin
+   sınırlarını benimserken komşuyu kontrol etmiyordu, sonuç etiketli görünen
+   fakat export edilemeyen bir kayıttı.
+5. **Sürekli export, hazır hareket örneği olmayan kayıtları hiç görmüyordu**
+   (`exportable_rows` filtresi) — tam da sürekli datasetin ihtiyaç duyduğu
+   negatif örnekler eleniyordu.
+6. **Kişi kilidi olmayan eski kayıtlar tamamen NaN sürekli örnek üretiyordu**;
+   şimdi dürüst legacy yolu var ve manifestte işaretleniyor.
+7. **Türev, kişinin görülmediği karede değer üretiyordu**: merkezi fark yalnız
+   iki komşunun sonlu olmasını arıyordu. Artık farkı alınan karenin kendisi de
+   sonlu olmalı.
+8. **Tıklama sonraki karede çözülüyordu**; artık kullanıcının gördüğü karede.
+
+### Bilinçli olarak sonraya bırakılanlar
+
+- SVO2 özel veri kanalı (`ingest_data_into_svo`) ile subject association'ı
+  SVO'nun içine yazmak. Mümkün görünüyor fakat ikinci bir doğruluk kaynağı
+  yaratır; şimdilik indeks + sidecar tek kaynak.
+- Görünüm tabanlı re-identification (kıyafet crop deskriptörü). Gizlilik
+  sınırını genişletir; eş-görünürlük + oran kanıtı gerçek testte yeterli oldu.
+- Çok kişili eşzamanlı kayıt (birden fazla subject lock).
+- `other_activity` için kullanıcı tanımlı alt türler (ontoloji kararı).
+- Hata aralığı başına etkilenen eklem / şiddet rubriği / annotator confidence
+  ve zamansal faz aralıkları — hâlâ ayrı bir uzman ontoloji kararı gerektiriyor;
+  mimari eklenmelerini engellemiyor.
+- Sürekli örnekten pencere üretimi ve dengeleme: eğitim katmanının işi.
+
 ## 7. Mimari sınırlar
 
 ```text
@@ -566,9 +766,11 @@ recording/      TakeWriter, ProxyVideoWriter, kalite akümülatörü
 playback/       skeleton stream okuma, proxy video okuma, kurtarma
 annotations/    AnnotationRepository (undo/redo, autosave)
 dataset/        ProjectWorkspace (disk), DatasetIndex (sorgu/özet/QA)
-export/         ReleaseBuilder (staging → atomik yayın)
+export/         ReleaseBuilder (staging → atomik yayın) + continuous.py
 features/       sürümlü seçilebilir özellik katmanı ← Qt ve pyzed içermez
-domain/         enums, models, project, labels  ← Qt ve pyzed içermez
+capture/subject_lock.py   kişi kilidi durum makinesi ← Qt ve pyzed içermez
+recording/rgbd_archive.py chunk'lı ham RGB-D arşivi, worker havuzu
+domain/         enums, models, project, labels, activity  ← Qt ve pyzed içermez
 visualization/  skeleton_spec (veri), mapping (sürümlü adapter)
 core/           errors, ids, jsonio, paths, config, logging, diagnostics,
                 state_machine, fingerprint
@@ -601,7 +803,7 @@ Hepsi kullanıcının Windows makinesinde, `KineSynth` environment içinde
 | Doğrulama | Komut | Sonuç |
 |---|---|---|
 | Interpreter | `conda run -n KineSynth python -c "import sys; print(sys.executable)"` | `C:\Users\gorke\anaconda3\envs\KineSynth\python.exe`, Python 3.11.14 |
-| Test paketi | `python -m pytest` | **438 passed**, 0 warning, 121.9 s (2026-08-23) |
+| Test paketi | `python -m pytest` | **528 passed**, 0 warning, 160.1 s (2026-08-24) |
 | ZED'siz import | alt süreçte `sys.modules` kontrolü | `pyzed` hiç yüklenmedi |
 | Self test | `python -m kinecapture --self-test` | exit 0; proje→export tamamı OK |
 | Cihaz listesi | `python -m kinecapture --list-devices` | ZED SDK 5.4.1, ZED 2i S/N 31844341 AVAILABLE |
@@ -687,6 +889,66 @@ dördünde de değişiyor, sayfalar 1600x980 **ve** 1366x768'de taşmadan
 **Redesign donanımda test edilmedi.** Etiketleme ve export kamera
 gerektirmiyor; bu turda 2026-08-20'deki gerçek ZED 2i kaydı yeniden
 alınmadı. Kayıt hattı (`camera/`, `capture/`) bu turda değişmedi.
+
+### Ham arşiv / kişi kilidi / sürekli aktivite doğrulaması (2026-08-24)
+
+```text
+python -m pytest                    528 passed, 160.1 s, 0 warning
+python -m kinecapture --self-test   exit 0
+  aktivite etiketleme       : OK (3 aralık, kapsam %97, 2 kare etiketsiz)
+  ham RGB-D arşivi          : OK (65 derinlik, 65 renk karesi, float32_byteshuffle_zlib)
+  export                    : OK (2 hareket örneği, 1 sürekli örnek, doğrulama=geçti)
+```
+
+**GERÇEK ZED 2i ile doğrulandı** (kullanıcı kadraja girdi, görüntüde kendi
+üzerine tıkladı, 20 sn kayıt aldı; kadrajda zaman zaman birden fazla kişi
+vardı):
+
+```text
+connect              3.8 s · ZED 2i S/N 31844341 · SDK 5.4.1
+ham arşiv tahmini    3.63 GB/dk, boş alan 56 dakikaya yetiyor
+KAYIT                601 kare / 20.00 s / 30.0 FPS · durum=finalized
+AKIŞ KAYIPLARI       kayıt kuyruğu=0  renk=0  derinlik=0
+ARŞİVLENEN           601 derinlik karesi (renk SVO2'de, ikinci kopya yok)
+
+KİŞİ KİLİDİ          kilitli=601  kayıp=0  belirsiz=0  yeniden eşleştirme=0
+kapsam               %100.0
+ÇOKLU KİŞİ KARESİ    554   (kadrajda başka insanlar vardı)
+görülen tracker ID   [1, 2, 3]
+DİSKALİFİYE ID       [2, 3]   <- eş-görünürlük kuralı gerçek veride çalıştı
+olaylar              yalnız 1 tane: subject_selected
+
+HAM ARŞİV            601 derinlik karesi · chunk sorunu=0 · checksum uyuşmazlığı=0
+SVO2                 var · sıkıştırma=H264 · lossless=False
+BOYUTLAR             SVO2 34.2 MB · derinlik 1202.0 MB (20 saniye için)
+SENKRON İNDEKS       601 satır
+  ilk: p=0   i=3603 cam_ns=1787578786176571501 subj=locked
+  son: p=600 i=4203 cam_ns=1787578806177876501 subj=locked
+     ^ konum 0'dan, kamera kare numarası 3603'ten başlıyor: ikisi AYNI ŞEY DEĞİL
+
+SVO2 YENİDEN OKUMA
+  pos   0: RGB (720,1280,4) okundu · saklanan derinlikle aynı mı: HAYIR (max fark 13.22 m, maske farklı)
+  pos 301: RGB okundu · aynı mı: HAYIR (max fark 14.36 m, maske farklı)
+  pos 599: RGB okundu · aynı mı: HAYIR (max fark  6.85 m, maske farklı)
+  SVO2 kare sayısı 602, canlı kare 601  <- 1:1 sıra varsayılamaz
+
+ETİKETLEME           1 hareket + 1 hata aralığı · aktivite kapsamı %100 · sürekli: ready
+EXPORT               1 hareket örneği + 1 sürekli örnek · doğrulama GEÇTİ
+  sürekli örnek      T=601 · 24 dizi · etiketsiz kare=0
+  sınıf dağılımı     {background: 200, target_exercise: 201, other_activity: 200}
+  kişi kapsamı       %100 · otoritatif ilişkilendirme=True
+  subject_present    601/601
+```
+
+Bu çıktının en kritik iki satırı: **554 karede birden fazla kişi vardı ve kilit
+hiç kaymadı**, ve **SVO2'den yeniden okunan derinlik saklanan derinlikle aynı
+değil**. İkincisi bu turdaki bütün depolama maliyetinin gerekçesidir.
+
+**Donanımda doğrulanamayan:** otomatik yeniden ilişkilendirme (`reassociated`)
+bu kayıtta **tetiklenmedi** — seçili kişi hiç kaybolmadı, tracker kimliği hiç
+değişmedi. O yol yalnız deterministik stub testleriyle doğrulandı
+(`tests/test_subject_lock.py`): yeni kimlikle dönüş, iki benzer aday,
+uzun kaybolma, kimlik yeniden kullanımı, antrenör senaryosu.
 
 ### Özellik katmanı doğrulaması (2026-08-23)
 
@@ -805,6 +1067,10 @@ gerektirmeden regresyonu yakalar.
 - Çok uzmanlı consensus ve reviewer yorumları.
 - Çok kameralı kayıt, bulut senkronizasyonu, gelişmiş yetkilendirme.
 - Yüz bulanıklaştırma / skeleton-only privacy export.
+- Çok kişili eşzamanlı kayıt (birden fazla subject lock).
+- Görünüm tabanlı re-identification (gizlilik sınırını genişletir).
+- SVO2 özel veri kanalına (`ingest_data_into_svo`) subject association yazmak.
+- `other_activity` için kullanıcı tanımlı alt türler.
 - Zaman çizelgesinde reviewer yorum katmanı.
 - Hata sınıflarının hiyerarşisi/gruplanması (şu an düz liste).
 - Bir hata aralığını başka bir harekete taşıma (şu an sil + yeniden çiz).
@@ -839,3 +1105,13 @@ gerektirmeden regresyonu yakalar.
 8. Kovaryans eleman sırasını Stereolabs dokümantasyonundan veya bilinen bir
    duruşla deneysel olarak doğrulayın; doğrulanırsa `joint_position_std`
    türetilmiş özelliği eklenebilir.
+9. **Disk planlaması yapın.** Kayıpsız derinlik 3.5 GB/dakika. 20 dakikalık bir
+   oturum ~70 GB. Uzun protokoller için ya ayrı bir disk ya da nicemlenmiş
+   derinlik profili gerekiyor; ikisi de bilinçli bir karar olmalı, kayıt
+   sırasında sürpriz olmamalı.
+10. **Otomatik yeniden ilişkilendirmeyi gerçek donanımda tetikleyin**: seçili
+   kişi kadrajdan tamamen çıkıp geri girsin, kadrajda başka biri varken de
+   deneyin. Şu ana kadar yalnız stub testleriyle doğrulandı.
+11. Birkaç gerçek oturumu AKTİVİTE modunda baştan sona etiketleyip sürekli
+   dataset alın; sınıf dengesi ve `unlabelled` oranı ancak gerçek kullanımla
+   görülür.

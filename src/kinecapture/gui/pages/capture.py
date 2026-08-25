@@ -281,6 +281,8 @@ class CapturePage(Page):
         )
         rgb_card.add_header_widget(self._overlay_toggle)
         self._video = VideoView(theme, placeholder_text="Önizleme kapalı")
+        self._video.set_highlight_subject(True)
+        self._video.clicked.connect(self._video_clicked)
         rgb_card.add_widget(self._video, 1)
         views.addWidget(rgb_card)
 
@@ -369,10 +371,60 @@ class CapturePage(Page):
                 "Aktif gövde",
                 self._body_selector,
                 theme=theme,
-                help_text="Hedef kişi kaybolursa kimlik değişimi metadata'ya yazılır.",
+                help_text=(
+                    "Erişilebilirlik için liste. Asıl yol: görüntüde kişinin "
+                    "üzerine tıklamak."
+                ),
             )
         )
         layout.addWidget(self._take_card)
+
+        # --- who is being recorded -----------------------------------
+        self._subject_card = Card(
+            "Kaydedilecek kişi",
+            subtitle="Görüntüde kişinin üzerine tıklayın.",
+            theme=theme,
+            icon="participant",
+        )
+        self._subject_chip = StatusChip("Kişi seçilmedi", theme=theme, icon="warning")
+        self._subject_card.add_header_widget(self._subject_chip)
+        self._subject_details = KeyValueList(theme)
+        self._subject_card.add_widget(self._subject_details)
+        self._subject_hint = make_label("", role="muted")
+        self._subject_hint.setWordWrap(True)
+        self._subject_card.add_widget(self._subject_hint)
+
+        buttons = QHBoxLayout()
+        self._confirm_subject_button = make_button(
+            "Kimliği yeniden doğrula", theme=theme, icon="check"
+        )
+        self._confirm_subject_button.setToolTip(
+            "Belirsiz durumda, görüntüde doğru kişiye tıkladıktan sonra kilidi "
+            "yeniden kurar. Olay kaydı tutulur."
+        )
+        self._confirm_subject_button.clicked.connect(self._confirm_subject)
+        buttons.addWidget(self._confirm_subject_button)
+        self._clear_subject_button = make_button("Seçimi kaldır", theme=theme)
+        self._clear_subject_button.clicked.connect(self._clear_subject)
+        buttons.addWidget(self._clear_subject_button)
+        buttons.addStretch(1)
+        holder = QWidget()
+        holder.setLayout(buttons)
+        self._subject_card.add_widget(holder)
+        layout.addWidget(self._subject_card)
+
+        # --- the immutable raw archive -------------------------------
+        self._archive_card = Card(
+            "Ham RGB-D arşivi",
+            subtitle="Zorunlu. Kapatılamaz.",
+            theme=theme,
+            icon="dataset",
+        )
+        self._archive_chip = StatusChip("-", theme=theme, icon="info")
+        self._archive_card.add_header_widget(self._archive_chip)
+        self._archive_details = KeyValueList(theme)
+        self._archive_card.add_widget(self._archive_details)
+        layout.addWidget(self._archive_card)
         layout.addStretch(1)
         return wrapper
 
@@ -647,6 +699,11 @@ class CapturePage(Page):
         else:
             self._video.set_rgb(packet.color_frame)
 
+        # During a person-locked session the highlight follows the *subject*,
+        # not whichever body the tracker likes best.
+        lock = service.subject_lock if service else None
+        if lock is not None and lock.is_selected:
+            active_id = lock.tracking_id
         self._video.set_bodies(packet.bodies, spec, active_id=active_id)
         self._skeleton.set_bodies(packet.bodies, spec, active_id=active_id)
 
@@ -658,6 +715,7 @@ class CapturePage(Page):
             self._video.set_badge("")
 
         self._sync_body_selector(packet)
+        self._refresh_subject_card(packet)
 
     def _sync_body_selector(self, packet: FramePacket) -> None:
         ids = sorted(body.tracking_id for body in packet.bodies)
@@ -678,6 +736,179 @@ class CapturePage(Page):
         service = self.state.capture
         if service is not None:
             service.set_active_body_id(self._body_selector.currentData())
+
+
+    # ----------------------------------------------------- subject selection
+    def _video_clicked(self, x: float, y: float) -> None:
+        """Pick the person the operator clicked on.
+
+        The widget reports where the click landed in image pixels; deciding who
+        that is belongs to the capture layer, which owns the lock and the
+        ambiguity rules.
+        """
+        service = self.state.capture
+        if service is None:
+            return
+        if service.is_recording:
+            # A stray click must not silently change who is being recorded
+            # halfway through a take.
+            self.state.notify(
+                "Kayıt sürerken seçim değişmez. Gerekiyorsa 'Kimliği yeniden "
+                "doğrula' düğmesini kullanın.",
+                6000,
+            )
+            return
+        body, ambiguous = service.select_subject_at_pixel(
+            x, y, packet=self._last_packet
+        )
+        if ambiguous:
+            self.state.notify(
+                "İki kişi çok yakın; hangisini kastettiğiniz anlaşılamadı. "
+                "Kişilerin ayrıldığı bir ana bekleyip tekrar tıklayın.",
+                7000,
+            )
+        elif body is None:
+            self.state.notify("Tıklanan noktada kişi yok.", 4000)
+        else:
+            self.state.notify(
+                f"Kaydedilecek kişi seçildi (tracker ID {body.tracking_id}).", 4000
+            )
+        self._redraw_last_frame()
+        self._update_controls()
+
+    def _confirm_subject(self) -> None:
+        """Re-establish the lock on the person under the last click."""
+        service = self.state.capture
+        packet = self._last_packet
+        if service is None or packet is None or not packet.bodies:
+            return
+        candidates = service.subject_candidates
+        if not candidates:
+            self.state.notify(
+                "Önce görüntüde doğru kişinin üzerine tıklayın, sonra "
+                "doğrulayın.",
+                6000,
+            )
+            return
+        service.confirm_subject(candidates[0][0])
+        self.state.notify("Kimlik elle doğrulandı; olay kaydedildi.", 5000)
+        self._redraw_last_frame()
+
+    def _clear_subject(self) -> None:
+        service = self.state.capture
+        if service is None or service.is_recording:
+            return
+        service.clear_subject()
+        self._redraw_last_frame()
+        self._update_controls()
+
+    def _refresh_subject_card(self, packet: FramePacket) -> None:
+        service = self.state.capture
+        if service is None:
+            return
+        lock = service.subject_lock
+        theme = self.theme
+        state = lock.state
+        colour = {
+            "unselected": theme.warning,
+            "locked": theme.success,
+            "temporarily_lost": theme.warning,
+            "reidentifying": theme.warning,
+            "ambiguous": theme.danger,
+        }.get(state.value, theme.text_secondary)
+        icon = "check" if state.is_tracking else "warning"
+        self._subject_chip.set_status(state.label, icon=icon, colour=colour)
+
+        metrics = lock.counters
+        fps = float(service.camera_info.target_fps if service.camera_info else 30) or 30
+        self._subject_details.set_items(
+            [
+                ("Mantıksal kimlik", lock.subject_id or "-"),
+                (
+                    "Eşlenen tracker ID",
+                    str(lock.tracking_id) if lock.tracking_id is not None else "yok",
+                ),
+                ("Kadrajdaki kişi", str(len(packet.bodies))),
+                (
+                    "Kayıp süresi",
+                    f"{metrics['lost_frames'] / fps:.1f} sn"
+                    if metrics["lost_frames"]
+                    else "-",
+                ),
+                (
+                    "Yeniden eşleştirme",
+                    str(metrics["reassociations"]) if lock.is_selected else "-",
+                ),
+                (
+                    "Belirsiz kare",
+                    str(metrics["ambiguous_frames"]) if lock.is_selected else "-",
+                ),
+            ]
+        )
+        if state.value == "ambiguous":
+            self._subject_hint.setText(
+                "Kanıt yetersiz olduğu için başka bir kişiye GEÇİLMEDİ. Doğru "
+                "kişiye tıklayıp 'Kimliği yeniden doğrula' deyin."
+            )
+        elif state.value == "temporarily_lost":
+            self._subject_hint.setText(
+                "Kişi görünmüyor. Kayıt sürüyor; bu kareler 'kişi yok' olarak "
+                "işaretleniyor ve başka bir iskeletle doldurulmuyor."
+            )
+        elif not lock.is_selected:
+            self._subject_hint.setText(
+                "Görüntüde kişinin üzerine tıklayarak kaydedilecek kişiyi seçin."
+            )
+        else:
+            self._subject_hint.setText("")
+        self._confirm_subject_button.setEnabled(lock.is_selected)
+        self._clear_subject_button.setEnabled(
+            lock.is_selected and not service.is_recording
+        )
+
+    def _refresh_archive_card(self) -> None:
+        """Show what the immutable archive will cost before recording starts."""
+        service = self.state.capture
+        session = self.state.session
+        if service is None:
+            return
+        try:
+            estimate = service.raw_archive_estimate(session)
+        except Exception:  # pragma: no cover - defensive
+            return
+        theme = self.theme
+        gigabytes = estimate["total_mb_per_minute"] / 1000.0
+        minutes = estimate["free_minutes"]
+        required = (
+            float(session.capture_profile.min_free_disk_minutes) if session else 3.0
+        )
+        if minutes < required:
+            self._archive_chip.set_status(
+                "Disk yetersiz", icon="warning", colour=theme.danger
+            )
+        else:
+            self._archive_chip.set_status(
+                "Zorunlu ve hazır", icon="check", colour=theme.success
+            )
+        self._archive_details.set_items(
+            [
+                (
+                    "Derinlik arşivi",
+                    "kayıpsız float32"
+                    if estimate["depth_lossless"]
+                    else "nicemlenmiş uint16",
+                ),
+                (
+                    "Renk kaynağı",
+                    "SVO2 (native)"
+                    if estimate["color_source"] == "native_svo2"
+                    else "rgbd chunk'ları",
+                ),
+                ("Tahmini boyut", f"{gigabytes:.2f} GB / dakika"),
+                ("Boş alan", f"{estimate['free_bytes'] / 1e9:.1f} GB"),
+                ("Kayıt süresi kapasitesi", f"{minutes:.0f} dakika"),
+            ]
+        )
 
     # -------------------------------------------------------------- metrics
     def _refresh_metrics(self) -> None:
@@ -883,6 +1114,15 @@ class CapturePage(Page):
             self.state.notify("Önce önizlemeyi başlatın.", 5000)
             return
 
+        lock = service.subject_lock
+        if not lock.is_selected and self._last_packet and self._last_packet.bodies:
+            # Recording without a chosen person would leave the dataset with no
+            # authoritative answer to "whose movement is this?".
+            self.state.notify(
+                "Önce görüntüde kaydedilecek kişinin üzerine tıklayın.", 6000
+            )
+            return
+
         report = getattr(self, "_health_report", None)
         if report is not None and report.is_blocked:
             self.state.notify(
@@ -971,6 +1211,7 @@ class CapturePage(Page):
 
     # -------------------------------------------------------------- controls
     def _update_controls(self) -> None:
+        self._refresh_archive_card()
         service = self.state.capture
         connected = service is not None and service.state is not CaptureState.DISCONNECTED
         recording = service is not None and service.is_recording

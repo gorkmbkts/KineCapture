@@ -27,8 +27,51 @@ gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışı
 | Sürümlü export (manifest / spec / mapping / fingerprint / doğrulama) | Çalışıyor |
 | Seçilebilir iskelet özellikleri (kalite, tracker ham, koordinat, kemik, hız, açı, simetri, özet) | Çalışıyor |
 | Export ekranında aranabilir özellik seçimi + presetler | Çalışıyor |
+| Zorunlu ham RGB-D arşivi (ölçülen derinlik + SVO2) | Çalışıyor, gerçek donanımda doğrulandı |
+| Görüntüye tıklayarak kişi seçimi ve kalıcı kişi kilidi | Çalışıyor, gerçek donanımda doğrulandı |
+| Sürekli aktivite etiketleme ve dataseti | Çalışıyor |
 | KineSynthV3 26-eklem eşleştirmesi | **Kısmi** — 23/26 eklem; 3 eklem eşleşmiyor ve NaN yazılıyor |
 | Otomatik tekrar algılama, çok kameralı kayıt, çok uzmanlı consensus | Uygulanmadı |
+
+### İki dataset üretim modu
+
+Aynı kayıttan iki farklı dataset üretilebilir ve ikisi birbirinden bağımsızdır.
+
+**1. Hareket örnekleri (varsayılan, eskiden beri).** Etiketli her tekrar ayrı
+bir örnektir. Tekrarların dışındaki zaman datasete girmez.
+
+**2. Sürekli aktivite (yeni, isteğe bağlı).** Bir örnek = bir kaydın tamamı,
+gerçek uzunluğunda. Her kare için "kişi ne yapıyordu" etiketi taşır. Bekleme,
+geçiş, egzersiz ve egzersiz dışı hareket birlikte saklanır; egzersizin nerede
+başlayıp bittiği kare bazında hedeftir.
+
+Export ekranında biri, diğeri veya ikisi birden seçilebilir. **Varsayılan
+yalnızca hareket örnekleridir**, yani mevcut iş akışı hiç değişmez.
+
+#### Aktivite sınıfları
+
+| Sınıf | Kod | Anlam |
+|---|---|---|
+| `background` | 0 | Bekleme, nötr duruş, oturma |
+| `transition` | 1 | Başlangıç pozisyonuna geçiş veya oradan çıkış |
+| `target_exercise` | 2 | Tanınması istenen egzersiz (egzersiz kodu taşır) |
+| `other_activity` | 3 | Yürüme, eğilme, kıyafet düzeltme gibi hedef dışı hareket |
+| **etiketlenmemiş** | **-1** | **Hiç kimsenin bakmadığı zaman** |
+
+**`unlabelled` bir sınıf DEĞİLDİR ve `background` sayılmaz.** Kimsenin
+bakmadığı bir kareyi "spor yapılmıyor" saymak, modele etiketleyicinin dikkat
+süresini öğretmek olur. Etiketlenmemiş zaman ayrı sayılır, zaman çizelgesinde
+taralı çizilir, export'ta `activity_label_mask` ile ayrılır ve ancak açık
+onayla arka plana çevrilebilir.
+
+Aktivite durumları **karşılıklı dışlayandır**: iki durum aynı kareyi
+paylaşamaz, çakışma hem GUI'de hem domain'de reddedilir. Bir `target_exercise`
+aralığı bir hareket sample'ına **bağlanabilir**; bağlandığında sınırların tek
+kaynağı hareketin kendisidir, ikisi bir daha ayrışamaz.
+
+Hiç egzersiz içermeyen, tamamı `background`/`other_activity` etiketli bir
+kayıt geçerli bir sürekli-aktivite örneğidir — negatif örnek olmadan
+"egzersize başladı" kararı öğrenilemez.
 
 ### Etiket modeli
 
@@ -152,6 +195,179 @@ Metin alanına yazarken bu kısayollar tetiklenmez.
 
 ---
 
+## Ham RGB-D arşivi
+
+Her gerçek kayıt, ileride yeniden işlenebilmesi için ham RGB ve **ölçülen**
+derinliğiyle saklanır. Bu **zorunludur**: Ayarlar'dan kapatılamaz, ve arşivi
+eksik kalan bir kayıt `FINALIZED` sayılmaz.
+
+### SVO2 gerçekte ne saklıyor?
+
+Bu makinede, bu SDK ile ölçülerek doğrulandı:
+
+| Soru | Ölçülen cevap |
+|---|---|
+| SVO2 RGB'yi geri veriyor mu? | **Evet.** Yeniden açılıp herhangi bir konumdan okunabiliyor. |
+| SVO2 derinliği saklıyor mu? | **Hayır.** Stereo görüntüleri saklar; derinlik okuma anında YENİDEN HESAPLANIR. |
+| Yeniden hesaplanan derinlik ölçülene eşit mi? | **Hayır.** Aynı kaydın aynı konumlarında yer yer **14 metreye varan** fark, geçersiz piksel maskeleri bile farklı. |
+| Varsayılan sıkıştırma kayıpsız mı? | **Hayır.** `H264` kayıplıdır. |
+
+Ölçülen sıkıştırma maliyetleri (HD720/30, gerçek kamera):
+
+| Mod | Boyut |
+|---|---|
+| `H264` (varsayılan, kayıplı) | ~96 MB/dk |
+| `H264_LOSSLESS` | ~1.1 GB/dk |
+| `LOSSLESS` | ~3.0 GB/dk |
+
+Bu yüzden **ölçülen derinlik ayrıca arşivlenir.** Belgede hiçbir yerde SVO2
+için "lossless" denmez; kullanılan mod `raw_capture_manifest.json` içine
+yazılır.
+
+### Derinlik nasıl saklanıyor?
+
+Ölçülerek seçildi (gerçek ZED derinliği üzerinde, yeni bağımlılık kurmadan):
+
+| Şema | Boyut | Kayıpsız |
+|---|---|---|
+| zlib float32 | 5153 MB/dk | evet |
+| **byteshuffle + zlib-1 (varsayılan)** | **3534 MB/dk** | **evet** |
+| temporal XOR + byteshuffle + zlib | 3286 MB/dk | evet |
+| uint16 @ 0.25 mm (isteğe bağlı) | 1612 MB/dk | **hayır** (ölçülen hata 0.13 mm, menzil 16.4 m) |
+
+Kayıpsız sıkıştırmanın zayıf kalması veriden kaynaklanıyor: tek bir karede
+200 000 pikselin 196 010'u farklı değer taşıyor, ardışık değerler arasındaki
+medyan fark 9 mikrometre. Ücretsiz kazanç yok, bu yüzden **varsayılan ölçümü
+korumaktır** ve maliyet kayıttan önce gösterilir. Nicemlenmiş profil
+seçilirse ölçek, geçersiz sentinel ve hassasiyet sürüm dosyasına yazılır ve
+her yerde "kayıplı" olarak işaretlenir.
+
+### Dosya düzeni
+
+```text
+take_.../
+├── raw/
+│   ├── capture.svo2                 # ZED'in kendi stereo kaydı (H264, kayıplı)
+│   ├── raw_capture_manifest.json    # biçim, codec, provenance, senkron sözleşmesi
+│   └── rgbd/
+│       ├── depth_000000.kcd         # ölçülen derinlik, chunk'lı, bağımsız okunur
+│       ├── color_000000.kcc         # yalnız native kayıt yoksa (ör. mock backend)
+│       └── index.jsonl              # kare başına senkronizasyon indeksi
+├── derived/  skeleton.jsonl · proxy.mp4
+└── annotations/ · quality/ · checksums.json
+```
+
+Her chunk kendi başlığını taşır ve tek başına çözülür; elektrik kesintisinde
+yalnız yarım kalan chunk kaybolur, kalan kayıt okunabilir. Her chunk ayrı
+checksum'lanır.
+
+### Zaman eşlemesi
+
+`raw/rgbd/index.jsonl` her kare için şunları taşır:
+
+| Alan | Anlam |
+|---|---|
+| `p` | **Kayıt içi konum** (0 tabanlı). Etiket sınırları ve `skeleton.jsonl` bunu kullanır. |
+| `i` | **Kameranın kendi kare numarası**. Kare düşünce `p` ile ayrışır. |
+| `host_ns` / `cam_ns` | Host ve kamera zaman damgaları |
+| `color` / `depth` / `skel` / `native` | Hangi akışın o kareyi gerçekten aldığı |
+| `subj` | Seçili kişinin otoritatif ilişkilendirmesi |
+
+Akış konumu ile kamera kare numarası birbirinin yerine kullanılamaz. SVO
+konumu ile canlı kare arasında 1:1 sıra **varsayılmaz**: ölçümde SVO2'nin kare
+sayısı canlı kare sayısından bir fazla çıktı, bu yüzden eşleme zaman damgasıyla
+doğrulanmalıdır.
+
+### Kayıp, arıza ve kurtarma
+
+- Ham kayıt başlatılamıyorsa **gerçek kayıt hiç başlamaz**.
+- Preview kaybı, kayıt kuyruğu kaybı, RGB arşiv kaybı, derinlik arşiv kaybı ve
+  backend kaybı **ayrı ayrı** sayılır.
+- Renk veya derinlik karesi kaybedilirse take `PARTIAL` kalır; yazılan hiçbir
+  dosya silinmez.
+- Native kayıt düzgün durdurulamazsa bu yutulmaz; take `FINALIZED` olmaz.
+- Finalize sırasında chunk'lar okunur, boyutlar ve checksum'lar alınır.
+- Kayıttan önce tahmini GB/dakika ve diskin kaç dakikaya yettiği gösterilir;
+  yetmiyorsa kayıt başlamaz. Çözünürlük, FPS veya derinlik **sessizce
+  düşürülmez**.
+
+### Ham veriyi geri okuma
+
+```bash
+conda run -n KineSynth python -m kinecapture.tools.extract_raw <take_dir> --verify
+```
+
+```bash
+conda run -n KineSynth python -m kinecapture.tools.extract_raw <take_dir> --out <dir> --range 100 220
+```
+
+Doğrulama hiçbir şey yazmaz. Çıkarım, ham veriye dokunmadan yeni bir türetilmiş
+paket ve onu açıklayan bir manifest üretir. Derinlik **her zaman** arşivden
+okunur, SVO2'den değil.
+
+## Kaydedilecek kişiyi seçmek
+
+Canlı görüntüde kişinin üzerine tıklanır. Seçilen kişi çerçeveyle vurgulanır,
+diğerleri soluk çizilir. Hit testing tracker'ın kendi 2B eklem noktalarını
+kullanır; letterbox ve DPI ölçeği hesaba katılarak tıklama doğru kaynak
+pikseline çevrilir. İki kişi üst üsteyse **rastgele seçim yapılmaz**, kullanıcı
+uyarılır.
+
+### Tracker kimliği ile mantıksal kişi ayrıdır
+
+| Kavram | Nedir |
+|---|---|
+| `subject_id` | Kayda özel, seçim anında üretilen ve kayıt boyunca **değişmeyen** mantıksal kimlik |
+| `tracker_body_id` | O karede eşlenen SDK kimliği; kişi kadrajdan çıkıp girince değişebilir |
+
+Seçim anı, ilk tracker kimliği, kare, zaman damgası ve yöntem metadata'ya
+yazılır. Her kare için seçili kişinin hangi gövdeyle eşlendiği — veya
+bulunamadığı — kaydedilir.
+
+### Kaybolma ve yeniden ilişkilendirme
+
+```text
+UNSELECTED → LOCKED → TEMPORARILY_LOST → REIDENTIFYING → LOCKED
+                                     ↘ AMBIGUOUS (kullanıcı doğrulaması gerekir)
+```
+
+- Seçili kimlik görünürken doğrudan o kullanılır.
+- Kısa kaybolmalarda kilit kaldırılmaz; kareler "kişi yok" olarak işaretlenir.
+- **Başka bir kişiye asla sessizce geçilmez.** En yüksek güvenli gövdeyi
+  otomatik seçmek yoktur.
+- **Seçili kişiyle aynı karede görülmüş bir tracker kimliği bir daha seçili
+  kişi olamaz.** İki gövde aynı anda görünüyorsa iki farklı kişidir; bu, benzer
+  ölçülü bir antrenörün veriye karışmasını engelleyen en güçlü kanıttır.
+- Otomatik yeniden eşleştirme yalnız konum sürekliliği, uzuv oranları ve boy
+  kanıtı hem eşiği hem ikinci adaya göre farkı geçerse yapılır.
+- Kanıt yetersizse veya iki aday yakınsa durum `AMBIGUOUS` kalır ve kullanıcıdan
+  doğrulama istenir.
+- Bütün kararlar ve **reddedilen** kararlar kare, zaman damgası, eski/yeni
+  kimlik, yöntem, skor ve gerekçeyle audit kaydına yazılır.
+
+**Verilen garanti** "kişi her koşulda tanınır" değildir — hiçbir gövde
+takipçisi bunu veremez. Garanti şudur: **sistem belirsizken başka kişiye
+geçmez; otomatik eşleştirme yalnız yeterli kanıtla yapılır; emin olunamayan
+kareler boş kalır.**
+
+### Gizlilik sınırı
+
+Yüz tanıma yok. Görünüm gömülmesi yok. Kayıtlar arası kalıcı biyometrik kimlik
+veritabanı yok. Kişi eşleştirmesi yalnız uzuv oranları ve boy kullanır ve
+kapsamı **tek bir kayıtla** sınırlıdır.
+
+### Ham tespitler korunur
+
+`skeleton.jsonl` kadrajdaki **bütün** gövdeleri saklamaya devam eder. Bunun
+yanında hangi gövdenin seçili kişi olduğu kare bazında otoritatif olarak
+yazılır. Etiketleme ve export yalnız bu otoritatif ilişkilendirmeyi kullanır;
+`primary_body()` fallback'i ground truth üretiminde kullanılmaz. Seçili kişinin
+bulunmadığı karelerde koordinatlar NaN ve `subject_present_mask` False olur.
+
+Kişi kilidinden **önce** alınmış kayıtlar için otomatik migration yapılmaz:
+sürekli export bu kayıtlarda kaydın baskın tracker kimliğini kullanır ve
+manifestte `legacy_active_body: true` diye işaretler.
+
 ## Disk yapısı
 
 ```text
@@ -209,6 +425,8 @@ Her sürüm (`dataset_v001`, `dataset_v002`, …) şunları içerir:
 | `manifest.json` | Örnek listesi, ilişkiler, provenance, dizi sözleşmesi |
 | `skeleton_spec.json` | Eklem adları, sırası, kenarlar, koordinat sistemi, birim |
 | `feature_spec.json` | Seçilen özellikler, sürümleri, dizi sözleşmeleri, sütun adları, birim, eksik veri politikası, availability |
+| `continuous/*.npz` | Sürekli aktivite örnekleri (yalnız o mod seçiliyse) |
+| `activity_spec.json` | Aktivite sınıf kodları, kare bazlı hedef dizileri, maskeler, split gruplama kuralı |
 | `label_mapping.json` | Sınıf kodları ve sabit indeksleri |
 | `dataset_fingerprint.json` | Bileşen bazlı + birleşik parmak izi |
 | `validation_report.json` | Doğrulama sonucu, hatalar, uyarılar |
@@ -357,6 +575,45 @@ doğrulanmış antropometrik model olmadığı için öyle adlandırılmamışt�
 yüksekliği ve ayak teması gibi büyüklükler, doğrulanmış bir dünya/zemin
 kalibrasyonu gerektirdiği için hiç üretilmez.
 
+### Sürekli aktivite dizi sözleşmesi
+
+Sürekli örnek kaydın tamamıdır; `T` gerçek kayıt uzunluğudur. Interpolation,
+padding, sabit uzunluğa resampling ve augmentation **uygulanmaz**.
+
+| Dizi | Şekil / tip | Anlam |
+|---|---|---|
+| `joints_xyz` | `[T,J,3] float32` | **Seçili kişinin** ham koordinatları; kişi yoksa NaN |
+| `frame_indices` / `camera_timestamps_ns` | `[T] int64` | Kamera kare numarası ve zaman damgası |
+| `subject_present_mask` | `[T] bool` | Seçili kişi bulundu mu |
+| `subject_source_tracking_id` | `[T] int64` | Eşlenen SDK kimliği; yoksa `-1` |
+| `subject_association_confidence` | `[T] float32` | Eşleştirme güveni; kişi yoksa NaN |
+| `activity_state_code` | `[T] int16` | 0/1/2/3 sınıf, `-1` **etiketlenmemiş** |
+| `activity_label_mask` | `[T] bool` | Aktivite etiketi bulunan kareler |
+| `exercise_active` | `[T] bool` | Hedef egzersizin yapıldığı kareler |
+| `exercise_class_index` | `[T] int32` | `label_mapping` indeksi; yoksa `-1` |
+| `exercise_class_valid_mask` | `[T] bool` | Sınıfın bilindiği kareler |
+| `exercise_start_target` / `exercise_end_target` | `[T] uint8` | Aralığın ilk / son karesinde 1 |
+| `correctness_code` | `[T] int8` | 0=correct, 1=incorrect, `-1` uygulanamaz |
+| `error_label_mask` | `[T] bool` | Hata etiketinin **uygulanabilir** olduğu kareler |
+| `error_multi_hot` | `[T,C] uint8` | Yalnız `error_label_mask` True iken yorumlanır |
+
+Üç ayrım hiçbir zaman bulanıklaştırılmaz:
+
+- **Etiketlenmemiş ≠ arka plan.** `-1` + `activity_label_mask=False`.
+- **Kişi yok ≠ kişi hareketsiz.** `subject_present_mask=False` + NaN koordinat.
+- **Hata etiketi yok ≠ hata yok.** `error_label_mask=False`, "bu kareye
+  sorulmadı" demektir.
+
+Tek karelik bir egzersizde `start` ve `end` aynı karede 1 olabilir.
+
+Ham RGB-D **her örneğe kopyalanmaz**: manifest, kaydın kendi arşivine
+checksum'lu bir referans taşır. Aynı kayıttan türetilen bütün pencereler aynı
+`split_group_id`'yi taşır ve train/val/test arasında bölünmemelidir.
+
+Fingerprint aktivite aralıklarına, egzersiz bağlantılarına, kişi ilişkilendirme
+özetine, seçili dataset moduna, dizi içeriği checksum'una ve ham kaynak
+checksum'una duyarlıdır.
+
 ### KineSynthV3 uyumluluğu
 
 ZED'in native `BODY_34` formatı KineSynthV3'ün 26 eklemli `rehab24_6_mocap`
@@ -387,8 +644,10 @@ CaptureService         capture/service.py
    │        └── recording queue (sınırlı) ── writer thread ── TakeWriter
 CameraBackend          camera/base.py → camera/mock.py, camera/zed.py
 Depolama               dataset/workspace.py, recording/, playback/, annotations/
-Export                 export/release.py
+Export                 export/release.py, export/continuous.py
 Features               features/ (registry, roller, açılar, türevler, özet)
+Kişi kilidi            capture/subject_lock.py (Qt'siz, sürümlü, deterministik)
+Ham arşiv              recording/rgbd_archive.py (chunk'lı, thread havuzlu)
 Domain                 domain/ (Qt ve pyzed içermez)
 ```
 
@@ -408,7 +667,7 @@ Domain                 domain/ (Qt ve pyzed içermez)
 conda run -n KineSynth python -m pytest -k export
 ```
 
-**438 test, tamamı geçiyor** (~122 s). Testler gerçek kamera gerektirmez ve
+**528 test, tamamı geçiyor** (~160 s). Testler gerçek kamera gerektirmez ve
 gerçek zaman beklemez; GUI testleri `QT_QPA_PLATFORM=offscreen` ile çalışır.
 
 Kapsam: ortam ve opsiyonel `pyzed` importu, config doğrulama, domain
@@ -438,10 +697,32 @@ sözleşmesi, fingerprint'in özellik seçimine / sürümüne / dizi içeriğine
 duyarlılığı, hiç üretilemeyen özelliğin doğrulamayı düşürmesi ve export
 ekranının preset/bağımlılık/kullanılamaz durum davranışı.
 
+Ham arşiv, kişi kilidi ve sürekli aktivite için ayrıca: derinliğin bit düzeyinde
+kayıpsız round-trip'i (NaN ve sonsuz dâhil), nicemlenmiş codec'in beyan ettiği
+hatayı aşmaması, yarım kalan chunk'ın tespiti ve yalnız o chunk'ın kaybı,
+kuyruk taşmasının kayıp olarak sayılması, arşivi eksik take'in `FINALIZED`
+olmaması, native kaydın durdurulamamasının yutulmaması, disk ön kontrolünün
+kaydı engellemesi, checksum bozulmasının yakalanması, çıkarım aracının ham
+veriye dokunmaması; letterbox'lı tıklamanın doğru piksele düşmesi, üst üste iki
+kişide seçim yapılmaması, seçili kişi görünürken daha yüksek güvenli yabancıya
+geçilmemesi, seçili kişi kaybolunca fallback yapılmaması, aynı kimlik dönünce
+takibin sürmesi, yeni kimliğe yalnız kanıtla geçilmesi, aynı karede görülmüş
+kimliğin diskalifiye olması, kimlik yeniden kullanımının işaretlenmesi, elle
+doğrulamanın olay üretmesi, kişi olmayan karede koordinatın NaN kalması;
+aktivite CRUD/undo/redo/round-trip, çakışan durumun reddi, etiketlenmemiş
+zamanın arka plana dönüşmemesi, hareket-sample bağlantısının tek kaynak
+kalması, kare bazlı hedeflerin aralık sınırlarıyla birebir uyuşması, hiç
+egzersiz içermeyen kaydın geçerli negatif örnek olması, iki datasetin yan yana
+yayımlanabilmesi, eski kayıtların legacy olarak işaretlenmesi ve türevlerin
+kişi-yok boşluğunun üzerinden hesaplanmaması.
+
 ---
 
 ## Gizlilik
 
+- **Yüz tanıma, görünüm gömülmesi veya kayıtlar arası biyometrik kimlik
+  veritabanı yoktur.** Kişi eşleştirmesi yalnız uzuv oranı ve boy kullanır ve
+  kapsamı tek bir kayıtla sınırlıdır.
 - Katılımcılar varsayılan olarak anonim kod ile temsil edilir (`P0001`).
 - Dosya adlarında ve loglarda kişisel bilgi bulunmaz.
 - Onam yalnızca durum olarak saklanır; onam metni bu uygulamada tutulmaz.

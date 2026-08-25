@@ -38,11 +38,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QMouseEvent,
     QPainter,
@@ -64,6 +65,7 @@ _CONFIDENCE_H = 18
 _MARKER_H = 10
 _MOVEMENT_H = 34
 _ERROR_H = 32
+_ACTIVITY_H = 26
 _GAP = 3
 
 #: How close to an edge counts as grabbing the handle rather than the body.
@@ -85,16 +87,24 @@ _ERROR_PALETTE = (
 
 
 class TimelineMode(str, Enum):
-    """Which level of the label hierarchy the timeline is editing."""
+    """Which layer of labels the timeline is editing.
+
+    The first two are the two levels of the repetition model. The third is the
+    activity strip, which describes the whole take rather than a repetition
+    inside it - a different question, so a different mode rather than a
+    different colour in the same lane.
+    """
 
     MOVEMENT = "movement"
     ERROR = "error"
+    ACTIVITY = "activity"
 
     @property
     def label(self) -> str:
         return {
             TimelineMode.MOVEMENT: "Hareket aralıkları",
             TimelineMode.ERROR: "Hata aralıkları",
+            TimelineMode.ACTIVITY: "Aktivite durumları",
         }[self]
 
 
@@ -136,6 +146,11 @@ class TimelineWidget(QWidget):
     sample_create_requested = Signal(int, int)
     sample_double_clicked = Signal(str)
 
+    activity_selected = Signal(str)
+    activity_bounds_changed = Signal(str, int, int)
+    activity_create_requested = Signal(int, int)
+    activity_double_clicked = Signal(str)
+
     interval_selected = Signal(str)
     interval_bounds_changed = Signal(str, int, int)
     interval_create_requested = Signal(int, int)
@@ -153,6 +168,8 @@ class TimelineWidget(QWidget):
 
         self._samples: list[MovementSample] = []
         self._selected_sample_id: Optional[str] = None
+        self._activity: list[Any] = []
+        self._selected_activity_id = ""
         self._selected_interval_id: Optional[str] = None
         self._error_labels: dict[str, str] = {}
 
@@ -175,7 +192,8 @@ class TimelineWidget(QWidget):
             + _MARKER_H
             + _MOVEMENT_H
             + _ERROR_H
-            + 6 * _GAP
+            + _ACTIVITY_H
+            + 7 * _GAP
         )
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
@@ -330,6 +348,8 @@ class TimelineWidget(QWidget):
         rects["movements"] = QRectF(0, y, width, _MOVEMENT_H)
         y += _MOVEMENT_H + _GAP
         rects["errors"] = QRectF(0, y, width, _ERROR_H)
+        y += _ERROR_H + _GAP
+        rects["activity"] = QRectF(0, y, width, _ACTIVITY_H)
         return rects
 
     @property
@@ -449,6 +469,10 @@ class TimelineWidget(QWidget):
             handled = self._press_movement_mode(point, lanes, frame)
             if handled:
                 return
+        elif self._editable and self._mode is TimelineMode.ACTIVITY:
+            handled = self._press_activity_mode(point, lanes, frame)
+            if handled:
+                return
 
         self._drag = _Drag(kind="playhead")
         self.set_position(frame)
@@ -510,6 +534,20 @@ class TimelineWidget(QWidget):
             self.update()
             return True
         return False
+
+    def _press_activity_mode(self, point: QPointF, lanes, frame: int) -> bool:
+        """Select an existing activity band, or start drawing a new one."""
+        if not lanes["activity"].contains(point):
+            return False
+        existing = self._activity_at(frame)
+        if existing is not None:
+            self._selected_activity_id = existing.interval_id
+            self.activity_selected.emit(existing.interval_id)
+            self.update()
+            return True
+        self._drag = _Drag(kind="create", lane="activity", anchor_frame=frame)
+        self.update()
+        return True
 
     def mouseMoveEvent(self, event: QMouseEvent) -> None:
         point = QPointF(event.position())
@@ -611,6 +649,8 @@ class TimelineWidget(QWidget):
             if end - start >= _MIN_DRAG_FRAMES:
                 if drag.lane == "error":
                     self.interval_create_requested.emit(start, end)
+                elif drag.lane == "activity":
+                    self.activity_create_requested.emit(start, end)
                 else:
                     self.sample_create_requested.emit(start, end)
             else:
@@ -621,6 +661,12 @@ class TimelineWidget(QWidget):
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         point = QPointF(event.position())
+        if self._mode is TimelineMode.ACTIVITY:
+            frame = self._x_to_frame(point.x())
+            existing = self._activity_at(frame)
+            if existing is not None:
+                self.activity_double_clicked.emit(existing.interval_id)
+                return
         if self._mode is TimelineMode.ERROR:
             hit = self._interval_at(point)
             if hit is not None:
@@ -683,6 +729,7 @@ class TimelineWidget(QWidget):
         self._paint_markers(painter, lanes["markers"])
         self._paint_samples(painter, lanes["movements"])
         self._paint_error_lane(painter, lanes["errors"])
+        self._paint_activity_lane(painter, lanes["activity"])
         self._paint_pending_create(painter, lanes)
         self._paint_playhead(painter)
         painter.end()
@@ -861,6 +908,134 @@ class TimelineWidget(QWidget):
                     label,
                 )
 
+
+    # ------------------------------------------------------- activity lane
+    #: One colour per activity state. Never the only cue: every band is also
+    #: labelled, and unlabelled time is drawn as a hatched gap rather than as
+    #: another colour, because it is not another class.
+    _ACTIVITY_COLOURS: dict[str, str] = {
+        "background": "#64748b",
+        "transition": "#a78bfa",
+        "target_exercise": "#22c55e",
+        "other_activity": "#f59e0b",
+    }
+
+    def set_activity_intervals(
+        self, intervals: Sequence[Any], selected_id: str = ""
+    ) -> None:
+        """Show the activity strip. Purely display; the repository owns it."""
+        self._activity = list(intervals)
+        self._selected_activity_id = selected_id
+        self.update()
+
+    def set_selected_activity(self, interval_id: str) -> None:
+        self._selected_activity_id = interval_id
+        self.update()
+
+    def _paint_activity_lane(self, painter: QPainter, lane: QRectF) -> None:
+        theme = self._theme
+        painter.setPen(QColor(theme.text_muted))
+        painter.drawText(
+            self._caption_rect(lane),
+            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+            "AKTİVİTE",
+        )
+        plot = self._plot_rect(lane)
+        painter.fillRect(plot, QColor(theme.bg_base))
+
+        if not self._activity:
+            painter.setPen(QColor(theme.text_muted))
+            painter.drawText(
+                plot,
+                Qt.AlignmentFlag.AlignCenter,
+                "Aktivite etiketi yok"
+                if self._mode is not TimelineMode.ACTIVITY
+                else "Sürükleyerek aktivite aralığı çizin",
+            )
+            return
+
+        # Unlabelled stretches first, so a labelled band always paints over
+        # them and the eye reads the gaps as gaps.
+        self._paint_unlabelled_gaps(painter, plot)
+
+        for interval in self._activity:
+            left = self._frame_to_x(interval.start_frame)
+            right = self._frame_to_x(interval.end_frame + 1)
+            if right < plot.left() or left > plot.right():
+                continue
+            box = QRectF(
+                max(left, plot.left()),
+                plot.top() + 2,
+                max(2.0, min(right, plot.right()) - max(left, plot.left())),
+                plot.height() - 4,
+            )
+            colour = QColor(
+                self._ACTIVITY_COLOURS.get(interval.state.value, theme.text_muted)
+            )
+            is_selected = interval.interval_id == self._selected_activity_id
+            fill = QColor(colour)
+            fill.setAlpha(200 if is_selected else 130)
+            painter.setBrush(fill)
+            pen = QPen(colour)
+            pen.setWidthF(2.0 if is_selected else 1.0)
+            painter.setPen(pen)
+            painter.drawRoundedRect(box, 3, 3)
+
+            text = interval.state.label
+            if interval.exercise:
+                text += f" · {interval.exercise}"
+            if box.width() > 46:
+                painter.setPen(QColor(theme.text_primary))
+                font = painter.font()
+                font.setPointSizeF(max(7.0, font.pointSizeF() - 1.5))
+                painter.save()
+                painter.setFont(font)
+                painter.drawText(
+                    box.adjusted(4, 0, -4, 0),
+                    Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                    text,
+                )
+                painter.restore()
+
+    def _paint_unlabelled_gaps(self, painter: QPainter, plot: QRectF) -> None:
+        """Draw what nobody has labelled, as an absence rather than a class."""
+        covered = sorted(
+            (i.start_frame, i.end_frame) for i in self._activity if i.end_frame >= i.start_frame
+        )
+        cursor = 0
+        gaps: list[tuple[int, int]] = []
+        for start, end in covered:
+            if start > cursor:
+                gaps.append((cursor, start - 1))
+            cursor = max(cursor, end + 1)
+        if cursor < self._frame_count:
+            gaps.append((cursor, self._frame_count - 1))
+
+        colour = QColor(self._theme.text_muted)
+        colour.setAlpha(48)
+        brush = QBrush(colour, Qt.BrushStyle.BDiagPattern)
+        painter.setPen(Qt.PenStyle.NoPen)
+        for low, high in gaps:
+            left = self._frame_to_x(low)
+            right = self._frame_to_x(high + 1)
+            if right < plot.left() or left > plot.right():
+                continue
+            painter.fillRect(
+                QRectF(
+                    max(left, plot.left()),
+                    plot.top() + 2,
+                    max(1.0, min(right, plot.right()) - max(left, plot.left())),
+                    plot.height() - 4,
+                ),
+                brush,
+            )
+
+    def _activity_at(self, frame: int) -> Optional[Any]:
+        for interval in self._activity:
+            if interval.start_frame <= frame <= interval.end_frame:
+                return interval
+        return None
+
     def _paint_error_lane(self, painter: QPainter, lane: QRectF) -> None:
         theme = self._theme
         painter.fillRect(self._plot_rect(lane), QColor(theme.bg_base))
@@ -979,7 +1154,9 @@ class TimelineWidget(QWidget):
         if self._drag is None or self._drag.kind != "create":
             return
         current = self._x_to_frame(self.mapFromGlobal(self.cursor().pos()).x())
-        lane_key = "errors" if self._drag.lane == "error" else "movements"
+        lane_key = {"error": "errors", "activity": "activity"}.get(
+            self._drag.lane, "movements"
+        )
         lane = lanes[lane_key]
         if self._drag.lane == "error":
             sample = self.selected_sample()

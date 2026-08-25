@@ -46,16 +46,28 @@ logger = get_logger(__name__)
 
 @dataclass
 class SkeletonFrame:
-    """One frame of the recorded pose stream."""
+    """One frame of the recorded pose stream.
+
+    ``bodies`` keeps *every* detection, for audit and for future reprocessing.
+    ``subject`` is the authoritative answer to "which of them is the person
+    this recording is about", written at capture time by the subject lock.
+    """
 
     frame_index: int
     host_timestamp_ns: int
     camera_timestamp_ns: int
     bodies: tuple[BodyPose, ...] = ()
     active_body_id: Optional[int] = None
+    position: Optional[int] = None
+    subject: Optional[dict[str, Any]] = None
 
     def body(self, tracking_id: Optional[int]) -> Optional[BodyPose]:
-        """The requested body, the recorded active one, or the best available."""
+        """The requested body, the recorded active one, or the best available.
+
+        The final fallback makes this convenient for *display*, and unsuitable
+        for ground truth: it will happily return a stranger. Dataset code uses
+        :meth:`subject_body` instead.
+        """
         if tracking_id is not None:
             for body in self.bodies:
                 if body.tracking_id == tracking_id:
@@ -67,6 +79,33 @@ class SkeletonFrame:
         if not self.bodies:
             return None
         return max(self.bodies, key=lambda b: b.valid_joint_ratio)
+
+    def subject_body(self) -> Optional[BodyPose]:
+        """The locked subject, or ``None``. Never anybody else.
+
+        There is no fallback here on purpose. If the subject was not found in
+        this frame, the honest answer is that it was not found - substituting
+        the best-tracked body is precisely how another person's movement ends
+        up labelled as the participant's.
+        """
+        if not self.subject:
+            return None
+        tracker_id = self.subject.get("tracker_id")
+        if tracker_id is None:
+            return None
+        for body in self.bodies:
+            if body.tracking_id == int(tracker_id):
+                return body
+        return None
+
+    @property
+    def subject_state(self) -> str:
+        return str((self.subject or {}).get("state", "unselected"))
+
+    @property
+    def subject_confidence(self) -> float:
+        value = (self.subject or {}).get("confidence")
+        return float(value) if value is not None else float("nan")
 
 
 @dataclass
@@ -270,6 +309,68 @@ class SkeletonStream:
                 found.update(body.available_fields())
         return tuple(sorted(found))
 
+    # ------------------------------------------------------ selected subject
+    @property
+    def has_subject_lock(self) -> bool:
+        """Whether this take recorded an authoritative subject association."""
+        return any(frame.subject for frame in self.frames)
+
+    @property
+    def subject_id(self) -> str:
+        return str(self.header.get("subject_id") or "")
+
+    def subject_arrays(
+        self, *, start: int = 0, end: Optional[int] = None, num_joints: int = 0
+    ) -> dict[str, np.ndarray]:
+        """The selected subject's own timeline over a playback range.
+
+        Frames where the subject was not found give all-NaN coordinates, a
+        ``False`` presence flag and the ``-1`` sentinel for the tracker id.
+        Nothing is borrowed from another body, and nothing is interpolated.
+
+        A take recorded before the subject lock existed has no association at
+        all; that is reported through ``has_association`` rather than being
+        approximated from ``active_id``, which was only ever a display hint.
+        """
+        stop = len(self.frames) if end is None else min(end + 1, len(self.frames))
+        window = self.frames[start:stop]
+        count = len(window)
+
+        joints = num_joints
+        if joints <= 0:
+            for frame in window:
+                body = frame.subject_body()
+                if body is not None:
+                    joints = body.num_joints
+                    break
+        positions = np.full((count, max(joints, 0), 3), np.nan, dtype=np.float32)
+        confidences = np.full((count, max(joints, 0)), np.nan, dtype=np.float32)
+        present = np.zeros(count, dtype=bool)
+        tracker_ids = np.full(count, -1, dtype=np.int64)
+        association = np.full(count, np.nan, dtype=np.float32)
+        states: list[str] = []
+
+        for offset, frame in enumerate(window):
+            states.append(frame.subject_state)
+            association[offset] = frame.subject_confidence
+            body = frame.subject_body()
+            if body is None:
+                continue
+            present[offset] = True
+            tracker_ids[offset] = int(body.tracking_id)
+            if joints and body.num_joints == joints:
+                positions[offset] = body.joint_positions_xyz
+                confidences[offset] = body.joint_confidences
+        return {
+            "joints_xyz": positions,
+            "joint_confidences": confidences,
+            "subject_present_mask": present,
+            "subject_source_tracking_id": tracker_ids,
+            "subject_association_confidence": association,
+            "subject_states": np.asarray(states),
+            "has_association": np.asarray([self.has_subject_lock]),
+        }
+
     def coverage_curve(self, tracking_id: Optional[int]) -> np.ndarray:
         """``float32 [T]`` fraction of usable joints per frame, for the timeline."""
         values = np.zeros(len(self.frames), dtype=np.float32)
@@ -313,6 +414,10 @@ def load_skeleton_stream(path: Path) -> SkeletonStream:
                     camera_timestamp_ns=int(record.get("cam_ns", 0)),
                     bodies=bodies,
                     active_body_id=record.get("active_id"),
+                    position=(
+                        int(record["p"]) if record.get("p") is not None else None
+                    ),
+                    subject=record.get("subject"),
                 )
             )
         elif kind == "marker":

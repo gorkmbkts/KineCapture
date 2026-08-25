@@ -19,6 +19,14 @@ from typing import Any, Iterable, Optional, Sequence
 
 from kinecapture.core.logging import get_logger
 from kinecapture.dataset.workspace import ProjectWorkspace
+from kinecapture.domain.activity import (
+    ActivityCoverage,
+    ActivityInterval,
+    ActivityState,
+    ContinuousReadiness,
+    evaluate_continuous,
+    measure_coverage,
+)
 from kinecapture.domain.enums import (
     Correctness,
     DataOrigin,
@@ -49,6 +57,10 @@ class TakeRow:
     #: The project's error vocabulary at the time the row was built, so
     #: readiness can be judged without another disk read.
     known_error_codes: tuple[str, ...] = ()
+    #: The optional activity strip. Empty for a take nobody labelled that way,
+    #: which is a normal state rather than a defect.
+    activity_intervals: list[ActivityInterval] = field(default_factory=list)
+    known_exercise_codes: tuple[str, ...] = ()
 
     # Pre-redesign attribute name, kept so older call sites keep working.
     @property
@@ -70,6 +82,42 @@ class TakeRow:
 
     def readiness(self, sample: MovementSample) -> SampleReadiness:
         return evaluate_sample(sample, known_error_codes=self.known_error_codes)[0]
+
+    # ----------------------------------------------------- continuous layer
+    def continuous_readiness(
+        self, *, require_full_coverage: bool = False
+    ) -> ContinuousReadiness:
+        """Whether this take can be a continuous example.
+
+        Independent of movement-sample readiness on purpose: a recording of
+        somebody who never performed the exercise is useless to one dataset and
+        valuable to the other.
+        """
+        return evaluate_continuous(
+            self.activity_intervals,
+            self.take.metrics.frames_written,
+            known_exercises=self.known_exercise_codes,
+            require_full_coverage=require_full_coverage,
+        )[0]
+
+    def activity_coverage(self) -> ActivityCoverage:
+        return measure_coverage(
+            self.activity_intervals,
+            self.take.metrics.frames_written,
+            known_exercises=self.known_exercise_codes,
+        )
+
+    @property
+    def has_target_exercise(self) -> bool:
+        return any(
+            interval.state is ActivityState.TARGET_EXERCISE
+            for interval in self.activity_intervals
+        )
+
+    @property
+    def subject_coverage(self) -> float:
+        """Fraction of recorded frames where the selected person was found."""
+        return self.take.metrics.subject_coverage
 
     @property
     def ready_samples(self) -> list[MovementSample]:
@@ -182,6 +230,19 @@ class DatasetSummary:
     error_intervals: int = 0
     takes_needing_review: int = 0
 
+    # --- continuous activity, counted apart from repetition counts ------
+    # "Ready movements" and "takes ready for continuous export" answer two
+    # different questions and are never added together.
+    continuous_ready_takes: int = 0
+    continuous_unlabelled_takes: int = 0
+    negative_takes: int = 0
+    activity_seconds: dict[str, float] = field(default_factory=dict)
+    unlabelled_activity_seconds: float = 0.0
+    exercise_start_events: int = 0
+    takes_with_subject_lock: int = 0
+    takes_with_raw_archive_loss: int = 0
+    mean_subject_coverage: float = 0.0
+
     correctness_counts: dict[str, int] = field(default_factory=dict)
     exercise_counts: dict[str, int] = field(default_factory=dict)
     readiness_counts: dict[str, int] = field(default_factory=dict)
@@ -234,6 +295,7 @@ class DatasetIndex:
         codes = {p.participant_id: p.code for p in self._participants}
         self._sessions = self.workspace.list_sessions()
         error_codes = self.workspace.label_schema.error_type_codes()
+        exercise_codes = self.workspace.label_schema.exercise_codes()
 
         rows: list[TakeRow] = []
         for take in self.workspace.list_takes():
@@ -244,6 +306,8 @@ class DatasetIndex:
                     session_id=take.session_id,
                     samples=self.workspace.load_samples(take),
                     known_error_codes=error_codes,
+                    activity_intervals=self.workspace.load_activity_intervals(take),
+                    known_exercise_codes=exercise_codes,
                 )
             )
         self._rows = sorted(rows, key=lambda r: r.take.started_at, reverse=True)
@@ -340,6 +404,8 @@ class DatasetIndex:
         error_classes: Counter[str] = Counter()
         coverage_total = 0.0
         coverage_count = 0
+        subject_total = 0.0
+        subject_count = 0
 
         for row in selected:
             take = row.take
@@ -361,6 +427,31 @@ class DatasetIndex:
             if take.metrics.tracking_coverage:
                 coverage_total += float(take.metrics.tracking_coverage)
                 coverage_count += 1
+
+            # --- the continuous layer, kept separate on purpose ------
+            fps = float(take.capture_profile.fps or 30.0)
+            activity_coverage = row.activity_coverage()
+            for state, frames in activity_coverage.per_state.items():
+                summary.activity_seconds[state] = summary.activity_seconds.get(
+                    state, 0.0
+                ) + (frames / fps if fps > 0 else 0.0)
+            summary.unlabelled_activity_seconds += (
+                activity_coverage.unlabelled_frames / fps if fps > 0 else 0.0
+            )
+            summary.exercise_start_events += activity_coverage.exercise_starts
+            if row.activity_intervals:
+                if row.continuous_readiness().is_ready:
+                    summary.continuous_ready_takes += 1
+                if not row.has_target_exercise:
+                    summary.negative_takes += 1
+            else:
+                summary.continuous_unlabelled_takes += 1
+            if take.metrics.subject_locked_frames or take.metrics.subject_lost_frames:
+                summary.takes_with_subject_lock += 1
+                subject_total += take.metrics.subject_coverage
+                subject_count += 1
+            if take.metrics.has_raw_archive_loss:
+                summary.takes_with_raw_archive_loss += 1
 
             for sample in row.samples:
                 if sample.status is SegmentStatus.EXCLUDED:
@@ -387,6 +478,16 @@ class DatasetIndex:
         summary.error_class_counts = dict(sorted(error_classes.items()))
         summary.mean_tracking_coverage = (
             coverage_total / coverage_count if coverage_count else 0.0
+        )
+        summary.mean_subject_coverage = (
+            subject_total / subject_count if subject_count else 0.0
+        )
+        summary.activity_seconds = {
+            key: round(value, 2)
+            for key, value in sorted(summary.activity_seconds.items())
+        }
+        summary.unlabelled_activity_seconds = round(
+            summary.unlabelled_activity_seconds, 2
         )
         return summary
 

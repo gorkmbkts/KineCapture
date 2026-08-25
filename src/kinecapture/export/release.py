@@ -58,7 +58,15 @@ from kinecapture.core.logging import get_logger
 from kinecapture.core.paths import ensure_dir, long_path, path_exists
 from kinecapture.dataset.index import DatasetIndex, TakeRow, exportable_rows
 from kinecapture.dataset.workspace import ProjectWorkspace
+from kinecapture.domain.activity import (
+    UNLABELLED_CODE,
+    ActivityState,
+    ContinuousReadiness,
+    activity_label_mapping,
+    evaluate_continuous,
+)
 from kinecapture.domain.project import MovementSample, evaluate_sample
+from kinecapture.export import continuous as continuous_contract
 from kinecapture.features.base import Availability, SourceField
 from kinecapture.features.compute import FeatureContext, compute_features
 from kinecapture.features.registry import get_feature, order_features
@@ -130,10 +138,28 @@ class ExportOptions:
     #: ids above are authoritative; a stale preset name can never change what
     #: gets written.
     feature_preset: Optional[str] = None
+    #: Which datasets this release contains. The default is the movement-sample
+    #: release this application has always produced, so an existing workflow
+    #: keeps working untouched.
+    export_movement_samples: bool = True
+    export_continuous: bool = False
+    #: Refuse to publish a continuous example whose timeline is not fully
+    #: labelled. Off by default: a partially labelled take is still usable
+    #: through ``activity_label_mask``.
+    require_full_activity_coverage: bool = False
     notes: str = ""
 
     def __post_init__(self) -> None:
         self.feature_ids = tuple(self.feature_ids or ())
+        if not (self.export_movement_samples or self.export_continuous):
+            raise ExportError(
+                "En az bir dataset biçimi seçilmelidir.",
+                code="no_dataset_mode",
+                remedy=(
+                    "Hareket-sample datasetini, sürekli aktivite datasetini "
+                    "veya ikisini birden seçin."
+                ),
+            )
 
     def resolved_feature_ids(self) -> tuple[str, ...]:
         """The full, ordered selection actually computed.
@@ -167,6 +193,7 @@ class ExportResult:
     fingerprint: str
     validation_passed: bool
     warnings: list[str] = field(default_factory=list)
+    continuous_count: int = 0
 
 
 def next_release_name(releases_dir: Path) -> str:
@@ -213,11 +240,19 @@ class ReleaseBuilder:
         return self.workspace.label_schema.error_type_codes()
 
     def select_rows(self, rows: Optional[Sequence[TakeRow]] = None) -> list[TakeRow]:
-        """Takes eligible under the current options."""
+        """Takes eligible under the current options.
+
+        The two datasets have different admission rules, and conflating them
+        would quietly lose exactly the recordings the continuous dataset is
+        for. A take of somebody who never performed the exercise has no ready
+        movement sample and is a perfectly good continuous example - so when
+        the continuous dataset is selected, a usable take is a candidate
+        whether or not any repetition in it was labelled.
+        """
         candidates = list(rows) if rows is not None else list(self.index.rows)
         if not self.options.include_synthetic:
             candidates = [row for row in candidates if not row.take.is_synthetic]
-        if self.options.include_unready:
+        if self.options.include_unready or self.options.export_continuous:
             return [row for row in candidates if row.take.usable_for_export]
         return exportable_rows(candidates)
 
@@ -392,6 +427,8 @@ class ReleaseBuilder:
         mapping_used: Optional[JointMapping] = None
         completed = 0
         interval_total = 0
+        continuous_entries: list[dict[str, Any]] = []
+        continuous_dir = staging / "continuous"
 
         feature_ids = self.options.resolved_feature_ids()
         availability: dict[str, dict[str, int]] = {
@@ -404,7 +441,12 @@ class ReleaseBuilder:
             take = row.take
             samples, rejected = self._partition_samples(row)
             excluded.extend(rejected)
-            if not samples:
+            if not self.options.export_movement_samples:
+                samples = []
+            # A take with no ready repetition is still a valid continuous
+            # example - somebody standing around is exactly the negative the
+            # continuous dataset needs.
+            if not samples and not self.options.export_continuous:
                 continue
 
             paths = self.workspace.take_paths(take)
@@ -605,7 +647,28 @@ class ReleaseBuilder:
                 fingerprint_keys.append(self._fingerprint_key(entry))
                 report(completed, f"{row.participant_code} / hareket {sample.index}")
 
-        if not manifest_samples:
+            if self.options.export_continuous:
+                entry = self._write_continuous(
+                    row=row,
+                    stream=stream,
+                    source_spec=source_spec,
+                    output_spec=output_spec,
+                    mapping=mapping,
+                    directory=continuous_dir,
+                    error_classes=error_classes,
+                    error_index=error_index,
+                    feature_ids=feature_ids,
+                    availability=availability,
+                    excluded=excluded,
+                )
+                if entry is not None:
+                    continuous_entries.append(entry)
+                    fingerprint_keys.append(self._continuous_fingerprint_key(entry))
+                report(completed, f"{row.participant_code}: sürekli örnek")
+
+        if self.options.export_movement_samples and not manifest_samples and not (
+            self.options.export_continuous and continuous_entries
+        ):
             # An empty release is never published. Say *why* it is empty: the
             # exclusion reasons are the actionable part, not the empty count.
             reasons = sorted({item["reason"] for item in excluded})
@@ -626,6 +689,21 @@ class ReleaseBuilder:
                 details={"excluded": excluded[:20]},
             )
 
+        if self.options.export_continuous and not continuous_entries and not (
+            self.options.export_movement_samples and manifest_samples
+        ):
+            reasons = sorted({item["reason"] for item in excluded})
+            raise ExportError(
+                "Sürekli aktivite datasetine uygun kayıt bulunamadı."
+                + (f" Nedenler: {', '.join(reasons)}." if reasons else ""),
+                code="export_empty_continuous",
+                remedy=(
+                    "İnceleme ekranında AKTİVİTE modunda en az bir kaydın "
+                    "zaman çizelgesini etiketleyin."
+                ),
+                details={"excluded": excluded[:20]},
+            )
+
         report(total, "Manifest yazılıyor")
         return self._write_documents(
             staging=staging,
@@ -642,7 +720,316 @@ class ReleaseBuilder:
             availability=availability,
             source_fields=source_fields,
             resolved_angles=resolved_angles,
+            continuous_entries=continuous_entries,
         )
+
+    # ------------------------------------------------- continuous activity
+    def _write_continuous(
+        self,
+        *,
+        row: TakeRow,
+        stream: Any,
+        source_spec: SkeletonSpec,
+        output_spec: SkeletonSpec,
+        mapping: Optional[JointMapping],
+        directory: Path,
+        error_classes: Sequence[str],
+        error_index: Mapping[str, int],
+        feature_ids: Sequence[str],
+        availability: dict[str, dict[str, int]],
+        excluded: list[dict[str, Any]],
+    ) -> Optional[dict[str, Any]]:
+        """Write one whole take as a continuous-activity example.
+
+        The pose used here is the **selected subject's**, not the best-tracked
+        body. A frame where the subject was not found is NaN with a ``False``
+        presence flag, so a stranger's movement can never arrive labelled as
+        the participant's.
+        """
+        take = row.take
+        intervals = self.workspace.load_activity_intervals(take)
+        frames = stream.frame_count
+        readiness, coverage = evaluate_continuous(
+            intervals,
+            frames,
+            known_exercises=self.workspace.label_schema.exercise_codes(),
+            require_full_coverage=self.options.require_full_activity_coverage,
+        )
+        if not readiness.is_ready:
+            excluded.append(
+                {
+                    "take_id": take.take_id,
+                    "reason": f"continuous_{readiness.value}",
+                    "message": (
+                        f"{row.participant_code}: sürekli aktivite datasetine "
+                        f"uygun değil ({readiness.label})."
+                    ),
+                    "detail": coverage.to_dict(),
+                }
+            )
+            return None
+
+        # A take recorded before the subject lock existed has no authoritative
+        # association. Rather than exporting an all-NaN example or inventing an
+        # identity, the take's own recorded active body is used and the release
+        # says plainly that this is a legacy heuristic, not a locked subject.
+        legacy_subject = not stream.has_subject_lock
+        if legacy_subject:
+            tracking_id = self._preferred_tracking_id(stream)
+            joints = stream.joint_array(tracking_id)
+            confidences_all = stream.confidence_array(tracking_id)
+            present = np.isfinite(joints).all(axis=2).any(axis=1) if joints.size else (
+                np.zeros(stream.frame_count, dtype=bool)
+            )
+            subject = {
+                "joints_xyz": joints,
+                "joint_confidences": confidences_all,
+                "subject_present_mask": present,
+                "subject_source_tracking_id": np.where(
+                    present, int(tracking_id if tracking_id is not None else -1), -1
+                ).astype(np.int64),
+                "subject_association_confidence": np.full(
+                    stream.frame_count, np.nan, dtype=np.float32
+                ),
+                "subject_states": np.asarray(["legacy_active_id"] * stream.frame_count),
+                "has_association": np.asarray([False]),
+            }
+        else:
+            subject = stream.subject_arrays(num_joints=source_spec.num_joints)
+        joints = subject["joints_xyz"]
+        if joints.shape[1] == 0:
+            excluded.append(
+                {
+                    "take_id": take.take_id,
+                    "reason": "continuous_no_subject_pose",
+                    "message": (
+                        f"{row.participant_code}: kayıtta seçili kişiye ait poz "
+                        "yok."
+                    ),
+                }
+            )
+            return None
+        confidences = subject["joint_confidences"]
+        if mapping is not None:
+            joints = mapping.apply(joints)
+            confidences = mapping.apply_confidence(confidences)
+
+        frame_indices = np.asarray(
+            [f.frame_index for f in stream.frames], dtype=np.int64
+        )
+        timestamps = np.asarray(
+            [f.camera_timestamp_ns for f in stream.frames], dtype=np.int64
+        )
+        exercise_index = self.workspace.label_schema.label_mapping()["exercise"][
+            "code_to_index"
+        ]
+        targets = continuous_contract.build_targets(
+            frames=frames,
+            intervals=intervals,
+            samples=row.samples,
+            exercise_index=exercise_index,
+            error_index=error_index,
+            store_error_arrays=self.options.store_error_target_arrays,
+        )
+
+        payload: dict[str, np.ndarray] = {
+            "joints_xyz": joints.astype(np.float32),
+            "frame_indices": frame_indices,
+            "camera_timestamps_ns": timestamps,
+            "subject_present_mask": subject["subject_present_mask"],
+            "subject_source_tracking_id": subject["subject_source_tracking_id"],
+            "subject_association_confidence": subject[
+                "subject_association_confidence"
+            ],
+        }
+        payload.update(targets.arrays())
+        if self.options.store_confidences:
+            payload["joint_confidences"] = confidences.astype(np.float32)
+
+        # The same feature registry runs here. Derivatives are gap-aware, so a
+        # stretch where the subject was absent produces NaN rather than a
+        # velocity computed across the hole.
+        context = FeatureContext(
+            spec=output_spec,
+            joints=joints.astype(np.float32),
+            timestamps_ns=timestamps,
+            frame_indices=frame_indices,
+            target_fps=float(take.capture_profile.fps or 0.0),
+            confidences=confidences.astype(np.float32),
+            raw=self._raw_arrays(stream, None, 0, max(0, frames - 1), mapping),
+            mapping_active=mapping is not None,
+            **stream.body_state_arrays(None, start=0, end=max(0, frames - 1)),
+        )
+        computed = compute_features(context, feature_ids)
+        for key, value in computed.arrays.items():
+            payload.setdefault(key, value)
+        if not self.options.store_confidences:
+            payload.pop("joint_confidences", None)
+        for feature_id, level in computed.availability.items():
+            availability[feature_id][level.value] += 1
+
+        ensure_dir(directory)
+        sample_id = f"{take.take_id}__continuous"
+        path = directory / f"{sample_id}.npz"
+        with open(long_path(path), "wb") as handle:
+            np.savez_compressed(handle, **payload)
+
+        camera = take.camera_info
+        raw_reference = self._raw_source_reference(take)
+        entry: dict[str, Any] = {
+            "sample_id": sample_id,
+            "file": f"continuous/{path.name}",
+            "kind": "continuous_activity",
+            "project_id": take.project_id,
+            "participant_id": take.participant_id,
+            "participant_code": row.participant_code,
+            "session_id": take.session_id,
+            "take_id": take.take_id,
+            # Windows derived from this take must never be split apart; the
+            # group id is what a downstream splitter groups on.
+            "split_group_id": take.take_id,
+            "num_frames": int(frames),
+            "num_joints": int(joints.shape[1]),
+            "duration_s": round(float(stream.duration_s), 3),
+            "skeleton_format": output_spec.name,
+            "coordinate_system": output_spec.coordinate_system,
+            "length_unit": output_spec.length_unit,
+            "activity_intervals": targets.intervals,
+            "activity_summary": continuous_contract.summarise(
+                intervals=intervals,
+                frames=frames,
+                fps=float(take.capture_profile.fps or 30.0),
+                known_exercises=self.workspace.label_schema.exercise_codes(),
+            ),
+            "movement_samples": [
+                {
+                    "movement_sample_id": sample.sample_id,
+                    "start_position": sample.start_frame,
+                    "end_position": sample.end_frame,
+                    "exercise": sample.exercise,
+                    "correctness": sample.correctness.value,
+                }
+                for sample in row.samples
+                if sample.is_active and sample.correctness.is_decided
+            ],
+            "subject": self._subject_summary(take, subject),
+            "raw_source": raw_reference,
+            "origin": take.origin.value,
+            "source_backend": camera.backend if camera else "unknown",
+            "camera_model": camera.model if camera else "unknown",
+            "sdk_version": camera.sdk_version if camera else None,
+            "capture_profile": take.capture_profile.to_dict(),
+            "features": computed.availability_dict(),
+            "array_keys": sorted(payload),
+            "checksum": hash_file(path),
+        }
+        return entry
+
+    @staticmethod
+    def _subject_summary(take: Any, subject: Mapping[str, Any]) -> dict[str, Any]:
+        """How well the selected person was actually followed."""
+        present = np.asarray(subject["subject_present_mask"], dtype=bool)
+        states = [str(value) for value in subject["subject_states"]]
+        metrics = take.metrics
+        legacy = not bool(subject["has_association"][0])
+        return {
+            "has_association": not legacy,
+            "legacy_active_body": legacy,
+            "legacy_note": (
+                "Bu kayıt kişi kilidinden önce alınmış. Poz, kaydın baskın "
+                "tracker kimliğinden gelir; otoritatif bir seçili kişi "
+                "ilişkilendirmesi YOKTUR ve uydurulmamıştır."
+            )
+            if legacy
+            else "",
+            "present_frames": int(present.sum()),
+            "absent_frames": int((~present).sum()),
+            "coverage": round(float(present.mean()) if present.size else 0.0, 4),
+            "ambiguous_frames": sum(1 for s in states if s == "ambiguous"),
+            "lost_frames": sum(1 for s in states if s == "temporarily_lost"),
+            "reassociations": int(metrics.subject_reassociations),
+            "manual_confirmations": int(metrics.subject_manual_confirmations),
+            "distinct_tracking_ids": sorted(
+                {
+                    int(value)
+                    for value in np.asarray(subject["subject_source_tracking_id"])
+                    if int(value) >= 0
+                }
+            ),
+            "note": (
+                "Seçili kişi bulunamayan karelerde koordinatlar NaN'dır; başka "
+                "bir gövdeyle doldurulmaz."
+            ),
+        }
+
+    def _raw_source_reference(self, take: Any) -> dict[str, Any]:
+        """Point at the immutable archive rather than copying it into the release.
+
+        A release that duplicated the RGB-D archive would multiply gigabytes
+        for every export. The reference plus its checksums is enough to find
+        and verify the source; an explicit extraction is a separate action.
+        """
+        paths = self.workspace.take_paths(take)
+        reference: dict[str, Any] = {
+            "take_directory": str(paths.root),
+            "native_recording": (
+                "raw/capture.svo2" if path_exists(paths.native_recording) else None
+            ),
+            "rgbd_archive": "raw/rgbd/" if paths.rgbd_dir.is_dir() else None,
+            "raw_manifest": (
+                "raw/raw_capture_manifest.json"
+                if path_exists(paths.raw_manifest)
+                else None
+            ),
+            "copied_into_release": False,
+            "note": (
+                "Ham RGB-D her örneğe kopyalanmaz; otoritatif arşiv kaydın "
+                "kendi klasöründedir ve checksum'larla doğrulanır."
+            ),
+        }
+        if path_exists(paths.checksums):
+            from kinecapture.core.jsonio import read_json_mapping
+
+            try:
+                manifest = read_json_mapping(paths.checksums)
+                files = manifest.get("files") or {}
+                reference["checksums"] = {
+                    key: value.get("checksum")
+                    for key, value in files.items()
+                    if isinstance(value, Mapping) and key.startswith("raw/")
+                }
+            except Exception:  # pragma: no cover - a damaged sidecar
+                reference["checksums"] = None
+        return reference
+
+    @staticmethod
+    def _continuous_fingerprint_key(entry: Mapping[str, Any]) -> dict[str, Any]:
+        """Continuous identity: the timeline, the subject and the bytes."""
+        return {
+            "sample_id": entry["sample_id"],
+            "kind": "continuous_activity",
+            "participant_id": entry["participant_id"],
+            "session_id": entry["session_id"],
+            "take_id": entry["take_id"],
+            "num_frames": entry["num_frames"],
+            "num_joints": entry["num_joints"],
+            "activity": [
+                [
+                    item["state"],
+                    item["start_position"],
+                    item["end_position"],
+                    item.get("exercise", ""),
+                ]
+                for item in entry["activity_intervals"]
+            ],
+            "subject": {
+                "coverage": entry["subject"]["coverage"],
+                "reassociations": entry["subject"]["reassociations"],
+                "tracking_ids": entry["subject"]["distinct_tracking_ids"],
+            },
+            "raw_source": entry["raw_source"].get("checksums"),
+            "checksum": entry.get("checksum"),
+        }
 
     # --------------------------------------------------------- raw fields
     @staticmethod
@@ -815,6 +1202,7 @@ class ReleaseBuilder:
         availability: Mapping[str, Mapping[str, int]],
         source_fields: Mapping[str, int],
         resolved_angles: Optional[Sequence[Mapping[str, Any]]],
+        continuous_entries: Sequence[Mapping[str, Any]] = (),
     ) -> ExportResult:
         project = self.workspace.project
         schema = self.workspace.label_schema
@@ -856,12 +1244,35 @@ class ReleaseBuilder:
                     get_feature(feature_id).fingerprint_key()
                     for feature_id in feature_ids
                 ],
+                "dataset_modes": {
+                    "movement_samples": self.options.export_movement_samples,
+                    "continuous_activity": self.options.export_continuous,
+                },
+                "activity_contract": continuous_contract.CONTINUOUS_CONTRACT_VERSION,
             },
         )
 
         write_json(staging / "skeleton_spec.json", skeleton_block)
         write_json(staging / "label_mapping.json", label_mapping)
         write_json(staging / "feature_spec.json", feature_spec)
+        if continuous_entries:
+            write_json(
+                staging / "activity_spec.json",
+                {
+                    "schema_version": RELEASE_SCHEMA_VERSION,
+                    "contract": continuous_contract.array_contract(
+                        store_error_arrays=self.options.store_error_target_arrays
+                    ),
+                    "exercise_mapping": label_mapping["exercise"],
+                    "error_mapping": label_mapping["error_types"],
+                    "examples": len(continuous_entries),
+                    "split_grouping": (
+                        "Aynı kayıttan türetilen bütün pencereler aynı "
+                        "split_group_id'yi taşır ve train/val/test arasında "
+                        "bölünmemelidir."
+                    ),
+                },
+            )
         write_json(staging / "dataset_fingerprint.json", fingerprint)
         write_json(
             staging / "manifest.json",
@@ -951,9 +1362,21 @@ class ReleaseBuilder:
                         "olarak yazılır ve availability'de raporlanır."
                     ),
                 },
+                "dataset_modes": {
+                    "movement_samples": self.options.export_movement_samples,
+                    "continuous_activity": self.options.export_continuous,
+                    "note": (
+                        "İki sözleşme birbirinden ayrıdır: hareket örnekleri "
+                        "samples/ altında, sürekli aktivite örnekleri "
+                        "continuous/ altındadır ve activity_spec.json ile "
+                        "açıklanır."
+                    ),
+                },
+                "continuous_samples": list(continuous_entries),
                 "export_config": export_config,
                 "counts": {
                     "samples": len(samples),
+                    "continuous_samples": len(continuous_entries),
                     "error_intervals": interval_total,
                     "excluded": len(excluded),
                     "participants": len({s["participant_id"] for s in samples}),
@@ -968,7 +1391,13 @@ class ReleaseBuilder:
         )
 
         report = self._validate(
-            staging, samples, warnings, error_classes, feature_ids, availability
+            staging,
+            samples,
+            warnings,
+            error_classes,
+            feature_ids,
+            availability,
+            continuous_entries,
         )
         write_json(staging / "validation_report.json", report)
         return ExportResult(
@@ -980,6 +1409,7 @@ class ReleaseBuilder:
             fingerprint=fingerprint["fingerprint"],
             validation_passed=bool(report["passed"]),
             warnings=list(report["warnings"]),
+            continuous_count=len(continuous_entries),
         )
 
     @staticmethod
@@ -1088,6 +1518,7 @@ class ReleaseBuilder:
         error_classes: Sequence[str],
         feature_ids: Sequence[str] = (),
         availability: Optional[Mapping[str, Mapping[str, int]]] = None,
+        continuous_entries: Sequence[Mapping[str, Any]] = (),
     ) -> dict[str, Any]:
         """Re-read every written sample and check it against its manifest entry."""
         errors: list[dict[str, Any]] = []
@@ -1306,6 +1737,49 @@ class ReleaseBuilder:
                 }
             )
 
+        errors.extend(self._validate_continuous(staging, continuous_entries))
+        if continuous_entries:
+            unlabelled = sum(
+                int(entry["activity_summary"]["unlabelled_frames"])
+                for entry in continuous_entries
+            )
+            if unlabelled:
+                all_warnings.append(
+                    f"Sürekli örneklerde toplam {unlabelled} kare "
+                    "etiketlenmemiş; bu kareler activity_label_mask ile "
+                    "işaretli ve background SAYILMIYOR."
+                )
+            negatives = sum(
+                1
+                for entry in continuous_entries
+                if not entry["activity_summary"]["has_target_exercise"]
+            )
+            legacy = [
+                entry["sample_id"]
+                for entry in continuous_entries
+                if entry["subject"].get("legacy_active_body")
+            ]
+            if legacy:
+                all_warnings.append(
+                    f"{len(legacy)} sürekli örnek kişi kilidinden ÖNCE alınmış "
+                    "kayıtlardan geliyor; pozları otoritatif bir seçili kişi "
+                    "ilişkilendirmesine değil, kaydın baskın tracker kimliğine "
+                    "dayanıyor."
+                )
+            checks.append(
+                {
+                    "check": "continuous_contract",
+                    "passed": not any(
+                        e["issue"].startswith("continuous_") for e in errors
+                    ),
+                    "detail": (
+                        f"{len(continuous_entries)} sürekli örnek; {negatives} "
+                        "tanesi hiç hedef egzersiz içermiyor (geçerli negatif "
+                        "örnek). Etiketlenmemiş kareler background sayılmadı."
+                    ),
+                }
+            )
+
         checks.append(
             {
                 "check": "participant_grouping_preserved",
@@ -1321,6 +1795,7 @@ class ReleaseBuilder:
             "validated_at": utc_now_iso(),
             "passed": not errors,
             "sample_count": len(samples),
+            "continuous_sample_count": len(continuous_entries),
             "error_interval_count": sum(
                 len(s["error_intervals"]) for s in samples
             ),
@@ -1421,6 +1896,119 @@ class ReleaseBuilder:
                         "mask": mask_key,
                     }
                 )
+        return problems
+
+
+    @staticmethod
+    def _validate_continuous(
+        staging: Path, entries: Sequence[Mapping[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """Re-read each continuous example and check it against its own promises.
+
+        The checks that matter here are the ones a consumer would otherwise
+        discover during training: an array of the wrong length, a start target
+        that is not where the manifest says the exercise began, and - most
+        importantly - unlabelled frames that leaked into the background class.
+        """
+        problems: list[dict[str, Any]] = []
+        for entry in entries:
+            sample_id = entry["sample_id"]
+            path = staging / entry["file"]
+            if not path_exists(path):
+                problems.append(
+                    {"sample_id": sample_id, "issue": "continuous_file_missing"}
+                )
+                continue
+            with np.load(long_path(path)) as payload:
+                frames = int(entry["num_frames"])
+                for key in (
+                    "joints_xyz",
+                    "frame_indices",
+                    "camera_timestamps_ns",
+                    "subject_present_mask",
+                    "activity_state_code",
+                    "activity_label_mask",
+                    "exercise_active",
+                    "exercise_start_target",
+                    "exercise_end_target",
+                ):
+                    if key not in payload:
+                        problems.append(
+                            {
+                                "sample_id": sample_id,
+                                "issue": "continuous_array_missing",
+                                "array": key,
+                            }
+                        )
+                        continue
+                    if int(np.asarray(payload[key]).shape[0]) != frames:
+                        problems.append(
+                            {
+                                "sample_id": sample_id,
+                                "issue": "continuous_length_mismatch",
+                                "array": key,
+                                "expected": frames,
+                                "actual": int(np.asarray(payload[key]).shape[0]),
+                            }
+                        )
+                if "activity_state_code" not in payload:
+                    continue
+
+                codes = np.asarray(payload["activity_state_code"])
+                mask = np.asarray(payload["activity_label_mask"], dtype=bool)
+                # The single most damaging possible error in this contract.
+                if np.any(codes[~mask] != UNLABELLED_CODE):
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "continuous_unlabelled_leaked_into_class",
+                            "detail": (
+                                "Etiketlenmemiş kare bir aktivite sınıfı kodu "
+                                "taşıyor."
+                            ),
+                        }
+                    )
+                if np.any(codes[mask] == UNLABELLED_CODE):
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "continuous_mask_code_mismatch",
+                        }
+                    )
+
+                starts = np.flatnonzero(np.asarray(payload["exercise_start_target"]))
+                ends = np.flatnonzero(np.asarray(payload["exercise_end_target"]))
+                declared = [
+                    item
+                    for item in entry["activity_intervals"]
+                    if item["state"] == ActivityState.TARGET_EXERCISE.value
+                ]
+                if sorted(starts.tolist()) != sorted(
+                    item["start_position"] for item in declared
+                ) or sorted(ends.tolist()) != sorted(
+                    item["end_position"] for item in declared
+                ):
+                    problems.append(
+                        {
+                            "sample_id": sample_id,
+                            "issue": "continuous_boundary_target_mismatch",
+                        }
+                    )
+
+                if "subject_present_mask" in payload and "joints_xyz" in payload:
+                    present = np.asarray(payload["subject_present_mask"], dtype=bool)
+                    joints = np.asarray(payload["joints_xyz"])
+                    if joints.size and np.isfinite(joints[~present]).any():
+                        problems.append(
+                            {
+                                "sample_id": sample_id,
+                                "issue": "continuous_absent_subject_has_pose",
+                                "detail": (
+                                    "Seçili kişinin bulunmadığı karede koordinat "
+                                    "var; başka bir gövdeden gelmiş olabilir."
+                                ),
+                            }
+                        )
         return problems
 
     @staticmethod

@@ -197,13 +197,74 @@ class SettingsPage(Page):
             FieldRow("Algılama güven eşiği", self._detection_confidence, theme=theme)
         )
 
-        self._native_recording = QCheckBox("Native SVO2 kaydı yaz (ham, değişmez)")
-        capture.add_widget(self._native_recording)
-        self._store_depth = QCheckBox("Derinlik karelerini ayrıca sakla")
-        self._store_depth.setToolTip(
-            "SVO2 derinliği yeniden üretebildiği için varsayılan olarak kapalıdır."
+        # The old "store depth frames" checkbox was removed: it wrote a value
+        # nothing ever read, and its tooltip claimed the SVO2 could regenerate
+        # depth. Measured on this machine, it cannot - replaying a fresh SVO2
+        # returns a different depth map from the one the camera produced. So
+        # the archive is mandatory and the only remaining choice is how it is
+        # encoded.
+        self._archive_note = make_label(
+            "Ham RGB-D arşivi ZORUNLUDUR ve kapatılamaz. SVO2 stereo "
+            "görüntüleri saklar; derinlik yeniden oynatmada YENİDEN HESAPLANIR "
+            "ve ölçülen derinlikle aynı değildir, bu yüzden ölçülen derinlik "
+            "ayrıca arşivlenir.",
+            role="muted",
         )
-        capture.add_widget(self._store_depth)
+        self._archive_note.setWordWrap(True)
+        capture.add_widget(self._archive_note)
+
+        self._depth_archive = QComboBox()
+        self._depth_archive.addItem(
+            "Kayıpsız float32  (~3.5 GB/dk, ölçülen)", "float32_lossless"
+        )
+        self._depth_archive.addItem(
+            "Nicemlenmiş uint16, 0.25 mm  (~1.6 GB/dk, KAYIPLI)",
+            "uint16_quantised",
+        )
+        self._depth_archive.setToolTip(
+            "Nicemlenmiş profil ölçülen 0.13 mm hata ve 16.4 m menzil sınırı "
+            "getirir; sürüm dosyasında kayıplı olarak işaretlenir."
+        )
+        capture.add_widget(
+            FieldRow("Derinlik arşivi", self._depth_archive, theme=theme)
+        )
+
+        self._native_compression = QComboBox()
+        for value, label in (
+            ("H264", "H264  (kayıplı, ~96 MB/dk - ölçüldü)"),
+            ("H264_LOSSLESS", "H264 kayıpsız  (~1.1 GB/dk - ölçüldü)"),
+            ("LOSSLESS", "Kayıpsız  (~3.0 GB/dk - ölçüldü)"),
+        ):
+            self._native_compression.addItem(label, value)
+        self._native_compression.setToolTip(
+            "SVO2 sıkıştırması. Varsayılan H264 KAYIPLIDIR; sürüm dosyasında "
+            "böyle yazılır."
+        )
+        capture.add_widget(
+            FieldRow("SVO2 sıkıştırması", self._native_compression, theme=theme)
+        )
+
+        self._min_free_minutes = QSpinBox()
+        self._min_free_minutes.setRange(0, 240)
+        self._min_free_minutes.setSuffix(" dk")
+        self._min_free_minutes.setToolTip(
+            "Diskte bu kadar kayıt için yer yoksa kayıt başlamaz. Çözünürlük "
+            "veya FPS sessizce düşürülmez."
+        )
+        capture.add_widget(
+            FieldRow(
+                "En az boş disk", self._min_free_minutes, theme=theme,
+                help_text="0 = kontrol kapalı (önerilmez).",
+            )
+        )
+
+        self._native_recording = QCheckBox(
+            "Native SVO2 kaydı yaz (ham stereo görüntü)"
+        )
+        self._native_recording.setToolTip(
+            "Gerçek kamerada zorunludur: kapatılırsa kayıt başlamaz."
+        )
+        capture.add_widget(self._native_recording)
 
         self._proxy_width = QSpinBox()
         self._proxy_width.setRange(160, 1920)
@@ -402,7 +463,13 @@ class SettingsPage(Page):
         self._body_fitting.setChecked(capture.enable_body_fitting)
         self._detection_confidence.setValue(capture.detection_confidence)
         self._native_recording.setChecked(capture.store_native_recording)
-        self._store_depth.setChecked(capture.store_depth_frames)
+        archive_index = self._depth_archive.findData(capture.depth_archive)
+        self._depth_archive.setCurrentIndex(max(0, archive_index))
+        compression_index = self._native_compression.findData(
+            capture.native_compression
+        )
+        self._native_compression.setCurrentIndex(max(0, compression_index))
+        self._min_free_minutes.setValue(int(capture.min_free_disk_minutes))
         self._proxy_width.setValue(capture.proxy_video_width)
 
         mock = config.mock
@@ -435,7 +502,9 @@ class SettingsPage(Page):
         capture.enable_body_fitting = self._body_fitting.isChecked()
         capture.detection_confidence = self._detection_confidence.value()
         capture.store_native_recording = self._native_recording.isChecked()
-        capture.store_depth_frames = self._store_depth.isChecked()
+        capture.depth_archive = str(self._depth_archive.currentData())
+        capture.native_compression = str(self._native_compression.currentData())
+        capture.min_free_disk_minutes = float(self._min_free_minutes.value())
         capture.proxy_video_width = self._proxy_width.value()
 
         mock = config.mock

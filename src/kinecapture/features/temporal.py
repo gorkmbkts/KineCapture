@@ -107,7 +107,8 @@ def central_difference(
 
     Interior samples use ``(x[t+1] - x[t-1]) / (s[t+1] - s[t-1])``, which is
     exact for constant velocity even when the sampling is irregular. The ends
-    use the single adjacent step.
+    use the single adjacent step. A sample that is itself missing gets no
+    derivative even when both its neighbours are present.
     """
     array = np.asarray(values, dtype=np.float64)
     frames = array.shape[0]
@@ -124,7 +125,11 @@ def central_difference(
         span = stamps[right] - stamps[left]
         if not np.isfinite(span) or span <= 0:
             return
-        ok = allowed & finite[left] & finite[right]
+        # The sample being differentiated must exist too, not only its two
+        # neighbours. A frame where the subject was not seen has no velocity;
+        # interpolating one across the hole would invent motion for a person
+        # who was not there.
+        ok = allowed & finite[left] & finite[right] & finite[target]
         delta = array[right] - array[left]
         broadcast = ok[..., None] if array.ndim > mask.ndim else ok
         result[target] = np.where(broadcast, delta / span, np.nan)

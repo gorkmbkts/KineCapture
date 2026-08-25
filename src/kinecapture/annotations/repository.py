@@ -49,6 +49,16 @@ from kinecapture.domain.enums import (
     SegmentSource,
     SegmentStatus,
 )
+from kinecapture.domain.activity import (
+    ActivityCoverage,
+    ActivityInterval,
+    ActivityState,
+    ContinuousReadiness,
+    evaluate_continuous,
+    measure_coverage,
+    sort_intervals,
+    unlabelled_gaps,
+)
 from kinecapture.domain.labels import LabelOption
 from kinecapture.domain.project import (
     ErrorInterval,
@@ -66,6 +76,14 @@ logger = get_logger(__name__)
 MAX_HISTORY = 100
 
 ChangeListener = Callable[[], None]
+
+
+@dataclass
+class _State:
+    """One point in the undo history: both label layers together."""
+
+    samples: list[MovementSample]
+    activity: list[ActivityInterval]
 
 
 @dataclass
@@ -129,7 +147,16 @@ class MergeReport:
 
 
 class AnnotationRepository:
-    """Editable view of one take's movement samples and their error intervals."""
+    """Editable view of one take's labels.
+
+    Two layers live here side by side. The **movement samples** answer "was
+    this repetition correct, and where did it go wrong?". The **activity
+    intervals** answer "what was the person doing at this moment?" over the
+    whole take. They are edited independently, share one undo history, and are
+    saved into the same sidecar - but neither can silently change the other,
+    except where a target-exercise interval is deliberately linked to a sample,
+    in which case the sample owns the boundary and the link keeps them equal.
+    """
 
     def __init__(
         self,
@@ -145,8 +172,9 @@ class AnnotationRepository:
         self.annotator = annotator
         self._samples: list[MovementSample] = workspace.load_samples(take)
         renumber_samples(self._samples)
-        self._undo: list[list[MovementSample]] = []
-        self._redo: list[list[MovementSample]] = []
+        self._activity: list[ActivityInterval] = workspace.load_activity_intervals(take)
+        self._undo: list[_State] = []
+        self._redo: list[_State] = []
         self._dirty = False
         self._last_saved_at: Optional[str] = None
         self._listeners: list[ChangeListener] = []
@@ -211,9 +239,23 @@ class AnnotationRepository:
         return validate_samples(self._samples, frame_count=self.frame_count)
 
     # -------------------------------------------------------------- history
+    def _capture(self) -> "_State":
+        return _State(
+            samples=copy.deepcopy(self._samples),
+            activity=copy.deepcopy(self._activity),
+        )
+
+    def _restore(self, state: "_State") -> None:
+        self._samples = state.samples
+        self._activity = state.activity
+
     def _snapshot(self) -> None:
-        """Push the current state onto the undo stack before mutating it."""
-        self._undo.append(copy.deepcopy(self._samples))
+        """Push the current state onto the undo stack before mutating it.
+
+        Both layers are captured together: a single Ctrl+Z should undo the last
+        edit, not leave the activity strip a step behind the samples.
+        """
+        self._undo.append(self._capture())
         if len(self._undo) > MAX_HISTORY:
             del self._undo[0]
         self._redo.clear()
@@ -230,18 +272,330 @@ class AnnotationRepository:
     def undo(self) -> bool:
         if not self._undo:
             return False
-        self._redo.append(copy.deepcopy(self._samples))
-        self._samples = self._undo.pop()
+        self._redo.append(self._capture())
+        self._restore(self._undo.pop())
         self._changed()
         return True
 
     def redo(self) -> bool:
         if not self._redo:
             return False
-        self._undo.append(copy.deepcopy(self._samples))
-        self._samples = self._redo.pop()
+        self._undo.append(self._capture())
+        self._restore(self._redo.pop())
         self._changed()
         return True
+
+
+    # --------------------------------------------------------- activity layer
+    @property
+    def activity_intervals(self) -> tuple[ActivityInterval, ...]:
+        return tuple(sort_intervals(self._activity))
+
+    @property
+    def known_exercise_codes(self) -> tuple[str, ...]:
+        return self.workspace.label_schema.exercise_codes()
+
+    def activity_coverage(self) -> ActivityCoverage:
+        """How much of the take carries an activity label, and of what kind."""
+        return measure_coverage(
+            self._activity,
+            self.frame_count or 0,
+            known_exercises=self.known_exercise_codes,
+        )
+
+    def continuous_readiness(
+        self, *, require_full_coverage: bool = False
+    ) -> tuple[ContinuousReadiness, ActivityCoverage]:
+        """The shared rule the exporter also uses."""
+        return evaluate_continuous(
+            self._activity,
+            self.frame_count or 0,
+            known_exercises=self.known_exercise_codes,
+            require_full_coverage=require_full_coverage,
+        )
+
+    def find_activity(self, interval_id: str) -> Optional[ActivityInterval]:
+        return next(
+            (i for i in self._activity if i.interval_id == interval_id), None
+        )
+
+    def activity_at_frame(self, frame: int) -> Optional[ActivityInterval]:
+        for interval in sort_intervals(self._activity):
+            if interval.contains(frame):
+                return interval
+        return None
+
+    def unlabelled_activity_gaps(self) -> list[tuple[int, int]]:
+        """Stretches nobody has labelled. Never treated as background."""
+        return unlabelled_gaps(self._activity, self.frame_count or 0)
+
+    def create_activity_interval(
+        self,
+        start_frame: int,
+        end_frame: int,
+        *,
+        state: ActivityState = ActivityState.BACKGROUND,
+        exercise: str = "",
+        linked_sample_id: str = "",
+    ) -> ActivityInterval:
+        """Add one activity stretch, clipped to the take and to free space.
+
+        Activity states are mutually exclusive, so a new interval is trimmed
+        against what is already labelled rather than being allowed to overlap.
+        If nothing is left after trimming, that is an error the caller sees -
+        silently creating an empty interval would look like success.
+        """
+        low, high = sorted((int(start_frame), int(end_frame)))
+        if self.frame_count:
+            low = max(0, min(low, self.frame_count - 1))
+            high = max(low, min(high, self.frame_count - 1))
+        free = self._free_span(low, high)
+        if free is None:
+            raise ValidationError(
+                "Bu aralık tamamen başka bir aktivite etiketiyle dolu.",
+                field="activity_interval",
+                code="activity_span_occupied",
+                remedy="Önce mevcut aralığı düzenleyin veya silin.",
+            )
+        low, high = free
+        self._snapshot()
+        interval = ActivityInterval.create(
+            low,
+            high,
+            state=state,
+            exercise=exercise,
+            linked_sample_id=linked_sample_id,
+        )
+        self._activity.append(interval)
+        self._changed()
+        return interval
+
+    def _free_span(self, low: int, high: int) -> Optional[tuple[int, int]]:
+        """Shrink ``[low, high]`` until it no longer collides with a neighbour."""
+        for interval in sort_intervals(self._activity):
+            if interval.end_frame < low or interval.start_frame > high:
+                continue
+            if interval.start_frame <= low and interval.end_frame >= high:
+                return None
+            if interval.start_frame <= low:
+                low = interval.end_frame + 1
+            elif interval.end_frame >= high:
+                high = interval.start_frame - 1
+            else:
+                # The new span straddles an existing one; keep the longer side.
+                left = (low, interval.start_frame - 1)
+                right = (interval.end_frame + 1, high)
+                left_len = left[1] - left[0] + 1
+                right_len = right[1] - right[0] + 1
+                low, high = left if left_len >= right_len else right
+            if high < low:
+                return None
+        return (low, high) if high >= low else None
+
+    def update_activity_bounds(
+        self, interval_id: str, start_frame: int, end_frame: int
+    ) -> ActivityInterval:
+        """Move an activity interval, refusing to overlap another one."""
+        interval = self._require_activity(interval_id)
+        if interval.linked_sample_id:
+            raise ValidationError(
+                "Bu aralık bir harekete bağlı; sınırları hareketin kendisinden "
+                "değiştirilir.",
+                field="activity_interval",
+                code="activity_bounds_linked",
+                remedy="Hareket modunda hareketin sınırlarını düzenleyin.",
+            )
+        low, high = sorted((int(start_frame), int(end_frame)))
+        if self.frame_count:
+            low = max(0, min(low, self.frame_count - 1))
+            high = max(low, min(high, self.frame_count - 1))
+        for other in self._activity:
+            if other.interval_id == interval_id:
+                continue
+            if other.start_frame <= high and low <= other.end_frame:
+                raise ValidationError(
+                    "Aktivite aralıkları çakışamaz; durumlar karşılıklı "
+                    "dışlayandır.",
+                    field="activity_interval",
+                    code="activity_overlap",
+                    remedy="Komşu aralığı önce daraltın.",
+                )
+        self._snapshot()
+        interval.start_frame, interval.end_frame = low, high
+        interval.touch()
+        self._changed()
+        return interval
+
+    def set_activity_state(
+        self,
+        interval_id: str,
+        state: ActivityState,
+        *,
+        exercise: str = "",
+    ) -> ActivityInterval:
+        """Change what an interval says the person was doing."""
+        interval = self._require_activity(interval_id)
+        if state.requires_exercise and not exercise and not interval.exercise:
+            raise ValidationError(
+                "Hedef egzersiz aralığı için egzersiz türü seçilmelidir.",
+                field="exercise",
+                code="activity_exercise_required",
+            )
+        self._snapshot()
+        interval.state = state
+        if state.requires_exercise:
+            interval.exercise = exercise or interval.exercise
+        else:
+            # Only a target-exercise stretch may carry an exercise code; a
+            # leftover code on a background stretch would be a contradiction.
+            interval.exercise = ""
+            interval.linked_sample_id = ""
+        interval.touch()
+        self._changed()
+        return interval
+
+    def set_activity_note(self, interval_id: str, note: str) -> ActivityInterval:
+        interval = self._require_activity(interval_id)
+        self._snapshot()
+        interval.note = note
+        interval.touch()
+        self._changed()
+        return interval
+
+    def delete_activity_interval(self, interval_id: str) -> None:
+        interval = self._require_activity(interval_id)
+        self._snapshot()
+        self._activity = [
+            i for i in self._activity if i.interval_id != interval.interval_id
+        ]
+        self._changed()
+
+    def link_activity_to_sample(
+        self, interval_id: str, sample_id: str
+    ) -> ActivityInterval:
+        """Tie a target-exercise stretch to the movement sample it describes.
+
+        From then on the sample owns the boundary. That is the whole point of
+        the link: one repetition, one pair of numbers, no chance of the two
+        views of it drifting apart.
+        """
+        interval = self._require_activity(interval_id)
+        sample = self.find(sample_id)
+        if sample is None:
+            raise ValidationError(
+                f"Hareket bulunamadı: {sample_id}",
+                field="sample_id",
+                code="sample_not_found",
+            )
+        # Adopting the sample's bounds must not run this interval into a
+        # neighbour. Activity states are mutually exclusive, and quietly
+        # creating an overlap here would produce a take that looks labelled
+        # and refuses to export.
+        for other in self._activity:
+            if other.interval_id == interval.interval_id:
+                continue
+            if (
+                other.start_frame <= sample.end_frame
+                and sample.start_frame <= other.end_frame
+            ):
+                raise ValidationError(
+                    f"Hareketin sınırları ({sample.start_frame}-"
+                    f"{sample.end_frame}) başka bir aktivite aralığıyla "
+                    "çakışıyor.",
+                    field="linked_sample_id",
+                    code="activity_link_overlap",
+                    remedy=(
+                        "Komşu aktivite aralığını önce daraltın veya silin."
+                    ),
+                )
+        self._snapshot()
+        interval.state = ActivityState.TARGET_EXERCISE
+        interval.exercise = sample.exercise or interval.exercise
+        interval.linked_sample_id = sample.sample_id
+        interval.start_frame = sample.start_frame
+        interval.end_frame = sample.end_frame
+        interval.touch()
+        self._changed()
+        return interval
+
+    def activity_from_samples(self) -> list[ActivityInterval]:
+        """Create a target-exercise stretch for every labelled movement.
+
+        A convenience, not an inference: it only mirrors bounds the user has
+        already drawn, and it refuses where the timeline is already occupied.
+        """
+        self._snapshot()
+        created: list[ActivityInterval] = []
+        for sample in sorted(self._samples, key=lambda s: s.start_frame):
+            if not sample.is_active or not sample.exercise:
+                continue
+            if any(i.linked_sample_id == sample.sample_id for i in self._activity):
+                continue
+            free = self._free_span(sample.start_frame, sample.end_frame)
+            if free is None or free != (sample.start_frame, sample.end_frame):
+                continue
+            interval = ActivityInterval.create(
+                sample.start_frame,
+                sample.end_frame,
+                state=ActivityState.TARGET_EXERCISE,
+                exercise=sample.exercise,
+                linked_sample_id=sample.sample_id,
+                source=SegmentSource.MANUAL,
+            )
+            self._activity.append(interval)
+            created.append(interval)
+        self._changed()
+        return created
+
+    def fill_gaps_with_background(self, confirmed: bool = False) -> list[ActivityInterval]:
+        """Label every unlabelled stretch as background - only when asked.
+
+        ``confirmed`` has no default that says yes. Unlabelled time becoming
+        background is a claim about what the person was doing, and this
+        application does not make that claim on the user's behalf.
+        """
+        if not confirmed:
+            raise ValidationError(
+                "Etiketlenmemiş boşlukların arka plan sayılması açık onay "
+                "gerektirir.",
+                field="confirmed",
+                code="background_fill_needs_confirmation",
+                remedy=(
+                    "Etiketlenmemiş zaman 'spor yapılmıyor' anlamına gelmez; "
+                    "bu yüzden otomatik doldurulmaz."
+                ),
+            )
+        gaps = self.unlabelled_activity_gaps()
+        if not gaps:
+            return []
+        self._snapshot()
+        created = [
+            ActivityInterval.create(low, high, state=ActivityState.BACKGROUND)
+            for low, high in gaps
+        ]
+        self._activity.extend(created)
+        self._changed()
+        return created
+
+    def _require_activity(self, interval_id: str) -> ActivityInterval:
+        interval = self.find_activity(interval_id)
+        if interval is None:
+            raise ValidationError(
+                f"Aktivite aralığı bulunamadı: {interval_id}",
+                field="interval_id",
+                code="activity_interval_not_found",
+            )
+        return interval
+
+    def _sync_linked_activity(self, sample: MovementSample) -> None:
+        """Keep a linked activity stretch on the sample's boundaries."""
+        for interval in self._activity:
+            if interval.linked_sample_id == sample.sample_id:
+                interval.start_frame = sample.start_frame
+                interval.end_frame = sample.end_frame
+                if sample.exercise:
+                    interval.exercise = sample.exercise
+                interval.touch()
 
     # ------------------------------------------------------ movement samples
     def create_sample(
@@ -303,6 +657,10 @@ class AnnotationRepository:
                 report.clamped.append(interval.interval_id)
             surviving.append(interval)
         sample.error_intervals = surviving
+
+        # A linked activity stretch describes the same repetition, so it moves
+        # with it. The sample is the single source of that boundary.
+        self._sync_linked_activity(sample)
 
         sample.touch()
         self._changed()
@@ -727,8 +1085,10 @@ class AnnotationRepository:
 
     # ---------------------------------------------------------- persistence
     def save(self) -> tuple[MovementSample, ...]:
-        """Write the sidecar unconditionally."""
-        saved = self.workspace.save_samples(self.take, self._samples)
+        """Write the sidecar unconditionally. Both layers, one document."""
+        saved = self.workspace.save_samples(
+            self.take, self._samples, activity_intervals=self._activity
+        )
         self._samples = list(saved)
         renumber_samples(self._samples)
         self._dirty = False

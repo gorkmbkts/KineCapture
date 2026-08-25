@@ -13,9 +13,28 @@ What gets written
     *convenience* copy, never the raw record.
 
 ``raw/capture.svo2``
-    The ZED SDK's own recording, written by the SDK itself. Immutable, and
-    sufficient to regenerate colour and depth at full fidelity, which is why
-    depth frames are not stored a second time by default.
+    The ZED SDK's own recording of the *stereo images*, written by the SDK.
+    Immutable, and verified on this machine to give its colour back on replay.
+    It is **not** a depth archive: re-opening a fresh SVO2 and retrieving
+    ``MEASURE.DEPTH`` was measured to return a different map from the one the
+    camera produced live, differing by metres in places and not even agreeing
+    on which pixels are invalid. Depth is a read-time reconstruction that
+    depends on depth mode, SDK version and GPU.
+
+    The default compression is ``H264``, which is **lossy**. The SDK's lossless
+    modes were measured at roughly 12x (H264_LOSSLESS) and 30x (LOSSLESS) the
+    size. Whatever mode was used is recorded in the raw manifest rather than
+    being described as "lossless" in the abstract.
+
+``raw/rgbd/``
+    The exact colour and depth the recording measured, chunked so a power cut
+    costs one chunk rather than the take. Depth is always written, because it
+    cannot be recovered from the SVO2. Colour is written here only when the
+    backend has no native recording of its own.
+
+``raw/raw_capture_manifest.json``
+    What the raw archive is: formats, codecs, provenance, per-stream counts and
+    the synchronisation contract.
 
 Finalisation
 ------------
@@ -35,7 +54,11 @@ from typing import Any, Optional
 
 import numpy as np
 
-from kinecapture import SKELETON_STREAM_SCHEMA_VERSION
+from kinecapture import (
+    RAW_ARCHIVE_SCHEMA_VERSION,
+    SKELETON_STREAM_SCHEMA_VERSION,
+)
+from kinecapture.capture.subject_lock import FrameAssociation, SubjectLock
 from kinecapture.core.errors import StorageError
 from kinecapture.core.fingerprint import checksum_manifest
 from kinecapture.core.ids import utc_now_iso
@@ -51,6 +74,11 @@ from kinecapture.dataset.workspace import ProjectWorkspace, TakePaths
 from kinecapture.domain.enums import TakeState
 from kinecapture.domain.models import FramePacket
 from kinecapture.domain.project import Take, TakeQualityMetrics
+from kinecapture.recording.rgbd_archive import (
+    DepthCodec,
+    RgbdArchiveReader,
+    RgbdArchiveWriter,
+)
 
 logger = get_logger(__name__)
 
@@ -78,6 +106,7 @@ class _QualityAccumulator:
         self.first_frame_index: Optional[int] = None
         self.last_frame_index: Optional[int] = None
         self.max_gap_ms = 0.0
+        self.frames_with_other_people = 0
         self._previous_camera_ts: Optional[int] = None
         self._active_body_id: Optional[int] = None
 
@@ -101,6 +130,7 @@ class _QualityAccumulator:
             self.frames_with_body += 1
             if len(packet.bodies) > 1:
                 self.frames_with_multiple_bodies += 1
+                self.frames_with_other_people += 1
             for body in packet.bodies:
                 self.body_ids.add(body.tracking_id)
                 confidence = body.mean_confidence()
@@ -154,6 +184,7 @@ class _QualityAccumulator:
             body_id_changes=self.body_id_changes,
             distinct_body_ids=len(self.body_ids),
             max_frame_gap_ms=self.max_gap_ms,
+            frames_with_other_people=self.frames_with_other_people,
         )
 
 
@@ -255,6 +286,9 @@ class TakeWriter:
         paths: TakePaths,
         *,
         write_proxy_video: bool = True,
+        subject_lock: Optional[SubjectLock] = None,
+        archive_color: bool = False,
+        native_recording_active: bool = False,
     ) -> None:
         self.workspace = workspace
         self.take = take
@@ -270,6 +304,10 @@ class TakeWriter:
         self._started_monotonic = time.perf_counter()
         self._write_proxy = write_proxy_video
         self._first_frame_index: Optional[int] = None
+        self.subject_lock = subject_lock
+        self._native_recording_active = bool(native_recording_active)
+        self._chunk_table: list[dict[str, Any]] = []
+        self._external_raw_failure = ""
 
         paths.ensure_dirs()
         self._skeleton = JsonlWriter(paths.skeleton_stream)
@@ -280,6 +318,28 @@ class TakeWriter:
                 fps=float(take.capture_profile.fps),
                 target_width=int(take.capture_profile.proxy_video_width),
             )
+
+        # --- the immutable raw archive --------------------------------
+        # Colour is archived here only when nothing else is keeping it: a ZED
+        # already writes its stereo images to the SVO2 and replay was verified
+        # to return them, so a second copy would double the cost for nothing.
+        profile = take.capture_profile
+        self._archive: Optional[RgbdArchiveWriter] = None
+        self._archive_color = bool(archive_color)
+        self._raw_index: Optional[JsonlWriter] = None
+        if profile.archives_depth or archive_color:
+            codec = (
+                DepthCodec.UINT16_QUANTISED
+                if str(profile.depth_archive).lower().startswith("uint16")
+                else DepthCodec.FLOAT32_LOSSLESS
+            )
+            self._archive = RgbdArchiveWriter(
+                paths.rgbd_dir,
+                depth_codec=codec,
+                store_color=archive_color,
+            )
+        self._raw_index = JsonlWriter(paths.raw_index)
+        self._raw_index.write(self._raw_index_header())
 
     # ------------------------------------------------------------- counters
     @property
@@ -321,6 +381,41 @@ class TakeWriter:
             "length_unit": camera.length_unit if camera else "unspecified",
             "target_fps": self.take.capture_profile.fps,
             "started_at": self.take.started_at,
+            "subject_id": (
+                self.subject_lock.subject_id if self.subject_lock else None
+            ),
+        }
+
+    def _raw_index_header(self) -> dict[str, Any]:
+        """First line of the raw index: the synchronisation contract itself.
+
+        Two numbers in this project are easy to confuse and must never be: the
+        *position* is where a frame sits in this recording's own sequence and is
+        what annotation bounds refer to; the *camera frame index* is the
+        camera's own counter and skips when a frame is dropped. Both are here,
+        in every record, precisely so nothing downstream has to infer one from
+        the other.
+        """
+        camera = self.take.camera_info
+        return {
+            "record": "header",
+            "schema_version": RAW_ARCHIVE_SCHEMA_VERSION,
+            "take_id": self.take.take_id,
+            "origin": self.take.origin.value,
+            "coordinate_system": camera.coordinate_system if camera else "unspecified",
+            "length_unit": camera.length_unit if camera else "unspecified",
+            "target_fps": self.take.capture_profile.fps,
+            "fields": {
+                "p": "recording-local position, 0-based, the annotation contract",
+                "i": "camera frame index as reported by the backend",
+                "host_ns": "host clock when the frame was received",
+                "cam_ns": "camera timestamp of the image",
+                "color": "colour archived in this take's own rgbd chunks",
+                "depth": "depth archived in this take's own rgbd chunks",
+                "skel": "a pose record was written for this position",
+                "native": "the backend's own recording was running",
+                "subj": "authoritative selected-subject association",
+            },
         }
 
     # ---------------------------------------------------------------- write
@@ -332,21 +427,68 @@ class TakeWriter:
             )
         if self._first_frame_index is None:
             self._first_frame_index = packet.frame_index
+        position = self._frames_written
+
+        # --- authoritative subject association --------------------------
+        # Decided here, once, while the frame is in hand. Downstream code
+        # reads this answer instead of re-deriving one, which is how "which
+        # skeleton is the participant?" stops having two possible answers.
+        association: Optional[FrameAssociation] = None
+        if self.subject_lock is not None and self.subject_lock.is_selected:
+            association = self.subject_lock.update(
+                packet.bodies,
+                frame_index=packet.frame_index,
+                timestamp_ns=packet.camera_timestamp_ns,
+            )
+            active_body_id = association.tracking_id
 
         record = {
             "record": "frame",
             "i": packet.frame_index,
+            "p": position,
             "host_ns": packet.host_timestamp_ns,
             "cam_ns": packet.camera_timestamp_ns,
             "bodies": [body.to_record() for body in packet.bodies],
         }
         if active_body_id is not None:
             record["active_id"] = int(active_body_id)
+        if association is not None:
+            record["subject"] = association.to_record()
         assert self._skeleton is not None
         self._skeleton.write(record)
 
         if self._proxy is not None:
             self._proxy.write(packet.color_frame)
+
+        # --- the immutable raw archive ---------------------------------
+        color_ok = depth_ok = True
+        if self._archive is not None:
+            color_ok, depth_ok = self._archive.add_frame(
+                position,
+                packet.color_frame if self._archive_color else None,
+                packet.depth_frame,
+            )
+
+        if self._raw_index is not None:
+            index_record: dict[str, Any] = {
+                "record": "frame",
+                "p": position,
+                "i": packet.frame_index,
+                "host_ns": packet.host_timestamp_ns,
+                "cam_ns": packet.camera_timestamp_ns,
+                "skel": True,
+                "color": bool(self._archive_color and color_ok),
+                "depth": bool(
+                    packet.depth_frame is not None
+                    and self._archive is not None
+                    and depth_ok
+                ),
+                "native": self._native_recording_active,
+                "status": packet.capture_status.value,
+            }
+            if association is not None:
+                index_record["subj"] = association.to_record()
+            self._raw_index.write(index_record)
 
         self._accumulator.add(packet, active_body_id)
         with self._lock:
@@ -354,6 +496,19 @@ class TakeWriter:
             self._backend_dropped = max(
                 self._backend_dropped, int(packet.backend_dropped_frames)
             )
+
+    def note_raw_failure(self, reason: str) -> None:
+        """Record that the immutable source is not trustworthy.
+
+        Called for problems the archive writer itself cannot see - a native
+        recorder that would not stop cleanly, for instance. It is what stops
+        such a take being finalised as complete.
+        """
+        if self._archive is not None:
+            self._archive.depth.failure = self._archive.depth.failure or reason
+        else:
+            self._external_raw_failure = reason
+        logger.error("Ham kayıt sorunu: %s", reason)
 
     def record_marker(self, frame_index: int, label: str = "") -> dict[str, Any]:
         """Store an operator marker as both a stream record and take metadata."""
@@ -394,6 +549,17 @@ class TakeWriter:
                 logger.warning("İskelet akışı kapatılırken hata: %s", exc)
         if self._proxy is not None:
             self._proxy.close()
+        if self._archive is not None:
+            try:
+                self._chunk_table = self._archive.close()
+            except Exception as exc:  # pragma: no cover - shutdown path
+                logger.error("RGB-D arşivi kapatılırken hata: %s", exc)
+                self._archive.depth.failure = f"{type(exc).__name__}: {exc}"
+        if self._raw_index is not None:
+            try:
+                self._raw_index.close()
+            except Exception as exc:  # pragma: no cover - shutdown path
+                logger.warning("Ham indeks kapatılırken hata: %s", exc)
 
     def finalize(self, *, state: TakeState = TakeState.FINALIZED) -> Take:
         """Close streams, compute metrics, write checksums, publish ``take.json``.
@@ -410,8 +576,24 @@ class TakeWriter:
             dropped=self._frames_dropped,
             backend_dropped=self._backend_dropped,
         )
+        self._apply_archive_metrics(metrics)
         take.metrics = metrics
         take.ended_at = utc_now_iso()
+
+        # A take whose immutable source is incomplete is not a finished take.
+        # It keeps every byte it did manage to write - nothing is deleted - but
+        # it says PARTIAL, so it can never be mistaken for a reprocessable
+        # recording later.
+        if state is TakeState.FINALIZED and metrics.has_raw_archive_loss:
+            state = TakeState.PARTIAL
+            reason = metrics.raw_archive_failure or (
+                f"renk {metrics.color_frames_dropped}, derinlik "
+                f"{metrics.depth_frames_dropped} kare arşivlenemedi"
+            )
+            take.notes = (
+                f"{take.notes}\n[Ham RGB-D arşivi eksik: {reason}]"
+            ).strip()
+            logger.error("Ham arşiv eksik, kayıt PARTIAL: %s", reason)
         take.state = state
 
         files: dict[str, str] = {}
@@ -426,7 +608,15 @@ class TakeWriter:
             ).strip()
         if path_exists(self.paths.native_recording):
             files["native_recording"] = f"raw/{self.paths.native_recording.name}"
+        if path_exists(self.paths.raw_index):
+            files["raw_index"] = "raw/rgbd/index.jsonl"
+        if self._archive is not None:
+            files["rgbd_archive"] = "raw/rgbd/"
         take.files = files
+
+        write_json(
+            self.paths.raw_manifest, self._raw_manifest(metrics), overwrite=True
+        )
 
         write_json(
             self.paths.quality,
@@ -457,6 +647,146 @@ class TakeWriter:
             metrics.measured_fps,
         )
         return take
+
+    # ------------------------------------------------------- raw archive
+    def _apply_archive_metrics(self, metrics: TakeQualityMetrics) -> None:
+        """Fold the per-stream archive counters into the take's quality."""
+        if self._external_raw_failure:
+            metrics.raw_archive_failure = self._external_raw_failure
+        if self._archive is not None:
+            metrics.depth_frames_archived = self._archive.depth.frames_written
+            metrics.depth_frames_dropped = self._archive.depth.frames_dropped
+            metrics.color_frames_archived = self._archive.color.frames_written
+            metrics.color_frames_dropped = self._archive.color.frames_dropped
+            metrics.raw_archive_failure = (
+                self._archive.depth.failure
+                or self._archive.color.failure
+                or self._external_raw_failure
+            )
+        lock = self.subject_lock
+        if lock is not None and lock.is_selected:
+            counters = lock.counters
+            metrics.subject_locked_frames = counters["locked_frames"]
+            metrics.subject_lost_frames = counters["lost_frames"]
+            metrics.subject_ambiguous_frames = counters["ambiguous_frames"]
+            metrics.subject_reassociations = counters["reassociations"]
+            metrics.subject_manual_confirmations = counters["manual_confirmations"]
+
+    def _raw_manifest(self, metrics: TakeQualityMetrics) -> dict[str, Any]:
+        """Describe the raw archive well enough to reprocess it years later."""
+        take = self.take
+        camera = take.camera_info
+        profile = take.capture_profile
+        archive = self._archive
+        reader = RgbdArchiveReader(self.paths.rgbd_dir)
+        stored = reader.positions() if archive is not None else {"depth": [], "color": []}
+
+        native_present = path_exists(self.paths.native_recording)
+        return {
+            "schema_version": RAW_ARCHIVE_SCHEMA_VERSION,
+            "take_id": take.take_id,
+            "created_at": utc_now_iso(),
+            "origin": take.origin.value,
+            "frames_recorded": self._frames_written,
+            "synchronisation": {
+                "index_file": "raw/rgbd/index.jsonl",
+                "position": (
+                    "0 tabanlı, bu kaydın kendi sırası. Etiket sınırları ve "
+                    "derived/skeleton.jsonl bu konumu kullanır."
+                ),
+                "camera_frame_index": (
+                    "Kameranın kendi sayacı; kare düşünce konumla ayrışır."
+                ),
+                "camera_timestamp_ns": (
+                    "Görüntünün kamera zaman damgası. SVO2 içine mikrosaniye "
+                    "çözünürlüğünde yazılır: yeniden oynatmada son üç hane "
+                    "sıfırlanmış olarak geri gelir (ölçülen fark 300 ns)."
+                ),
+                "note": (
+                    "Akış konumu ile kamera kare numarası birbirinin yerine "
+                    "kullanılamaz."
+                ),
+            },
+            "native_recording": {
+                "present": native_present,
+                "file": "raw/capture.svo2" if native_present else None,
+                "format": "svo2" if native_present else None,
+                "compression_mode": profile.native_compression,
+                "lossless": str(profile.native_compression).upper().endswith("LOSSLESS"),
+                "stores": "stereo görüntüler ve sensör verisi",
+                "does_not_store": (
+                    "Metrik derinlik haritası. Derinlik yeniden oynatmada "
+                    "yeniden hesaplanır ve bu makinede ölçülerek doğrulandı: "
+                    "aynı SVO2'nin aynı konumlarından okunan derinlik, kayıt "
+                    "anındaki derinlikle ayni DEĞİLDİR (yer yer metrelerce "
+                    "fark, geçersiz piksel maskesi bile farklı). Bu yüzden "
+                    "derinlik ayrıca arşivlenir."
+                ),
+                "replay_verified": (
+                    "RGB yeniden oynatmada geri okunabiliyor (SDK 5.4.1, "
+                    "ZED 2i üzerinde doğrulandı)."
+                ),
+            },
+            "rgbd_archive": {
+                "directory": "raw/rgbd/",
+                "depth": {
+                    "enabled": archive is not None and profile.archives_depth,
+                    "codec": archive.depth_codec.value if archive else None,
+                    "lossless": archive.depth_codec.is_lossless if archive else None,
+                    "dtype": "float32",
+                    "unit": "meter",
+                    "invalid": "nan",
+                    "frames": metrics.depth_frames_archived,
+                    "dropped": metrics.depth_frames_dropped,
+                    "chunks": archive.depth.chunks_written if archive else 0,
+                    "bytes": archive.depth.bytes_written if archive else 0,
+                    "positions_stored": len(stored["depth"]),
+                },
+                "color": {
+                    "enabled": bool(self._archive_color),
+                    "frames": metrics.color_frames_archived,
+                    "dropped": metrics.color_frames_dropped,
+                    "chunks": archive.color.chunks_written if archive else 0,
+                    "bytes": archive.color.bytes_written if archive else 0,
+                    "positions_stored": len(stored["color"]),
+                    "source_of_truth": (
+                        "raw/rgbd/color_*.kcc"
+                        if self._archive_color
+                        else "raw/capture.svo2"
+                    ),
+                },
+                "chunks": list(getattr(self, "_chunk_table", [])),
+                "recovery": (
+                    "Her chunk kendi başlığıyla bağımsız okunur; yarım kalan "
+                    "chunk okurken tespit edilir ve yalnız o chunk kaybolur."
+                ),
+            },
+            "capture_provenance": {
+                "camera_model": camera.model if camera else None,
+                "serial_number": camera.serial_number if camera else None,
+                "sdk_version": camera.sdk_version if camera else None,
+                "resolution": list(camera.resolution) if camera else None,
+                "target_fps": profile.fps,
+                "depth_mode": profile.depth_mode,
+                "coordinate_system": camera.coordinate_system if camera else None,
+                "length_unit": camera.length_unit if camera else None,
+                "body_format": take.skeleton_format,
+                "calibration": (
+                    (camera.extra or {}).get("left_camera_calibration")
+                    if camera
+                    else None
+                ),
+            },
+            "subject": (
+                self.subject_lock.provenance()
+                if self.subject_lock is not None and self.subject_lock.is_selected
+                else {"selected": False}
+            ),
+            "immutability": (
+                "Bu dizin etiketleme veya export sırasında değiştirilmez. "
+                "Türetilen her şey derived/ veya releases/ altına yazılır."
+            ),
+        }
 
     def abort(self, reason: str = "") -> Take:
         """Stop writing and mark the take ``PARTIAL`` without losing what exists."""
