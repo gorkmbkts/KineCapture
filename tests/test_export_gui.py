@@ -237,10 +237,12 @@ def test_dialog_paints_in_both_themes(theme) -> None:
 
 @pytest.fixture
 def export_page(qt_app, workspace, session, dataset_root, isolated_user_state):
+    from tests.conftest import authenticate_state
+
     _record_and_label(workspace, session, frames=30)
     config = AppConfig(dataset_root=dataset_root, backend="mock")
     state = AppState(config)
-    state.open_project(workspace.root)
+    authenticate_state(state, workspace)
     page = ExportPage(state)
     page.on_activated()
     return page

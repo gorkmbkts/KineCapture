@@ -82,7 +82,11 @@ class SkeletonView3D(QWidget):
         self._drag_origin: Optional[QPointF] = None
         self._drag_button: Optional[Qt.MouseButton] = None
 
-        self.setMinimumSize(240, 200)
+        # A floor, not a target: both views carry the layout stretch and
+        # take every pixel the controls around them do not need. The floor
+        # only decides what happens in a 1120x700 window, where a slightly
+        # shorter picture beats a clipped timeline.
+        self.setMinimumSize(240, 120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.OpenHandCursor)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)

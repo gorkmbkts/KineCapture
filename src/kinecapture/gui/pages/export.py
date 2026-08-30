@@ -196,7 +196,10 @@ class ExportPage(Page):
         self._continuous_mode = QCheckBox("Sürekli aktivite (kaydın tamamı)")
         self._continuous_mode.setToolTip(
             "Bir örnek = bir kayıt. Egzersiz dışı zaman, geçişler ve "
-            "başlangıç/bitiş anları kare bazında etiketlenir."
+            "başlangıç/bitiş anları kare bazında etiketlenir.\n\n"
+            "Aktivite etiketleme inceleme ekranından kaldırıldı. Bu seçenek "
+            "yalnızca daha önce aktivite etiketi girilmiş kayıtları olan "
+            "projelerde açılabilir; mevcut veri silinmez veya dönüştürülmez."
         )
         self._continuous_mode.toggled.connect(self._refresh_preview)
         card.add_widget(self._continuous_mode)
@@ -211,6 +214,10 @@ class ExportPage(Page):
         )
         self._require_coverage.toggled.connect(self._refresh_preview)
         card.add_widget(self._require_coverage)
+
+        self._continuous_note = make_label("", role="muted")
+        self._continuous_note.setWordWrap(True)
+        card.add_widget(self._continuous_note)
 
         self._include_synthetic = QCheckBox("Sentetik kayıtları dahil et")
         self._include_synthetic.setToolTip(
@@ -542,11 +549,43 @@ class ExportPage(Page):
             lines.append("Seçili ama bu yapılandırmada üretilemeyecek: " + "; ".join(blocked))
         self._feature_note.setText("\n".join(lines))
 
+    def _refresh_continuous_availability(self) -> int:
+        """Enable the continuous option only where activity data exists.
+
+        Authoring activity labels was retired from the review screen, so a
+        project recorded since then has nothing for this exporter to read and
+        the option would silently produce an entirely unlabelled dataset.
+        Existing intervals are untouched on disk and remain exportable.
+        """
+        workspace = self.state.workspace
+        index = self.state.index
+        if workspace is None or index is None:
+            return 0
+        with_activity = sum(
+            1 for row in index.rows if workspace.load_activity_intervals(row.take)
+        )
+        available = with_activity > 0
+        for widget in (self._continuous_mode, self._require_coverage):
+            widget.setEnabled(available)
+        if not available and self._continuous_mode.isChecked():
+            self._continuous_mode.blockSignals(True)
+            self._continuous_mode.setChecked(False)
+            self._continuous_mode.blockSignals(False)
+        self._continuous_note.setText(
+            f"Sürekli aktivite: {with_activity} kayıtta eski aktivite etiketi var."
+            if available
+            else "Sürekli aktivite export'u kapalı: bu projede aktivite etiketi "
+            "olan kayıt yok. Aktivite etiketleme kaldırıldı; mevcut veriler "
+            "olduğu gibi korunur."
+        )
+        return with_activity
+
     def _refresh_preview(self) -> None:
         workspace = self.state.workspace
         index = self.state.index
         if workspace is None or index is None:
             return
+        self._refresh_continuous_availability()
         if not (self._movement_mode.isChecked() or self._continuous_mode.isChecked()):
             self._preview_chip.set_status(
                 "Biçim seçilmedi", icon="warning", colour=self.theme.warning

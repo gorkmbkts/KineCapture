@@ -35,7 +35,9 @@ Guarantees
 
 from __future__ import annotations
 
+import os
 import shutil
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional
@@ -178,6 +180,23 @@ class TakePaths:
                 if chunk.suffix in (".kcd", ".kcc"):
                     targets[f"raw/{RGBD_DIR}/{chunk.name}"] = chunk
         return targets
+
+
+#: Top-level keys of ``annotations/segments.json`` this version writes itself.
+#: Anything else found in an existing sidecar is preserved verbatim rather than
+#: dropped - see :meth:`ProjectWorkspace.save_samples`.
+_ANNOTATION_KNOWN_KEYS = frozenset(
+    {
+        "schema_version",
+        "take_id",
+        "updated_at",
+        "boundary_convention",
+        "samples",
+        "segments",
+        "activity_intervals",
+        "activity_note",
+    }
+)
 
 
 class ProjectWorkspace:
@@ -325,20 +344,60 @@ class ProjectWorkspace:
 
     # ---------------------------------------------------------- participants
     def create_participant(self, **kwargs: Any) -> Participant:
-        """Create the next pseudonymous participant (``P0001``, ``P0002``, ...)."""
-        project = self.project
+        """Atomically allocate the next project-local anonymous code."""
+        lock_path = self.root / ".participant-allocation.lock"
+        descriptor: Optional[int] = None
+        deadline = time.monotonic() + 5.0
+        while descriptor is None:
+            try:
+                descriptor = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if time.monotonic() >= deadline:
+                    raise StorageError(
+                        "Katılımcı kodu şu anda ayrılamıyor.",
+                        code="participant_allocation_busy",
+                        remedy="Birkaç saniye sonra yeniden deneyin.",
+                    )
+                time.sleep(0.02)
+        directory: Optional[Path] = None
+        try:
+            # Reload inside the allocation lock so another process's counter
+            # update cannot be hidden by this workspace's cache.
+            project = Project.from_dict(read_json_mapping(self.project_file))
+            sequence = project.next_participant_sequence
+            existing = {p.code for p in self.list_participants()}
+            while participant_code(sequence) in existing:
+                sequence += 1
+            participant = Participant.create(participant_code(sequence), **kwargs)
+            directory = self.participant_dir(participant.participant_id)
+            directory.mkdir(parents=False, exist_ok=False)
+            ensure_dir(directory / "sessions")
+            write_json(directory / PARTICIPANT_FILE, participant.to_dict())
+            project.next_participant_sequence = sequence + 1
+            try:
+                write_json(self.project_file, project.to_dict(), overwrite=True)
+            except Exception:
+                # Compensation is limited to the directory allocated by this
+                # call and cannot reach outside participants/.
+                if directory.parent.resolve() == self.participants_dir.resolve():
+                    shutil.rmtree(directory)
+                raise
+            self._project = project
+            logger.info("Katılımcı oluşturuldu: %s", participant.code)
+            return participant
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            lock_path.unlink(missing_ok=True)
+
+    def preview_next_participant_code(self) -> str:
+        """Informational preview; the real allocation happens under a lock."""
+        project = Project.from_dict(read_json_mapping(self.project_file))
         sequence = project.next_participant_sequence
         existing = {p.code for p in self.list_participants()}
         while participant_code(sequence) in existing:
             sequence += 1
-        participant = Participant.create(participant_code(sequence), **kwargs)
-        directory = self.participant_dir(participant.participant_id)
-        ensure_dir(directory / "sessions")
-        write_json(directory / PARTICIPANT_FILE, participant.to_dict())
-        project.next_participant_sequence = sequence + 1
-        self.save_project(project)
-        logger.info("Katılımcı oluşturuldu: %s", participant.code)
-        return participant
+        return participant_code(sequence)
 
     def save_participant(self, participant: Participant) -> Participant:
         directory = self.participant_dir(participant.participant_id)
@@ -568,6 +627,13 @@ class ProjectWorkspace:
         ``activity_intervals`` defaults to *keeping what is already on disk*,
         so a caller that only knows about movement samples cannot delete an
         activity strip it never loaded.
+
+        Any top-level block this version does not recognise is carried over
+        untouched. That covers a sidecar written by a newer build, and it covers
+        retired features: activity authoring was removed from the review screen,
+        and the recorded ``activity_intervals`` of takes labelled before that
+        must survive every subsequent save rather than being quietly dropped by
+        the first edit made afterwards.
         """
         ordered = sorted(samples, key=lambda s: (s.start_frame, s.end_frame))
         paths = self.take_paths(take)
@@ -578,6 +644,12 @@ class ProjectWorkspace:
             activity = sorted(
                 activity_intervals, key=lambda i: (i.start_frame, i.end_frame)
             )
+        existing = read_json_mapping(paths.segments) if path_exists(paths.segments) else {}
+        carried = {
+            key: value
+            for key, value in existing.items()
+            if key not in _ANNOTATION_KNOWN_KEYS
+        }
         document: dict[str, Any] = {
             "schema_version": ANNOTATION_SCHEMA_VERSION,
             "take_id": take.take_id,
@@ -594,8 +666,16 @@ class ProjectWorkspace:
             ]
             document["activity_note"] = (
                 "Aktivite durumları karşılıklı dışlayandır. Etiketlenmemiş "
-                "kareler burada hiç görünmez ve background sayılmaz."
+                "kareler burada hiç görünmez ve background sayılmaz. Bu blok "
+                "yalnızca okunur: inceleme ekranında aktivite düzenlenmez."
             )
+        if carried:
+            logger.info(
+                "Tanınmayan %d annotation bloğu korundu: %s",
+                len(carried),
+                ", ".join(sorted(carried)),
+            )
+            document.update(carried)
         write_json(paths.segments, document, overwrite=True)
         return ordered
 

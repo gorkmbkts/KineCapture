@@ -97,10 +97,20 @@ def test_missing_body_frames_become_nan_not_interpolated(workspace, session) -> 
     assert np.isfinite(array).any()
 
 
-def test_video_position_is_clamped_not_drifted(recorded) -> None:
+def test_video_position_reports_absence_instead_of_clamping(recorded) -> None:
+    """A position past the proxy has *no* colour frame, and must say so.
+
+    Clamping to the last frame was worse than useless: it paired the current
+    pose with a picture from another moment, which is indistinguishable on
+    screen from a tracking failure.
+    """
     _workspace, _take, loaded = recorded
     assert loaded.video_position_for(0) == 0
-    assert loaded.video_position_for(10**6) < loaded.video.frame_count
+    assert loaded.video_position_for(10**6) is None
+    assert loaded.video_position_for(-1) is None
+    last = loaded.video.frame_count - 1
+    assert loaded.video_position_for(last) == last
+    assert loaded.video_position_for(loaded.video.frame_count) is None
 
 
 # ---------------------------------------------------- movement samples

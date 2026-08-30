@@ -47,7 +47,37 @@ def isolated_user_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "kinecapture.core.config.USER_STATE_DIR", state_dir, raising=False
     )
+    # AppConfig resolves the identity DB from LOCALAPPDATA at construction
+    # time. Redirect it too: authentication tests must never create or modify
+    # the real per-user database.
+    app_data = tmp_path / "_local_app_data"
+    monkeypatch.setenv("LOCALAPPDATA", str(app_data))
     yield state_path
+
+
+def authenticate_state(state, workspace=None, *, open_workspace=True):
+    """Create/login an isolated owner and optionally register a workspace."""
+    password = "pytest-password"
+    if state.identity.needs_initial_setup:
+        user = state.identity.create_initial_owner(
+            first_name="Py",
+            last_name="Test",
+            title="",
+            username="pytest-owner",
+            password=password,
+        )
+    else:
+        user = state.identity.authenticate("pytest-owner", password)
+    state.activate_user(user)
+    if workspace is not None:
+        try:
+            state.identity.register_project(user, workspace)
+        except Exception as exc:
+            if getattr(exc, "code", "") != "project_already_registered":
+                raise
+        if open_workspace:
+            state.open_project(workspace.root)
+    return user
 
 
 @pytest.fixture

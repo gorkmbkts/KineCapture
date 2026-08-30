@@ -62,12 +62,31 @@ class VideoView(QWidget):
         self._highlight_subject = False
         self._badge_text = ""
         self._badge_colour = ""
-        #: Intrinsics used to project 3D joints back onto the image. Filled from
-        #: the frame's own geometry: an approximation is honest here because the
-        #: overlay is a visual aid, and the 3D view is the metric one.
-        self._focal_ratio = 0.75
 
-        self.setMinimumSize(240, 160)
+        # --- the coordinate space the 2D joints live in -----------------
+        # A tracker's ``joint_positions_2d`` are pixels of the *camera's* image.
+        # The picture on screen is not necessarily that image: during review it
+        # is the downscaled proxy video. Assuming the two were the same space
+        # was the whole overlay misalignment - a joint at x=1200 of a 1280-wide
+        # camera frame was being placed at x=1200 of a 640-wide proxy, i.e.
+        # twice as far right as the person actually was.
+        #
+        # So the source resolution is carried explicitly and the projection
+        # goes through normalised coordinates. ``None`` means "the same space
+        # as the displayed image", which is exactly right for live capture.
+        self._joint_space: Optional[tuple[int, int]] = None
+        #: Calibration of the camera the joints were seen by, when the take
+        #: recorded one. Only a *verified* intrinsics block is ever used.
+        self._calibration: Optional[dict] = None
+        #: Why the overlay cannot be drawn, when it cannot. Shown to the user
+        #: instead of a plausible-looking but wrong skeleton.
+        self._overlay_unavailable_reason = ""
+
+        # A floor, not a target: both views carry the layout stretch and
+        # take every pixel the controls around them do not need. The floor
+        # only decides what happens in a 1120x700 window, where a slightly
+        # shorter picture beats a clipped timeline.
+        self.setMinimumSize(240, 120)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setAutoFillBackground(False)
 
@@ -97,6 +116,39 @@ class VideoView(QWidget):
         self._spec = spec
         self._active_id = active_id
         self.update()
+
+    def set_joint_space(
+        self,
+        resolution: Optional[tuple[int, int]],
+        *,
+        calibration: Optional[dict] = None,
+    ) -> None:
+        """Declare the pixel space ``joint_positions_2d`` is expressed in.
+
+        ``resolution`` is the width and height of the image the tracker saw.
+        Pass ``None`` when the displayed picture *is* that image (live
+        capture). During review the displayed picture is the proxy video,
+        which is smaller, so the real camera resolution must be given here or
+        every joint lands proportionally too far right and down.
+
+        ``calibration`` is the camera's verified intrinsics, used only for
+        recordings that have no 2D joints at all. Without it, no overlay is
+        attempted rather than a guessed one.
+        """
+        self._joint_space = (
+            (int(resolution[0]), int(resolution[1])) if resolution else None
+        )
+        self._calibration = dict(calibration) if calibration else None
+        self.update()
+
+    def set_overlay_unavailable(self, reason: str) -> None:
+        """Say the overlay cannot be trusted, instead of drawing a wrong one."""
+        self._overlay_unavailable_reason = reason
+        self.update()
+
+    @property
+    def overlay_unavailable_reason(self) -> str:
+        return self._overlay_unavailable_reason
 
     def set_overlay_enabled(self, enabled: bool) -> None:
         self._overlay_enabled = enabled
@@ -173,6 +225,8 @@ class VideoView(QWidget):
 
         if self._overlay_enabled and self._spec is not None and self._bodies:
             self._paint_skeletons(painter, target)
+        if self._overlay_enabled and self._overlay_unavailable_reason:
+            self._paint_overlay_warning(painter, target)
 
         if self._badge_text:
             self._paint_badge(painter)
@@ -218,22 +272,47 @@ class VideoView(QWidget):
         painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, self._badge_text)
         painter.restore()
 
+
+    def _paint_overlay_warning(self, painter: QPainter, target: QRectF) -> None:
+        """Say why no skeleton is drawn, rather than leaving the user guessing."""
+        painter.save()
+        text = self._overlay_unavailable_reason
+        box = QRectF(
+            target.left() + 12,
+            target.bottom() - 58,
+            max(220.0, target.width() - 24),
+            46,
+        )
+        painter.setBrush(QColor(0, 0, 0, 175))
+        painter.setPen(QPen(QColor(self._theme.warning), 1))
+        painter.drawRoundedRect(box, self._theme.radius_sm, self._theme.radius_sm)
+        painter.setPen(QColor(self._theme.warning))
+        painter.drawText(
+            box.adjusted(10, 0, -10, 0),
+            int(Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            | int(Qt.TextFlag.TextWordWrap),
+            text,
+        )
+        painter.restore()
+
     # ------------------------------------------------------------- skeleton
-    def _project(
-        self, point: np.ndarray, target: QRectF
-    ) -> Optional[QPointF]:
-        """Project a metre-space joint onto the displayed image rectangle."""
-        x, y, z = float(point[0]), float(point[1]), float(point[2])
-        if not np.isfinite((x, y, z)).all() or z <= 0.05:
+    # The guessed-focal-ratio projection that used to live here is gone. It
+    # placed joints using a made-up focal length and a made-up principal point,
+    # which produced an overlay that looked authoritative and was wrong by an
+    # unknown amount. There are now exactly two honest sources - the tracker's
+    # own 2D keypoints and the camera's recorded intrinsics - and when neither
+    # is present the widget says so instead of drawing something.
+
+    def _source_size(self) -> Optional[tuple[float, float]]:
+        """The pixel dimensions the 2D joints are expressed in."""
+        if self._joint_space is not None:
+            width, height = self._joint_space
+            if width > 0 and height > 0:
+                return (float(width), float(height))
             return None
-        focal = target.width() * self._focal_ratio
-        u = target.center().x() + focal * x / z
-        v = target.top() + target.height() * 0.80 - focal * y / z
-        if not (target.left() - 40 <= u <= target.right() + 40):
+        if self._image is None or self._image.isNull():
             return None
-        if not (target.top() - 40 <= v <= target.bottom() + 40):
-            return None
-        return QPointF(u, v)
+        return (float(self._image.width()), float(self._image.height()))
 
     def _project_2d(
         self, point, target: QRectF
@@ -241,35 +320,94 @@ class VideoView(QWidget):
         """Place a tracker-reported image pixel onto the drawn rectangle.
 
         Exact, unlike :meth:`_project`: these are the camera's own 2D
-        keypoints, so the skeleton lands where the person actually is instead
-        of where a guessed focal length would put them.
+        keypoints. The mapping goes through normalised image coordinates, so it
+        is independent of how large the picture is being drawn *and* of whether
+        the picture is the full camera frame or a downscaled proxy of it.
         """
-        if self._image is None or self._image.isNull():
+        source = self._source_size()
+        if source is None:
             return None
         u, v = float(point[0]), float(point[1])
         if not np.isfinite((u, v)).all():
             return None
-        scale_x = target.width() / max(1, self._image.width())
-        scale_y = target.height() / max(1, self._image.height())
-        x = target.left() + u * scale_x
-        y = target.top() + v * scale_y
+        x = target.left() + (u / source[0]) * target.width()
+        y = target.top() + (v / source[1]) * target.height()
         if not (target.left() - 40 <= x <= target.right() + 40):
             return None
         if not (target.top() - 40 <= y <= target.bottom() + 40):
             return None
         return QPointF(x, y)
 
+    def _project_with_calibration(
+        self, point, target: QRectF
+    ) -> Optional[QPointF]:
+        """Pinhole projection using the camera's *recorded* intrinsics.
+
+        Used only for recordings that predate 2D keypoints. It is a real
+        projection - focal length and principal point come from the device -
+        rather than the guessed focal ratio it replaces. Without a calibration
+        block this returns nothing and the caller declines to overlay.
+        """
+        calibration = self._calibration
+        if not calibration:
+            return None
+        try:
+            fx = float(calibration["fx"])
+            fy = float(calibration["fy"])
+            cx = float(calibration["cx"])
+            cy = float(calibration["cy"])
+            width = float(calibration["image_width"])
+            height = float(calibration["image_height"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not (fx > 0 and fy > 0 and width > 0 and height > 0):
+            return None
+
+        x, y, z = float(point[0]), float(point[1]), float(point[2])
+        if not np.isfinite((x, y, z)).all() or z <= 0.05:
+            return None
+        # The capture coordinate system is right-handed Y-up, so the image row
+        # axis runs opposite to the world Y axis.
+        u = cx + fx * x / z
+        v = cy - fy * y / z
+        screen_x = target.left() + (u / width) * target.width()
+        screen_y = target.top() + (v / height) * target.height()
+        if not (target.left() - 40 <= screen_x <= target.right() + 40):
+            return None
+        if not (target.top() - 40 <= screen_y <= target.bottom() + 40):
+            return None
+        return QPointF(screen_x, screen_y)
+
     def _body_points(self, body, target: QRectF) -> list[Optional[QPointF]]:
-        """Screen points for one body, exactly when the tracker gave them."""
+        """Screen points for one body, or nothing when they cannot be trusted.
+
+        Order of preference, and there is no third option: the tracker's own 2D
+        keypoints, then a pinhole projection through the camera's *recorded*
+        intrinsics. A recording with neither gets no overlay at all - showing an
+        approximately-placed skeleton would look like a tracking error rather
+        than like missing metadata.
+        """
         count = body.num_joints
-        if body.joint_positions_2d is not None:
+        if body.joint_positions_2d is not None and self._source_size() is not None:
             return [
                 self._project_2d(body.joint_positions_2d[i], target)
                 for i in range(count)
             ]
-        return [
-            self._project(body.joint_positions_xyz[i], target) for i in range(count)
-        ]
+        if self._calibration:
+            return [
+                self._project_with_calibration(body.joint_positions_xyz[i], target)
+                for i in range(count)
+            ]
+        return [None] * count
+
+    def can_overlay(self, bodies: Sequence[BodyPose]) -> bool:
+        """Whether these bodies can be drawn on the image honestly."""
+        if not bodies:
+            return True
+        for body in bodies:
+            if body.joint_positions_2d is not None and self._source_size():
+                return True
+        return bool(self._calibration)
 
     def _paint_skeletons(self, painter: QPainter, target: QRectF) -> None:
         spec = self._spec

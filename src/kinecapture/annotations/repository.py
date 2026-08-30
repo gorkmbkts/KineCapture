@@ -1066,6 +1066,44 @@ class AnnotationRepository:
         )
         return option
 
+    def ensure_movement_class(self, name: str, description: str = "") -> LabelOption:
+        """Find or create a movement class and persist it to the project.
+
+        The same rule as :meth:`ensure_error_class`, and for the same reason:
+        the vocabulary belongs to the project, so it is written to
+        ``label_schema.json`` immediately and atomically, survives a restart,
+        appears in every other take's picker - and stays out of the annotation
+        undo history. Undoing a label must not un-define a class other takes
+        may already be using.
+        """
+        cleaned = " ".join((name or "").split())
+        if not cleaned:
+            raise ValidationError(
+                "Hareket türü adı boş olamaz.",
+                field="exercise",
+                code="exercise_name_empty",
+            )
+        schema = self.workspace.label_schema
+        existing = schema.match_exercise(cleaned)
+        if existing is not None:
+            return existing
+        option = schema.add_exercise(cleaned, description)
+        self.workspace.save_label_schema(schema)
+        logger.info("Hareket türü eklendi: %s (%s)", option.label, option.code)
+        return option
+
+    def assign_new_movement_class(
+        self, sample_id: str, name: str
+    ) -> tuple[MovementSample, LabelOption]:
+        """Create-or-reuse a movement class and assign it in one user action."""
+        option = self.ensure_movement_class(name)
+        sample = self.label_sample(sample_id, exercise=option.code)
+        return sample, option
+
+    def used_exercise_codes(self) -> set[str]:
+        """Movement classes referenced by this take's labels."""
+        return {s.exercise for s in self._samples if s.exercise}
+
     def assign_new_error_class(
         self, sample_id: str, interval_id: str, name: str
     ) -> tuple[ErrorInterval, LabelOption]:

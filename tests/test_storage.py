@@ -121,11 +121,11 @@ def test_participant_codes_are_sequential(workspace: ProjectWorkspace) -> None:
 
 
 def test_participant_code_contains_no_pii(workspace: ProjectWorkspace) -> None:
-    participant = workspace.create_participant()
-    participant.notes = "arbitrary note"
-    workspace.save_participant(participant)
-    # The directory name is the pseudonymous code and nothing else.
-    assert workspace.participant_dir(participant.participant_id).name == "P0001"
+    participant = workspace.create_participant(created_by_user_id="usr_test")
+    # The persistent id and generated code contain no supplied identity data.
+    assert participant.code == "P0001"
+    assert participant.participant_id == "P0001"
+    assert participant.created_by_user_id == "usr_test"
 
 
 def test_workspace_rejects_path_traversal(workspace: ProjectWorkspace) -> None:

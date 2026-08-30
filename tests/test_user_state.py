@@ -32,6 +32,7 @@ def test_saved_state_round_trips(isolated_user_state: Path, tmp_path: Path) -> N
         theme="light",
         backend=BackendKind.ZED,
         preview_fps=24.0,
+        last_username="ayse",
     )
     save_user_state(config)
     payload = yaml.safe_load(isolated_user_state.read_text(encoding="utf-8"))
@@ -39,6 +40,9 @@ def test_saved_state_round_trips(isolated_user_state: Path, tmp_path: Path) -> N
     assert payload["backend"] == "zed"
     assert payload["preview_fps"] == 24.0
     assert payload["dataset_root"] == str(tmp_path / "roundtrip")
+    assert payload["last_username"] == "ayse"
+    assert "password" not in " ".join(payload).casefold()
+    assert "identity_db_path" not in payload
 
 
 def test_loading_config_does_not_write(isolated_user_state: Path) -> None:

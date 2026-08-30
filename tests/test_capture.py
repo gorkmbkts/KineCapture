@@ -298,6 +298,21 @@ def test_stop_recording_without_recording_returns_none(
     service.shutdown()
 
 
+def test_recording_persists_the_operator_user_id(workspace, session) -> None:
+    from tests.conftest import paced_backend, record_take
+
+    session.operator = "Ayşe Koç"
+    session.operator_user_id = "usr_persistent"
+    workspace.save_session(session)
+    service = CaptureService(paced_backend(width=64, height=48))
+    service.connect()
+    take = record_take(service, workspace, session, frames=8)
+    service.shutdown()
+    assert take.operator_user_id == "usr_persistent"
+    restored = workspace.load_take(take.participant_id, take.session_id, take.take_id)
+    assert restored.operator_user_id == "usr_persistent"
+
+
 def test_active_body_change_is_recorded_not_silent(
     mock_backend: MockCameraBackend, workspace, session
 ) -> None:

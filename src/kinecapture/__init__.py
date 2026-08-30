@@ -19,16 +19,16 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.6.0"
+APP_VERSION: str = "0.8.0"
 
 #: Schema version for ``project.json``.
-PROJECT_SCHEMA_VERSION: str = "1.0.0"
+PROJECT_SCHEMA_VERSION: str = "1.1.0"
 
 #: Schema version for ``participant.json`` and ``session.json``.
-SESSION_SCHEMA_VERSION: str = "1.0.0"
+SESSION_SCHEMA_VERSION: str = "2.0.0"
 
 #: Schema version for ``take.json``.
-TAKE_SCHEMA_VERSION: str = "1.0.0"
+TAKE_SCHEMA_VERSION: str = "1.1.0"
 
 #: Schema version for the append-safe per-frame skeleton sidecar (JSONL).
 #: 1.1 adds optional tracker fields (2D keypoints, per-joint covariances,

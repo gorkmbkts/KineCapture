@@ -376,9 +376,12 @@ def test_every_page_paints(qapp, tmp_path) -> None:
     """Render each workspace page - the check that would have caught the crash."""
     from kinecapture.core.config import AppConfig
     from kinecapture.gui.main_window import _PAGES, MainWindow
+    from tests.conftest import authenticate_state
 
     config = AppConfig(dataset_root=tmp_path / "data", log_dir=tmp_path / "logs")
     window = MainWindow(config)
+    user = authenticate_state(window.state)
+    window._authentication_completed(user)
     window.resize(1280, 800)
     try:
         for key, _cls in _PAGES:
@@ -399,7 +402,7 @@ def test_review_page_paints_with_a_loaded_take(qapp, workspace, session) -> None
     from kinecapture.domain.enums import TakeQuality
     from kinecapture.gui.main_window import MainWindow
     from kinecapture.playback.take_reader import load_take
-    from tests.conftest import paced_backend, record_take
+    from tests.conftest import authenticate_state, paced_backend, record_take
 
     service = CaptureService(paced_backend())
     service.connect()
@@ -440,7 +443,8 @@ def test_review_page_paints_with_a_loaded_take(qapp, workspace, session) -> None
     window = MainWindow(config)
     window.resize(1280, 800)
     try:
-        window.state.open_project(workspace.root)
+        user = authenticate_state(window.state, workspace, open_workspace=False)
+        window._authentication_completed(user)
         qapp.processEvents()
         window.navigate("review")
         qapp.processEvents()
@@ -455,13 +459,15 @@ def test_review_page_paints_with_a_loaded_take(qapp, workspace, session) -> None
         qapp.processEvents()
         assert not window.grab().isNull()
 
-        # With a movement selected, which paints the handles.
-        page._sample_list.setCurrentRow(0)
+        # With a movement selected, which paints the handles. The list that
+        # used to do this is gone: the timeline is the selection surface now.
+        samples = page._repo.samples
+        page._select_sample_by_id(samples[0].sample_id)
         qapp.processEvents()
         assert not window.grab().isNull()
 
         # In error mode on the movement that has an interval.
-        page._sample_list.setCurrentRow(1)
+        page._select_sample_by_id(samples[1].sample_id)
         qapp.processEvents()
         page._set_timeline_mode(TimelineMode.ERROR)
         qapp.processEvents()

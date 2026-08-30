@@ -233,7 +233,7 @@ class Project:
     default_capture_profile: CaptureProfile = field(default_factory=CaptureProfile)
     protocols: list[CaptureProtocol] = field(default_factory=list)
     label_schema_version: str = LABEL_SCHEMA_VERSION
-    required_session_fields: tuple[str, ...] = ("operator",)
+    required_session_fields: tuple[str, ...] = ()
     anonymous_participants: bool = True
     next_participant_sequence: int = 1
     app_version: str = APP_VERSION
@@ -288,7 +288,7 @@ class Project:
                 payload.get("label_schema_version") or LABEL_SCHEMA_VERSION
             ),
             required_session_fields=tuple(
-                payload.get("required_session_fields") or ("operator",)
+                payload.get("required_session_fields") or ()
             ),
             anonymous_participants=bool(payload.get("anonymous_participants", True)),
             next_participant_sequence=int(payload.get("next_participant_sequence", 1)),
@@ -301,23 +301,22 @@ class Project:
 class Participant:
     """A pseudonymous subject (``participant.json``).
 
-    ``code`` is the only identity that ever reaches a file name or an exported
-    dataset. Optional biometric fields exist because they are needed for
-    normalisation research, not because they identify anyone.
+    The product-facing model is deliberately minimal. Biometric and free-text
+    fields are not collected in the participant flow.
     """
 
     participant_id: str
     code: str
     created_at: str = field(default_factory=utc_now_iso)
-    notes: str = ""
-    height_cm: Optional[float] = None
-    mass_kg: Optional[float] = None
-    dominant_side: str = "unknown"
-    attributes: dict[str, Any] = field(default_factory=dict)
+    created_by_user_id: str = ""
     schema_version: str = SESSION_SCHEMA_VERSION
 
     @classmethod
     def create(cls, code: str, **kwargs: Any) -> "Participant":
+        # The anonymous project-local code is immutable, so it also serves as
+        # the compact persistent id. Keeping it compact matters on Windows:
+        # take paths are already deep and third-party tools do not all accept
+        # extended-length path prefixes.
         return cls(participant_id=code, code=code, **kwargs)
 
     def to_dict(self) -> dict[str, Any]:
@@ -326,11 +325,7 @@ class Participant:
             "participant_id": self.participant_id,
             "code": self.code,
             "created_at": self.created_at,
-            "notes": self.notes,
-            "height_cm": self.height_cm,
-            "mass_kg": self.mass_kg,
-            "dominant_side": self.dominant_side,
-            "attributes": dict(self.attributes),
+            "created_by_user_id": self.created_by_user_id,
         }
 
     @classmethod
@@ -339,11 +334,7 @@ class Participant:
             participant_id=str(payload["participant_id"]),
             code=str(payload.get("code") or payload["participant_id"]),
             created_at=str(payload.get("created_at") or utc_now_iso()),
-            notes=str(payload.get("notes", "")),
-            height_cm=payload.get("height_cm"),
-            mass_kg=payload.get("mass_kg"),
-            dominant_side=str(payload.get("dominant_side", "unknown")),
-            attributes=dict(payload.get("attributes") or {}),
+            created_by_user_id=str(payload.get("created_by_user_id", "")),
             schema_version=str(payload.get("schema_version") or SESSION_SCHEMA_VERSION),
         )
 
@@ -358,6 +349,7 @@ class Session:
     started_at: str = field(default_factory=utc_now_iso)
     ended_at: Optional[str] = None
     operator: str = ""
+    operator_user_id: str = ""
     protocol_id: Optional[str] = None
     notes: str = ""
     consent: ConsentStatus = ConsentStatus.UNKNOWN
@@ -390,6 +382,7 @@ class Session:
             "started_at": self.started_at,
             "ended_at": self.ended_at,
             "operator": self.operator,
+            "operator_user_id": self.operator_user_id,
             "protocol_id": self.protocol_id,
             "notes": self.notes,
             "consent": self.consent.value,
@@ -406,6 +399,7 @@ class Session:
             started_at=str(payload.get("started_at") or utc_now_iso()),
             ended_at=payload.get("ended_at"),
             operator=str(payload.get("operator", "")),
+            operator_user_id=str(payload.get("operator_user_id", "")),
             protocol_id=payload.get("protocol_id"),
             notes=str(payload.get("notes", "")),
             consent=_enum(payload.get("consent"), ConsentStatus, ConsentStatus.UNKNOWN),
@@ -513,6 +507,7 @@ class Take:
     session_id: str
     participant_id: str
     project_id: str
+    operator_user_id: str = ""
     index_in_session: int = 1
     started_at: str = field(default_factory=utc_now_iso)
     ended_at: Optional[str] = None
@@ -578,6 +573,7 @@ class Take:
             "session_id": self.session_id,
             "participant_id": self.participant_id,
             "project_id": self.project_id,
+            "operator_user_id": self.operator_user_id,
             "index_in_session": self.index_in_session,
             "started_at": self.started_at,
             "ended_at": self.ended_at,
@@ -606,6 +602,7 @@ class Take:
             session_id=str(payload.get("session_id", "")),
             participant_id=str(payload.get("participant_id", "")),
             project_id=str(payload.get("project_id", "")),
+            operator_user_id=str(payload.get("operator_user_id", "")),
             index_in_session=int(payload.get("index_in_session", 1)),
             started_at=str(payload.get("started_at") or utc_now_iso()),
             ended_at=payload.get("ended_at"),

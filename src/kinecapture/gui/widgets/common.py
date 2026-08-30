@@ -8,8 +8,8 @@ from __future__ import annotations
 
 from typing import Iterable, Optional
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtGui import QFont, QPainter
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -112,6 +112,7 @@ class Card(QFrame):
         subtitle: str = "",
         theme: Optional[Theme] = None,
         icon: str = "",
+        compact: bool = False,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
@@ -120,12 +121,17 @@ class Card(QFrame):
         self._icon_name = icon
 
         outer = QVBoxLayout(self)
-        margin = theme.space_sm + 2 if theme else 10
+        # ``compact`` is for a card that *is* the screen rather than one item on
+        # it - the review viewer and timeline - where the usual breathing room
+        # is space the camera picture and the lanes need more.
+        margin = (theme.space_xs + 2 if compact else theme.space_sm + 2) if theme else 10
+        spacing = (theme.space_xs if compact else theme.space_sm) if theme else 8
         outer.setContentsMargins(margin, margin, margin, margin)
-        outer.setSpacing(theme.space_sm if theme else 8)
+        outer.setSpacing(spacing)
+        self._compact = compact
 
         self._header = QHBoxLayout()
-        self._header.setSpacing(theme.space_sm if theme else 8)
+        self._header.setSpacing(spacing)
         self._icon_label = QLabel()
         self._icon_label.setVisible(False)
         self._header.addWidget(self._icon_label)
@@ -148,7 +154,7 @@ class Card(QFrame):
         outer.addLayout(self._header)
 
         self.body = QVBoxLayout()
-        self.body.setSpacing(theme.space_sm if theme else 8)
+        self.body.setSpacing(spacing)
         outer.addLayout(self.body, 1)
 
         if icon and theme:
@@ -443,7 +449,12 @@ class KeyValueList(QWidget):
             row = QHBoxLayout()
             row.setSpacing(self._theme.space_sm)
             key = make_label("", role="muted")
-            key.setMinimumWidth(150)
+            # Wraps rather than forcing the panel wider: these lists now live
+            # in a side window, where a long key used to push the value column
+            # off the edge instead of taking a second line.
+            key.setWordWrap(True)
+            key.setMinimumWidth(120)
+            key.setMaximumWidth(190)
             value = QLabel("")
             value.setWordWrap(True)
             value.setTextInteractionFlags(
@@ -470,6 +481,50 @@ class KeyValueList(QWidget):
         restyle(self)
 
 
+class ElidedLabel(QLabel):
+    """A one-line label that shortens its text instead of widening its parent.
+
+    A wrapping label solves the width problem by growing downwards, which on a
+    768px-tall screen takes the space from whatever it sits above - here, the
+    camera view. Eliding keeps the row exactly one line tall at every window
+    size, and the full text stays available as a tooltip.
+    """
+
+    def __init__(
+        self, text: str = "", *, role: str = "", parent: Optional[QWidget] = None
+    ) -> None:
+        super().__init__(text, parent)
+        if role:
+            self.setProperty("role", role)
+        self.setWordWrap(False)
+        self.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self._full_text = text
+        self.setToolTip(text)
+
+    def setText(self, text: str) -> None:  # noqa: N802
+        self._full_text = text
+        self.setToolTip(text)
+        super().setText(text)
+        self.update()
+
+    def text(self) -> str:
+        return self._full_text
+
+    def minimumSizeHint(self) -> "QSize":  # noqa: N802
+        hint = super().minimumSizeHint()
+        return QSize(0, hint.height())
+
+    def paintEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        painter = QPainter(self)
+        metrics = painter.fontMetrics()
+        elided = metrics.elidedText(
+            self._full_text, Qt.TextElideMode.ElideRight, self.width()
+        )
+        painter.setPen(self.palette().windowText().color())
+        painter.drawText(self.rect(), int(self.alignment()), elided)
+        painter.end()
+
+
 class SectionHeader(QWidget):
     """A page-level heading with an optional description and action slot."""
 
@@ -489,11 +544,15 @@ class SectionHeader(QWidget):
 
         column = QVBoxLayout()
         column.setSpacing(2)
-        self._title = make_label(title, role="title")
+        # Both lines elide rather than wrap. At a narrow window the heading
+        # gives way to the controls beside it, which are what the user came
+        # for, and the header stays two lines tall instead of six - the four it
+        # used to steal came straight out of the camera view below.
+        self._title = ElidedLabel(title, role="title")
+        self._title.setMinimumWidth(120)
         column.addWidget(self._title)
-        self._description = make_label(description, role="subtitle")
+        self._description = ElidedLabel(description, role="subtitle")
         self._description.setVisible(bool(description))
-        self._description.setWordWrap(True)
         column.addWidget(self._description)
         layout.addLayout(column, 1)
 
@@ -525,6 +584,7 @@ def monospace_font(size: int) -> QFont:
 __all__ = [
     "HEALTH_PRESENTATION",
     "Card",
+    "ElidedLabel",
     "EmptyState",
     "FieldRow",
     "KeyValueList",

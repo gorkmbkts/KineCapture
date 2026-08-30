@@ -143,6 +143,45 @@ class LabelSchema:
     def find_error_type(self, code: str) -> Optional[LabelOption]:
         return next((o for o in self.error_types if o.code == code), None)
 
+    def match_exercise(self, name: str) -> Optional[LabelOption]:
+        """Find an existing exercise that a typed name would duplicate.
+
+        Exercises are now created mid-labelling exactly like error classes, so
+        they need the same forgiving duplicate rule: a stray capital or a
+        double space must select the existing class rather than quietly
+        splitting one movement into two.
+        """
+        candidate = LabelOption.from_name(name) if name.strip() else None
+        if candidate is None:
+            return None
+        key = candidate.match_key
+        for option in self.exercises:
+            if option.match_key == key or option.code == candidate.code:
+                return option
+        return None
+
+    def search_exercises(self, query: str) -> list[LabelOption]:
+        """Exercises matching a free-text query, best matches first."""
+        text = _match_key(query)
+        if not text:
+            return list(self.exercises)
+        starts: list[LabelOption] = []
+        contains: list[LabelOption] = []
+        for option in self.exercises:
+            haystack = f"{option.match_key} {option.code}"
+            if option.match_key.startswith(text) or option.code.startswith(text):
+                starts.append(option)
+            elif text in haystack:
+                contains.append(option)
+        return starts + contains
+
+    def ensure_exercise(self, name: str, description: str = "") -> LabelOption:
+        """Return the matching exercise, creating it only if it is new."""
+        existing = self.match_exercise(name)
+        if existing is not None:
+            return existing
+        return self.add_exercise(name, description)
+
     def match_error_type(self, name: str) -> Optional[LabelOption]:
         """Find an existing class that a typed name would duplicate."""
         candidate = LabelOption.from_name(name) if name.strip() else None
@@ -175,16 +214,15 @@ class LabelSchema:
 
     # -------------------------------------------------------------- mutation
     def add_exercise(self, name: str, description: str = "") -> LabelOption:
-        """Add an exercise, refusing a duplicate rather than shadowing one."""
+        """Add an exercise, refusing a near-duplicate.
+
+        Detection matches :meth:`add_error_type`: case, spacing and Unicode
+        form are normalised, because both vocabularies are now edited from a
+        labelling dialog where a typo would otherwise create a second class
+        that means the same thing.
+        """
         option = LabelOption.from_name(name, description)
-        existing = next(
-            (
-                o
-                for o in self.exercises
-                if o.code == option.code or o.match_key == option.match_key
-            ),
-            None,
-        )
+        existing = self.match_exercise(name)
         if existing is not None:
             raise ValidationError(
                 f"'{existing.label}' egzersizi zaten tanımlı.",

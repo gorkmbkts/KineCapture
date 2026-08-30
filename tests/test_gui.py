@@ -42,9 +42,12 @@ def qapp():
 @pytest.fixture
 def window(qapp, tmp_path):
     from kinecapture.gui.main_window import MainWindow
+    from tests.conftest import authenticate_state
 
     config = AppConfig(dataset_root=tmp_path / "data", log_dir=tmp_path / "logs")
     window = MainWindow(config)
+    user = authenticate_state(window.state)
+    window._authentication_completed(user)
     yield window
     window.state.release_capture_service()
     window.close()
@@ -204,6 +207,7 @@ def test_context_bar_reflects_state(window, tmp_path) -> None:
     from kinecapture.dataset.workspace import ProjectWorkspace
 
     workspace = ProjectWorkspace.create(tmp_path / "data", "Bağlam Testi")
+    window.state.identity.register_project(window.state.current_user, workspace)
     window.state.open_project(workspace.root)
     participant = workspace.create_participant()
     window.state.set_participant(participant)

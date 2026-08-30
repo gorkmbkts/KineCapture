@@ -1,6 +1,8 @@
 # CLAUDE.md — kalıcı çalışma talimatları
 
-Bu dosya kısa tutulmalıdır. Ayrıntılı proje bağlamı `MEMORY.md` içindedir.
+Bu dosya kısa tutulmalıdır. Ayrıntılı ve Claude/Codex tarafından paylaşılan
+otoritatif proje bağlamı `MEMORY.md` içindedir. Codex'in kısa eşleniği
+`AGENTS.md` dosyasıdır.
 
 ## Her görevde
 

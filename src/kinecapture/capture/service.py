@@ -513,6 +513,7 @@ class CaptureService:
 
         take, paths = workspace.prepare_take(
             session,
+            operator_user_id=session.operator_user_id,
             exercise=exercise,
             notes=notes,
             protocol_task_id=protocol_task_id,

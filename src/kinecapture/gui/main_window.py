@@ -4,7 +4,7 @@ Layout:
 
 ```text
 +--------+--------------------------------------------------------------+
-|  nav   |  context bar: project | participant | session | camera | disk |
+|  nav   |  context: user | project | participant | camera | disk         |
 |  rail  +--------------------------------------------------------------+
 | (col-  |                                                              |
 | lapsi- |                        active page                           |
@@ -14,27 +14,31 @@ Layout:
 +-----------------------------------------------------------------------+
 ```
 
-The window owns nothing about the domain: it routes navigation, renders shared
-context from :class:`~kinecapture.gui.state.AppState`, and turns structured
-errors into a readable banner while the traceback goes to the log.
+Authentication gates the workspace before navigation becomes visible. The
+window routes navigation, renders shared context from
+:class:`~kinecapture.gui.state.AppState`, and turns structured errors into a
+readable banner while the traceback goes to the log.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QMenu,
     QStackedWidget,
     QStatusBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -45,6 +49,8 @@ from kinecapture.core.errors import KineCaptureError
 from kinecapture.core.logging import get_logger
 from kinecapture.domain.enums import CaptureState
 from kinecapture.gui.icons import app_icon, clear_icon_cache, get_icon, icon_size
+from kinecapture.gui.admin import ManageUsersDialog
+from kinecapture.gui.auth import AuthPage, ChangePasswordDialog
 from kinecapture.gui.pages.base import Page
 from kinecapture.gui.pages.capture import CapturePage
 from kinecapture.gui.pages.dashboard import DashboardPage
@@ -166,6 +172,10 @@ class NavigationRail(QFrame):
 class ContextBar(QFrame):
     """The always-visible answer to "what am I working on right now?"."""
 
+    change_password_requested = Signal()
+    logout_requested = Signal()
+    manage_users_requested = Signal()
+
     def __init__(self, state: AppState, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.setProperty("role", "card")
@@ -178,11 +188,26 @@ class ContextBar(QFrame):
         )
         layout.setSpacing(theme.space_md)
 
+        self._user_button = QToolButton()
+        self._user_button.setText("Kullanıcı yok")
+        self._user_button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._user_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._user_button.setIcon(get_icon("participants", theme.text_secondary, 16))
+        self._user_menu = QMenu(self._user_button)
+        self._change_password_action = self._user_menu.addAction("Şifre Değiştir")
+        self._change_password_action.triggered.connect(self.change_password_requested)
+        self._manage_users_action = self._user_menu.addAction("Kullanıcıları Yönet")
+        self._manage_users_action.triggered.connect(self.manage_users_requested)
+        self._user_menu.addSeparator()
+        self._logout_action = self._user_menu.addAction("Oturumu Kapat")
+        self._logout_action.triggered.connect(self.logout_requested)
+        self._user_button.setMenu(self._user_menu)
+        layout.addWidget(self._user_button)
+
         self._chips: dict[str, StatusChip] = {}
         for key, icon in (
             ("project", "project"),
             ("participant", "participants"),
-            ("session", "clock"),
             ("camera", "camera"),
             ("disk", "disk"),
         ):
@@ -199,6 +224,11 @@ class ContextBar(QFrame):
         state = self._state
         theme = state.theme
 
+        user = state.current_user
+        self._user_button.setText(user.display_name if user else "Kullanıcı yok")
+        self._user_button.setEnabled(user is not None)
+        self._manage_users_action.setVisible(bool(user and user.is_owner))
+
         project = state.project
         self._chips["project"].set_status(
             project.name if project else "Proje yok",
@@ -209,12 +239,6 @@ class ContextBar(QFrame):
             participant.code if participant else "Katılımcı yok",
             colour=theme.text_primary if participant else theme.text_muted,
         )
-        session = state.session
-        self._chips["session"].set_status(
-            f"Oturum {session.session_id[-8:]}" if session else "Oturum yok",
-            colour=theme.text_primary if session else theme.text_muted,
-        )
-
         service = state.capture
         if service is None or service.state is CaptureState.DISCONNECTED:
             self._chips["camera"].set_status(
@@ -256,6 +280,7 @@ class ContextBar(QFrame):
             )
 
     def apply_theme(self, theme: Theme) -> None:
+        self._user_button.setIcon(get_icon("participants", theme.text_secondary, 16))
         for chip in self._chips.values():
             chip.apply_theme(theme)
         self._recording.apply_theme(theme)
@@ -328,8 +353,8 @@ class MainWindow(QMainWindow):
         self.resize(1500, 940)
         self.setMinimumSize(1120, 700)
 
-        central = QWidget()
-        root = QHBoxLayout(central)
+        shell = QWidget()
+        root = QHBoxLayout(shell)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
@@ -352,7 +377,12 @@ class MainWindow(QMainWindow):
         self._stack = QStackedWidget()
         right_layout.addWidget(self._stack, 1)
         root.addWidget(right, 1)
-        self.setCentralWidget(central)
+        self._root_stack = QStackedWidget()
+        self._auth_page = AuthPage(self.state)
+        self._root_stack.addWidget(self._auth_page)
+        self._root_stack.addWidget(shell)
+        self.setCentralWidget(self._root_stack)
+        self._shell = shell
 
         self._pages: dict[str, Page] = {}
         self._current_key = ""
@@ -374,6 +404,7 @@ class MainWindow(QMainWindow):
         self.state.error_raised.connect(self._banner.show_error)
         self.state.status_message.connect(self._show_status)
         self.state.theme_changed.connect(self._apply_theme)
+        self.state.user_changed.connect(lambda *_: self._context.refresh())
         self.state.review_requested.connect(lambda _: self.navigate("review"))
         for signal in (
             self.state.project_changed,
@@ -381,6 +412,10 @@ class MainWindow(QMainWindow):
             self.state.session_changed,
         ):
             signal.connect(lambda *_: self._context.refresh())
+        self._context.change_password_requested.connect(self._change_password)
+        self._context.logout_requested.connect(self._logout)
+        self._context.manage_users_requested.connect(self._manage_users)
+        self._auth_page.authenticated.connect(self._authentication_completed)
 
         self._context_timer = QTimer(self)
         self._context_timer.setInterval(_CONTEXT_REFRESH_MS)
@@ -390,7 +425,7 @@ class MainWindow(QMainWindow):
         self._install_shortcuts()
         self._apply_theme(theme)
         self.navigate("dashboard")
-        self._restore_last_project()
+        self._root_stack.setCurrentWidget(self._auth_page)
 
     # ----------------------------------------------------------- navigation
     def navigate(self, key: str) -> None:
@@ -435,6 +470,7 @@ class MainWindow(QMainWindow):
         self._nav.apply_theme(theme)
         self._context.apply_theme(theme)
         self._banner.apply_theme(theme)
+        self._auth_page.apply_theme(theme)
         for page in self._pages.values():
             page.apply_theme(theme)
         # Nav icons are tinted, so they must be re-rendered for the new palette.
@@ -458,26 +494,88 @@ class MainWindow(QMainWindow):
         state_text = service.state.value if service else "DISCONNECTED"
         self._status_detail.setText(f"{backend} · {state_text}")
 
-    # ------------------------------------------------------------- start-up
-    def _restore_last_project(self) -> None:
-        """Reopen the last project so closing and reopening keeps state."""
-        last = self.state.config.last_project_path
-        if last is None or not (last / "project.json").is_file():
-            if last is not None:
-                self.state.notify(
-                    f"Son proje bulunamadı ({last}). Projeler ekranından seçin.", 8000
-                )
+    # -------------------------------------------------------- authentication
+    def _authentication_completed(self, _user: object) -> None:
+        self._root_stack.setCurrentWidget(self._shell)
+        self._context.refresh()
+        self._route_after_login()
+
+    def _route_after_login(self) -> None:
+        """Apply the deterministic project-selection rules after login."""
+        try:
+            projects = self.state.list_accessible_projects()
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
+            self.navigate("projects")
+            return
+        if len(projects) == 1:
+            try:
+                workspace = self.state.open_project(projects[0].path)
+            except KineCaptureError as exc:
+                self.state.report_error(exc)
                 self.navigate("projects")
+                return
+            self.state.notify(f"Proje açıldı: {workspace.project.name}")
+            self.navigate("participants")
+            return
+        # With zero or multiple projects, selection stays explicit. A stale or
+        # unauthorized last_project_path is never handed to ProjectWorkspace.
+        self.navigate("projects")
+
+    def _restore_last_project(self) -> None:
+        """Compatibility entry point; authorization always precedes opening."""
+        if not self.state.is_authenticated:
+            return
+        self._route_after_login()
+
+    def _change_password(self) -> None:
+        user = self.state.current_user
+        if user is None:
+            return
+        dialog = ChangePasswordDialog(self.state, user, parent=self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.updated_user:
+            self.state.replace_current_user(dialog.updated_user)
+            self.state.notify("Şifreniz değiştirildi.")
+
+    def _manage_users(self) -> None:
+        user = self.state.current_user
+        if user is None or not user.is_owner:
             return
         try:
-            workspace = self.state.open_project(last)
-            self.state.notify(f"Son proje açıldı: {workspace.project.name}")
+            ManageUsersDialog(self.state, self).exec()
         except KineCaptureError as exc:
-            logger.warning("Son proje açılamadı: %s", exc.message)
-            self.state.notify(
-                f"Son proje açılamadı: {exc.message} {exc.remedy}".strip(), 9000
+            self.state.report_error(exc)
+
+    def _logout(self) -> None:
+        service = self.state.capture
+        abort = False
+        if service is not None and service.is_recording:
+            answer = QMessageBox.question(
+                self,
+                "Kayıt sürüyor",
+                "Oturumu kapatmadan önce devam eden kayıt güvenli biçimde "
+                "sonlandırılıp yarım olarak işaretlenecek. Devam edilsin mi?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
-            self.navigate("projects")
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            abort = True
+        try:
+            self.state.logout(abort_recording=abort)
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
+            return
+        self._auth_page.refresh_mode()
+        self._current_key = ""
+        self._root_stack.setCurrentWidget(self._auth_page)
+        self._password_focus()
+
+    def _password_focus(self) -> None:
+        password = getattr(self._auth_page, "_password", None)
+        if password is not None:
+            password.clear()
+            password.setFocus()
 
     # -------------------------------------------------------------- closing
     def closeEvent(self, event: QCloseEvent) -> None:

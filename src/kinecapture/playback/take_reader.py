@@ -371,6 +371,65 @@ class SkeletonStream:
             "has_association": np.asarray([self.has_subject_lock]),
         }
 
+    @property
+    def dominant_tracking_id(self) -> Optional[int]:
+        """The identity seen in the most frames, or ``None`` if nobody was.
+
+        Used **only** for takes recorded before the subject lock existed, where
+        there is no recorded answer to "who is the participant". It is a
+        heuristic and is labelled as one wherever it reaches the user; it is
+        never used to overrule a real lock. This matches the rule the exporter
+        applies to the same legacy takes, so the picture on screen and the
+        exported array describe the same person.
+        """
+        counts: dict[int, int] = {}
+        for frame in self.frames:
+            for body in frame.bodies:
+                counts[body.tracking_id] = counts.get(body.tracking_id, 0) + 1
+        if not counts:
+            return None
+        return max(counts.items(), key=lambda item: item[1])[0]
+
+    def review_body_at(
+        self, position: int, *, fallback_id: Optional[int] = None
+    ) -> Optional[BodyPose]:
+        """The one body review may draw at ``position``, or ``None``.
+
+        With a subject lock this is the locked person and nobody else, so a
+        frame where the subject was not tracked returns ``None`` rather than
+        the next best body. Without a lock the caller supplies the legacy
+        ``fallback_id`` it has already told the user about.
+        """
+        frame = self.frame_at(position)
+        if frame is None:
+            return None
+        if self.has_subject_lock:
+            return frame.subject_body()
+        if fallback_id is None:
+            return None
+        for body in frame.bodies:
+            if body.tracking_id == fallback_id:
+                return body
+        return None
+
+    def subject_coverage_curve(
+        self, *, fallback_id: Optional[int] = None
+    ) -> np.ndarray:
+        """``float32 [T]`` usable-joint fraction of the *drawn* person only.
+
+        The timeline used to plot :meth:`coverage_curve` with a ``None``
+        tracking id, which falls back to the best-tracked body in each frame.
+        On a take with a bystander that reads as full coverage during the exact
+        stretch where the participant was lost - the timeline claimed good data
+        for frames the viewport was drawing as empty. Both now read the same
+        body.
+        """
+        values = np.zeros(len(self.frames), dtype=np.float32)
+        for position in range(len(self.frames)):
+            body = self.review_body_at(position, fallback_id=fallback_id)
+            values[position] = body.valid_joint_ratio if body is not None else 0.0
+        return values
+
     def coverage_curve(self, tracking_id: Optional[int]) -> np.ndarray:
         """``float32 [T]`` fraction of usable joints per frame, for the timeline."""
         values = np.zeros(len(self.frames), dtype=np.float32)
@@ -531,16 +590,77 @@ class LoadedTake:
     def has_video(self) -> bool:
         return self.video is not None and self.video.is_available
 
-    def video_position_for(self, position: int) -> int:
-        """Map a skeleton position onto a proxy-video frame.
+    def video_position_for(self, position: int) -> Optional[int]:
+        """Map a skeleton position onto a proxy-video frame, or ``None``.
 
-        They are written from the same frames, so the mapping is normally the
-        identity. When the proxy is shorter (a codec dropped the tail) the
-        position is clamped instead of drifting silently out of sync.
+        The proxy is written frame for frame alongside the pose stream inside
+        the same loop, so the mapping is the identity. When the proxy is
+        shorter - a codec dropped the tail, or the writer was cut off - the
+        positions past its end have **no** colour frame.
+
+        This used to clamp to the last available frame. That silently paired
+        one person's pose with a different moment's picture, which looks
+        exactly like a tracking failure and is impossible to tell apart from
+        one. Returning ``None`` lets the caller say "no RGB for this frame",
+        which is the truth.
         """
         if self.video is None or self.video.frame_count <= 0:
-            return position
-        return int(np.clip(position, 0, self.video.frame_count - 1))
+            return None
+        if not 0 <= position < self.video.frame_count:
+            return None
+        return int(position)
+
+    @property
+    def proxy_frame_shortfall(self) -> int:
+        """How many pose frames have no colour frame behind them."""
+        if self.video is None or self.video.frame_count <= 0:
+            return self.frame_count
+        return max(0, self.frame_count - self.video.frame_count)
+
+    @property
+    def joint_pixel_space(self) -> Optional[tuple[int, int]]:
+        """Resolution the recorded ``joint_positions_2d`` are expressed in.
+
+        This is the *camera's* image, which is not the proxy video: the proxy
+        is downscaled to ``proxy_video_width``. Overlaying 2D joints without
+        this distinction scales every joint by the ratio between the two.
+        """
+        camera = self.take.camera_info
+        if camera is None:
+            return None
+        width, height = camera.resolution
+        return (int(width), int(height)) if width > 0 and height > 0 else None
+
+    @property
+    def camera_calibration(self) -> Optional[dict[str, Any]]:
+        """Verified left-camera intrinsics, when the take recorded them."""
+        camera = self.take.camera_info
+        if camera is None:
+            return None
+        calibration = (camera.extra or {}).get("left_camera_calibration")
+        return dict(calibration) if isinstance(calibration, dict) else None
+
+    @property
+    def has_subject_lock(self) -> bool:
+        return self.stream.has_subject_lock
+
+    @property
+    def legacy_tracking_id(self) -> Optional[int]:
+        """Who to draw for a take that predates the subject lock."""
+        if self.stream.has_subject_lock:
+            return None
+        return self.stream.dominant_tracking_id
+
+    def review_body_at(self, position: int):  # type: ignore[no-untyped-def]
+        """The single body the review screen is allowed to draw."""
+        return self.stream.review_body_at(
+            position, fallback_id=self.legacy_tracking_id
+        )
+
+    def subject_coverage_curve(self):  # type: ignore[no-untyped-def]
+        return self.stream.subject_coverage_curve(
+            fallback_id=self.legacy_tracking_id
+        )
 
     def close(self) -> None:
         if self.video is not None:

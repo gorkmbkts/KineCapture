@@ -26,6 +26,9 @@ from pathlib import Path
 
 #: Legacy Win32 limit. Paths at or above this need the extended prefix.
 MAX_PATH = 259
+# Atomic writers create a short temporary child next to the target. Prefix the
+# parent early enough that the child cannot cross MAX_PATH after the decision.
+_TEMPORARY_CHILD_MARGIN = 32
 
 _EXTENDED_PREFIX = "\\\\?\\"
 _UNC_PREFIX = "\\\\?\\UNC\\"
@@ -46,7 +49,7 @@ def long_path(path: Path | str) -> str:
     if text.startswith(_EXTENDED_PREFIX):
         return text
     absolute = os.path.abspath(text)
-    if len(absolute) < MAX_PATH:
+    if len(absolute) < MAX_PATH - _TEMPORARY_CHILD_MARGIN:
         return absolute
     if absolute.startswith("\\\\"):
         # \\server\share\... -> \\?\UNC\server\share\...

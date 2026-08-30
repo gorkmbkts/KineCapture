@@ -39,11 +39,12 @@ from kinecapture.domain.enums import (
 )
 from kinecapture.domain.models import FramePacket
 from kinecapture.domain.project import ProtocolTask, Take
-from kinecapture.gui.pages.base import Page, scrollable
+from kinecapture.gui.pages.base import Page
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
 from kinecapture.gui.widgets.common import (
     Card,
+    ElidedLabel,
     EmptyState,
     FieldRow,
     KeyValueList,
@@ -52,7 +53,10 @@ from kinecapture.gui.widgets.common import (
     make_button,
     make_label,
     monospace_font,
+    restyle,
 )
+from kinecapture.gui.widgets.flow_layout import flow_row
+from kinecapture.gui.widgets.info_window import InfoWindow
 from kinecapture.gui.widgets.skeleton_view import VIEW_PRESETS, SkeletonView3D
 from kinecapture.gui.widgets.video_view import VideoView
 
@@ -176,7 +180,7 @@ class TakeVerdictDialog(QDialog):
 
 
 class CapturePage(Page):
-    """Live capture with preview, health panel, protocol guidance and controls."""
+    """Live capture with preview, recording-plan guidance and controls."""
 
     navigate_requested = Signal(str)
 
@@ -191,6 +195,8 @@ class CapturePage(Page):
         self._active_task: Optional[ProtocolTask] = None
         self._task_position = 0
         self._known_body_ids: list[int] = []
+        #: Set when the raw archive would not fit; drives the alert strip.
+        self._disk_shortfall = ""
 
         self._backend_selector = QComboBox()
         for kind in BackendKind:
@@ -210,8 +216,8 @@ class CapturePage(Page):
         self.header.add_action(self._connect_button)
 
         self._empty = EmptyState(
-            "Kayıt için bir oturum gerekiyor",
-            "Katılımcı seçip oturum başlattıktan sonra buraya dönün.",
+            "Kayıt bağlamı hazır değil",
+            "Katılımcılar ekranında bir katılımcı seçip Kayda Başla'yı kullanın.",
             theme=theme,
             icon="participants",
             action_text="Katılımcılara git",
@@ -226,16 +232,15 @@ class CapturePage(Page):
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(theme.space_sm)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(self._build_views(theme))
-        # Health panel + protocol + take form exceed the available height
-        # on a 768px screen; scrolling beats clipping the controls.
-        splitter.addWidget(scrollable(self._build_side_panel(theme)))
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 2)
-        splitter.setSizes([900, 460])
-        body.addWidget(splitter, 1)
+        # The reference panels are built first because the live views borrow
+        # two of their controls, but they live in a window that starts closed.
+        # They are consulted a handful of times per session and were costing
+        # the camera views two fifths of the screen the whole time.
+        self._info = InfoWindow("Kayıt bilgileri ve ön kontrol", theme, self)
+        self._info.add_card(self._build_side_panel(theme))
 
+        body.addWidget(self._build_views(theme), 1)
+        body.addWidget(self._build_alerts(theme))
         body.addWidget(self._build_metrics(theme))
         body.addWidget(self._build_controls(theme))
         self.content.addWidget(self._body, 1)
@@ -266,13 +271,20 @@ class CapturePage(Page):
         views = QSplitter(Qt.Orientation.Horizontal)
 
         rgb_card = Card("Canlı görüntü", theme=theme, icon="camera")
+        # Who is being recorded belongs *on* the picture it is decided from.
+        self._subject_chip = StatusChip("Kişi seçilmedi", theme=theme, icon="warning")
+        rgb_card.add_header_widget(self._subject_chip)
         self._view_selector = QComboBox()
         self._view_selector.addItem("RGB", "rgb")
         self._view_selector.addItem("Derinlik", "depth")
         self._view_selector.currentIndexChanged.connect(self._redraw_last_frame)
         rgb_card.add_header_widget(self._view_selector)
+        # Icon-only: the header of a live view is the most width-constrained
+        # row on the page, and this control is a toggle the operator sets once.
         self._overlay_toggle = make_button(
-            "İskelet bindirme", icon="skeleton", theme=theme
+            icon="skeleton",
+            theme=theme,
+            tooltip="İskelet bindirmesini aç / kapat",
         )
         self._overlay_toggle.setCheckable(True)
         self._overlay_toggle.setChecked(True)
@@ -300,13 +312,129 @@ class CapturePage(Page):
         skeleton_card.add_widget(self._skeleton, 1)
         views.addWidget(skeleton_card)
 
-        views.setSizes([560, 460])
+        # Near enough equal: both views are looked at continuously, and there
+        # is no longer a side column taking width from either of them.
+        views.setStretchFactor(0, 1)
+        views.setStretchFactor(1, 1)
+        views.setSizes([760, 640])
         layout.addWidget(views, 1)
         return wrapper
 
+    def _build_alerts(self, theme: Theme) -> QWidget:
+        """The strip for things the operator must act on, and act on now.
+
+        Deliberately small and deliberately permanent. Everything here is either
+        losing data or about to; none of it may end up behind a button, below a
+        fold, or inside the info window.
+        """
+        card = Card(theme=theme)
+        row = QHBoxLayout()
+        row.setSpacing(theme.space_sm)
+
+        self._alert_chip = StatusChip("Uyarı yok", theme=theme, icon="check")
+        row.addWidget(self._alert_chip)
+
+        self._alert_label = make_label("", role="muted")
+        self._alert_label.setWordWrap(True)
+        row.addWidget(self._alert_label, 1)
+
+        self._confirm_subject_button = make_button(
+            "Kimliği yeniden doğrula", theme=theme, icon="check"
+        )
+        self._confirm_subject_button.setToolTip(
+            "Belirsiz durumda, görüntüde doğru kişiye tıkladıktan sonra kilidi "
+            "yeniden kurar. Olay kaydı tutulur."
+        )
+        self._confirm_subject_button.clicked.connect(self._confirm_subject)
+        row.addWidget(self._confirm_subject_button)
+
+        self._clear_subject_button = make_button("Seçimi kaldır", theme=theme)
+        self._clear_subject_button.clicked.connect(self._clear_subject)
+        row.addWidget(self._clear_subject_button)
+
+        container = QWidget()
+        container.setLayout(row)
+        card.add_widget(container)
+        return card
+
+    def _set_alert(self, text: str, level: str = "") -> None:
+        """Show one line, the most urgent one. Silence means nothing is wrong."""
+        theme = self.theme
+        self._alert_label.setText(text)
+        if not text:
+            self._alert_chip.set_status("Uyarı yok", icon="check", colour=theme.success)
+            self._alert_label.setProperty("role", "muted")
+        else:
+            danger = level == "danger"
+            self._alert_chip.set_status(
+                "Dikkat" if danger else "Uyarı",
+                icon="warning",
+                colour=theme.danger if danger else theme.warning,
+            )
+            self._alert_label.setProperty("role", "error" if danger else "")
+        restyle(self._alert_label)
+
+    def _refresh_alerts(self) -> None:
+        """Recompute the strip from the live state, most urgent first."""
+        service = self.state.capture
+        if service is None:
+            self._set_alert("Kameraya bağlanılmadı.", "danger")
+            return
+        if service.state is CaptureState.ERROR:
+            error = service.last_error
+            self._set_alert(
+                "Kamera hatası: "
+                + (error.user_text() if error is not None else "bilinmeyen hata"),
+                "danger",
+            )
+            return
+        if service.statistics.recording_frames_dropped:
+            self._set_alert(
+                f"KAYIT KAYBI: {service.statistics.recording_frames_dropped} kare "
+                "diske yazılamadı. Bu veri geri gelmez.",
+                "danger",
+            )
+            return
+        if self._disk_shortfall:
+            self._set_alert(self._disk_shortfall, "danger")
+            return
+
+        lock = service.subject_lock
+        state = lock.state.value
+        if state == "ambiguous":
+            self._set_alert(
+                "Kişi belirsiz: kanıt yetersiz olduğu için başka birine "
+                "GEÇİLMEDİ. Doğru kişiye tıklayıp 'Kimliği yeniden doğrula'.",
+                "danger",
+            )
+            return
+        if state == "temporarily_lost":
+            self._set_alert(
+                "Seçilen kişi görünmüyor. Kayıt sürüyor; bu kareler 'kişi yok' "
+                "olarak işaretleniyor ve başka bir iskeletle doldurulmuyor."
+            )
+            return
+        if not lock.is_selected:
+            self._set_alert(
+                "Kaydedilecek kişi seçilmedi. Canlı görüntüde kişinin üzerine "
+                "tıklayın."
+            )
+            return
+        self._set_alert("")
+
+    def _toggle_info(self) -> None:
+        self._info.toggle()
+
     def _build_side_panel(self, theme: Theme) -> QWidget:
+        """The reference panels, now the contents of the info window.
+
+        Nothing here changed except where it lives: pre-flight checks, the
+        recording plan, the take form, the subject detail and the archive
+        estimate are all things the operator reads at the start of a session
+        and then occasionally, not continuously.
+        """
         wrapper = QWidget()
-        wrapper.setMinimumWidth(400)
+        wrapper.setMinimumWidth(340)
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.space_md)
@@ -335,7 +463,7 @@ class CapturePage(Page):
         layout.addWidget(self._health_card)
 
         self._task_card = Card(
-            "Protokol", subtitle="Önceki / aktif / sonraki görev.", theme=theme, icon="list"
+            "Kayıt Planı", subtitle="Önceki / aktif / sonraki hareket.", theme=theme, icon="list"
         )
         self._task_details = KeyValueList(theme)
         self._task_card.add_widget(self._task_details)
@@ -361,7 +489,7 @@ class CapturePage(Page):
         self._note_input = QPlainTextEdit()
         self._note_input.setMaximumHeight(56)
         self._note_input.setPlaceholderText("Bu kayda ait not")
-        self._take_card.add_widget(FieldRow("Take notu", self._note_input, theme=theme))
+        self._take_card.add_widget(FieldRow("Kayıt notu", self._note_input, theme=theme))
 
         self._body_selector = QComboBox()
         self._body_selector.addItem("Otomatik (en iyi gövde)", None)
@@ -380,37 +508,16 @@ class CapturePage(Page):
         layout.addWidget(self._take_card)
 
         # --- who is being recorded -----------------------------------
+        # The chip and the two actions live on the main screen, beside the
+        # picture the decision is made from; only the numbers are here.
         self._subject_card = Card(
             "Kaydedilecek kişi",
-            subtitle="Görüntüde kişinin üzerine tıklayın.",
+            subtitle="Seçim canlı görüntüye tıklanarak yapılır.",
             theme=theme,
             icon="participant",
         )
-        self._subject_chip = StatusChip("Kişi seçilmedi", theme=theme, icon="warning")
-        self._subject_card.add_header_widget(self._subject_chip)
         self._subject_details = KeyValueList(theme)
         self._subject_card.add_widget(self._subject_details)
-        self._subject_hint = make_label("", role="muted")
-        self._subject_hint.setWordWrap(True)
-        self._subject_card.add_widget(self._subject_hint)
-
-        buttons = QHBoxLayout()
-        self._confirm_subject_button = make_button(
-            "Kimliği yeniden doğrula", theme=theme, icon="check"
-        )
-        self._confirm_subject_button.setToolTip(
-            "Belirsiz durumda, görüntüde doğru kişiye tıkladıktan sonra kilidi "
-            "yeniden kurar. Olay kaydı tutulur."
-        )
-        self._confirm_subject_button.clicked.connect(self._confirm_subject)
-        buttons.addWidget(self._confirm_subject_button)
-        self._clear_subject_button = make_button("Seçimi kaldır", theme=theme)
-        self._clear_subject_button.clicked.connect(self._clear_subject)
-        buttons.addWidget(self._clear_subject_button)
-        buttons.addStretch(1)
-        holder = QWidget()
-        holder.setLayout(buttons)
-        self._subject_card.add_widget(holder)
         layout.addWidget(self._subject_card)
 
         # --- the immutable raw archive -------------------------------
@@ -429,9 +536,13 @@ class CapturePage(Page):
         return wrapper
 
     def _build_metrics(self, theme: Theme) -> QWidget:
+        """Nine live numbers, on one line when there is room and two when not.
+
+        A plain row would make the page 1340px wide at minimum, which clips the
+        last tiles on a 1120px window - and the tile most likely to be clipped
+        is the last one, which is where the recording loss used to sit.
+        """
         card = Card(theme=theme)
-        row = QHBoxLayout()
-        row.setSpacing(theme.space_sm)
         self._metrics: dict[str, MetricTile] = {}
         specs = [
             ("state", "Durum", "info"),
@@ -444,20 +555,26 @@ class CapturePage(Page):
             ("disk", "Disk", "disk"),
             ("elapsed", "Süre", "clock"),
         ]
+        tiles = []
         for key, caption, icon in specs:
             tile = MetricTile(caption, "-", theme=theme, icon=icon)
             tile._value.setFont(monospace_font(theme.font_size_lg))
+            # Capped so nine of them fit in two lines rather than three: the
+            # third line comes straight out of the live camera view above.
+            tile.setMaximumWidth(135)
             self._metrics[key] = tile
-            row.addWidget(tile)
-        container = QWidget()
-        container.setLayout(row)
-        card.add_widget(container)
+            tiles.append(tile)
+        card.add_widget(flow_row(tiles, spacing=theme.space_sm))
         return card
 
     def _build_controls(self, theme: Theme) -> QWidget:
+        """Mode, preview, record, marker, review and the info window.
+
+        Wraps rather than clips, because the last control on this row is the
+        one that opens everything the screen no longer shows permanently.
+        """
         card = Card(theme=theme)
-        row = QHBoxLayout()
-        row.setSpacing(theme.space_sm)
+        widgets: list[QWidget] = []
 
         self._mode_group = QButtonGroup(self)
         self._guided_button = make_button("Rehberli", theme=theme)
@@ -467,37 +584,48 @@ class CapturePage(Page):
         self._free_button.setChecked(True)
         self._mode_group.addButton(self._guided_button)
         self._mode_group.addButton(self._free_button)
-        row.addWidget(self._guided_button)
-        row.addWidget(self._free_button)
-        row.addSpacing(theme.space_md)
+        widgets.append(self._guided_button)
+        widgets.append(self._free_button)
 
         self._preview_button = make_button("Önizleme", icon="eye", theme=theme)
         self._preview_button.setCheckable(True)
         self._preview_button.toggled.connect(self._toggle_preview)
-        row.addWidget(self._preview_button)
+        widgets.append(self._preview_button)
 
         self._record_button = make_button(
             "Kaydı başlat  (R)", variant="danger", icon="record", theme=theme
         )
         self._record_button.clicked.connect(self._toggle_recording)
-        row.addWidget(self._record_button)
+        widgets.append(self._record_button)
 
         self._marker_button = make_button("Marker  (M)", icon="marker", theme=theme)
         self._marker_button.clicked.connect(self._add_marker)
-        row.addWidget(self._marker_button)
+        widgets.append(self._marker_button)
 
         self._review_button = make_button(
             "Son kaydı incele", icon="review", theme=theme
         )
         self._review_button.clicked.connect(self._review_last)
-        row.addWidget(self._review_button)
+        widgets.append(self._review_button)
 
-        row.addStretch(1)
-        self._context_label = make_label("", role="muted")
-        row.addWidget(self._context_label)
-        container = QWidget()
-        container.setLayout(row)
-        card.add_widget(container)
+        self._info_button = make_button(
+            "Kayıt bilgileri",
+            icon="info",
+            theme=theme,
+            tooltip=(
+                "Ön kontrol, kayıt planı, kayıt bilgisi, kaydedilecek kişi ve "
+                "ham RGB-D arşivi penceresi (F4)"
+            ),
+        )
+        self._info_button.clicked.connect(self._toggle_info)
+        widgets.append(self._info_button)
+
+        # The participant/session line: informative, long, and never the
+        # reason a control gets pushed off the row.
+        self._context_label = ElidedLabel("", role="muted")
+        self._context_label.setMinimumWidth(160)
+        widgets.append(self._context_label)
+        card.add_widget(flow_row(widgets, spacing=theme.space_xs))
         self._last_take: Optional[Take] = None
         return card
 
@@ -509,6 +637,7 @@ class CapturePage(Page):
             shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             shortcut.activated.connect(handler)
 
+        add("F4", self._toggle_info)
         add("R", self._shortcut_record)
         add("M", self._shortcut_marker)
         add("Space", self._shortcut_preview)
@@ -565,12 +694,12 @@ class CapturePage(Page):
             self._context_label.setText("")
             return
         participant = self.state.participant
-        session = self.state.session
         project = self.state.project
+        user = self.state.current_user
         self._context_label.setText(
             f"{project.name if project else '-'}  ·  "
             f"{participant.code if participant else '-'}  ·  "
-            f"{session.session_id[-12:] if session else '-'}"
+            f"{user.display_name if user else '-'}"
         )
         self._reload_protocol()
 
@@ -845,22 +974,9 @@ class CapturePage(Page):
                 ),
             ]
         )
-        if state.value == "ambiguous":
-            self._subject_hint.setText(
-                "Kanıt yetersiz olduğu için başka bir kişiye GEÇİLMEDİ. Doğru "
-                "kişiye tıklayıp 'Kimliği yeniden doğrula' deyin."
-            )
-        elif state.value == "temporarily_lost":
-            self._subject_hint.setText(
-                "Kişi görünmüyor. Kayıt sürüyor; bu kareler 'kişi yok' olarak "
-                "işaretleniyor ve başka bir iskeletle doldurulmuyor."
-            )
-        elif not lock.is_selected:
-            self._subject_hint.setText(
-                "Görüntüde kişinin üzerine tıklayarak kaydedilecek kişiyi seçin."
-            )
-        else:
-            self._subject_hint.setText("")
+        # The prose that used to sit under these numbers is now the alert
+        # strip on the main screen, where it is visible without opening a window.
+        self._refresh_alerts()
         self._confirm_subject_button.setEnabled(lock.is_selected)
         self._clear_subject_button.setEnabled(
             lock.is_selected and not service.is_recording
@@ -886,10 +1002,16 @@ class CapturePage(Page):
             self._archive_chip.set_status(
                 "Disk yetersiz", icon="warning", colour=theme.danger
             )
+            self._disk_shortfall = (
+                f"Disk yetersiz: ham arşiv için {minutes:.0f} dakika yer var, "
+                f"en az {required:.0f} dakika gerekiyor. Kayıt başlatılamaz."
+            )
         else:
             self._archive_chip.set_status(
                 "Zorunlu ve hazır", icon="check", colour=theme.success
             )
+            self._disk_shortfall = ""
+        self._refresh_alerts()
         self._archive_details.set_items(
             [
                 (
@@ -1020,19 +1142,19 @@ class CapturePage(Page):
         QApplication.clipboard().setText(report.as_text())
         self.state.notify("Tanı raporu panoya kopyalandı (kişisel veri içermez).")
 
-    # ------------------------------------------------------------- protocol
+    # ------------------------------------------------------- recording plan
     def _reload_protocol(self) -> None:
         workspace = self.state.workspace
         session = self.state.session
         if workspace is None or session is None or not session.protocol_id:
             self._task_details.set_items(
-                [("Mod", "Serbest kayıt (protokol seçilmedi)")]
+                [("Mod", "Serbest kayıt (Kayıt Planı seçilmedi)")]
             )
             self._active_task = None
             return
         protocol = workspace.project.protocol_by_id(session.protocol_id)
         if protocol is None or not protocol.tasks:
-            self._task_details.set_items([("Protokol", "Görev tanımlı değil")])
+            self._task_details.set_items([("Kayıt Planı", "Hareket tanımlı değil")])
             self._active_task = None
             return
         self._task_position = max(0, min(self._task_position, len(protocol.tasks) - 1))
@@ -1109,6 +1231,11 @@ class CapturePage(Page):
         workspace = self.state.workspace
         session = self.state.session
         if service is None or workspace is None or session is None:
+            return
+        try:
+            self.state.authorize_capture()
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
             return
         if service.state is not CaptureState.PREVIEWING:
             self.state.notify("Önce önizlemeyi başlatın.", 5000)

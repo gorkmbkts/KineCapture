@@ -1,17 +1,18 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: rgbd_archive_subject_lock_continuous_working
-last_updated: 2026-08-24
-app_version: 0.6.0
+status: capture_review_labeling_ui_simplified
+last_updated: 2026-08-28
+app_version: 0.8.0
 ---
 
 # KineCapture Studio — Proje Hafızası
 
 ## 1. Bu belge nasıl kullanılmalı?
 
-Bu dosya, ZED 2i tabanlı veri toplama ve etiketleme uygulamasının kalıcı proje
-hafızasıdır. Yeni bir kodlama oturumu başladığında model:
+Bu dosya, ZED 2i tabanlı veri toplama ve etiketleme uygulamasının Claude ve
+Codex tarafından paylaşılan kalıcı proje hafızasıdır. **Claude veya Codex yeni
+bir geliştirme oturumunda önce bu dosyanın tamamını okur.** Ardından model:
 
 1. Önce bu dosyanın tamamını okumalıdır.
 2. Ardından repository içindeki gerçek dosyaları incelemelidir.
@@ -41,12 +42,16 @@ Kısa kalıcı talimatlar `CLAUDE.md` içindedir.
   uygulandı: **zorunlu ham RGB-D arşivi**, **görüntüye tıklayarak kişi seçimi
   ve kalıcı kişi kilidi**, **sürekli aktivite etiketleme ve dataseti**.
   Ayrıntı: bölüm 6D.
-- 2026-08-24: `CLAUDE_CONTINUOUS_ACTIVITY_RGBD_SUBJECT_LOCK_PROMPT.md`
-  hazırlandı, **henüz uygulanmadı**. Prompt; mevcut hareket-sample akışını
-  koruyarak isteğe bağlı sürekli aktivite/background etiketleme ve exportu,
-  zorunlu yeniden işlenebilir RGB-D ham arşivini ve Capture ekranında tıklamayla
-  seçilen kişiye kalıcı kimlik kilidini birlikte tarif ediyor. Uygulama kodu ve
-  schema sürümleri bu maddeyle değişmiş sayılmaz.
+- 2026-08-26: `CODEX_AUTH_PROJECT_PARTICIPANT_REDESIGN_PROMPT.md` uygulandı:
+  **tek Sistem Sahibi**, normal kullanıcı self-registration, SQLite kimlik ve
+  proje erişimi, girişle otomatik operatör bağlama, sade Projeler/Katılımcılar
+  akışı ve kullanıcıdan gizlenen otomatik çekim oturumu. Ayrıntı: bölüm 6E.
+- 2026-08-28: `CLAUDE_CAPTURE_REVIEW_LABELING_UI_PROMPT.md` uygulandı.
+  Capture'ın kalıcı sağ sütunu modeless bilgi penceresine taşındı, İnceleme
+  ekranı yalnızca kayıtta seçilmiş kişiyi çizer hale getirildi, RGB bindirme
+  hizası kök nedeninden (proxy/kamera piksel uzayı karışması) düzeltildi,
+  etiketleme iki küçük diyaloga indirildi ve aktivite yazımı emekliye ayrıldı
+  (veri korunarak). Ayrıntı: bölüm 6G.
 
 Önceki scaffold aşaması bu sürümle büyük ölçüde değiştirildi. "Değişen
 kararlar" bölümleri farkları kaydeder.
@@ -755,11 +760,419 @@ hata yok.
   mimari eklenmelerini engellemiyor.
 - Sürekli örnekten pencere üretimi ve dengeleme: eğitim katmanının işi.
 
+## 6E. Kimlik, proje erişimi ve katılımcıdan kayda akış (2026-08-26)
+
+### Kesin ürün kararları
+
+1. **Tek Sistem Sahibi vardır.** İlk kurulumdaki ilk hesap `owner` olur;
+   SQLite partial unique index ikinci owner'ı DB düzeyinde de reddeder. Owner
+   silinemez, pasifleştirilemez, role dönüştürülemez ve bütün projelere örtük
+   erişir. İlk sürümde yalnız `owner | user` rolleri vardır.
+2. **Self-registration yalnız normal kullanıcı üretir.** Giriş ekranındaki
+   `Yeni Kullanıcı Oluştur` ad, soyad, isteğe bağlı unvan, kullanıcı adı,
+   parola ve parola doğrulaması alır. Başarıda giriş formuna yalnız kullanıcı
+   adı taşınır; parola taşınmaz veya tercihlere yazılmaz.
+3. **Koç akışı** `giriş → proje → katılımcı → Kayda Başla → Capture`'dır.
+   Operatör adı, teknik oturum formu ve tek plan varken plan seçimi sorulmaz.
+4. **Protokol domain adı korundu, kullanıcı dili değişti.** Python'daki
+   `CaptureProtocol` ve dosya alanları geriye uyumluluk için aynı; yeni bütün
+   kullanıcı metinlerinde kavram **Kayıt Planı** olarak sunulur.
+5. **Eski test datasetleri migrate edilmez ve SQLite'a otomatik kaydedilmez.**
+   Owner isterse gelişmiş `Klasörden içe aktar` eylemiyle doğrulanmış bir
+   projeyi kaydedebilir. Böylece eski klasör var diye yetkisiz proje açılmaz.
+
+### SQLite kimlik ve erişim katmanı
+
+Yeni `kinecapture/identity/` paketi katmanları:
+
+```text
+database.py    kısa ömürlü bağlantı, PRAGMA, idempotent schema/transaction
+repository.py  yalnız parametreli SQL sorguları
+passwords.py   sürümlü scrypt türetme ve sabit-zaman karşılaştırma
+service.py     kimlik doğrulama, owner kuralları, yetki ve proje koordinasyonu
+models.py      User / ProjectAccess değer nesneleri; parola alanı içermez
+```
+
+- Windows varsayılan DB konumu:
+  `%LOCALAPPDATA%\KineCapture\identity.sqlite3`. Datasetin ve
+  `~/.kinecapture/user_state.yaml` tercihlerinin dışında, kullanıcı tarafından
+  proje sanılmayacak deterministik bir konumdur. `AppConfig.identity_db_path`
+  testlerde geçici yol enjekte eder ve tercih dosyasına yazılmaz.
+- **Identity schema v1**: `users`, `projects`, `project_access`, `audit_log`,
+  `app_metadata`. Sürüm hem `PRAGMA user_version=1` hem metadata tablosunda.
+  Kurulum tekrar çalıştırılabilir. `foreign_keys=ON`, `busy_timeout=5000`,
+  açık `BEGIN`/`BEGIN IMMEDIATE` ve bağlantı kapanışı var.
+- Journal mode bilinçli olarak **DELETE**: işlemler kısa/yerel; kalıcı WAL
+  sidecar'ları olmadan DB'nin yedeklenmesi ve taşınması daha güvenli. Büyük
+  bilimsel veri hiçbir zaman SQLite'a girmez.
+- Kullanıcı adı NFKC + `casefold` ile normalize edilir ve DB'de case-insensitive
+  benzersizdir. Görünen ad 3-64 ASCII harf/rakam/nokta/alt çizgi/kısa çizgiyle
+  sınırlıdır. SQL'in tamamı parametrelidir.
+- Parola en az 8 karakterdir. `hashlib.scrypt` (`scrypt-v1`, N=16384, r=8,
+  p=1, 32-byte çıktı), 16-byte kriptografik rastgele salt ve parametre JSON'u
+  ayrı alanlarda tutulur; `secrets.compare_digest` kullanılır. Açık parola,
+  geçici parola ve hash loglanmaz. Tercihler yalnız `last_username` saklar.
+- Başarısız giriş kullanıcı adı/parola ayrımını açıklamaz; pasif hesap özel
+  fakat güvenli bir pasiflik mesajıyla reddedilir. Başarılı giriş
+  `last_login_at` günceller. Admin reset'i `must_change_password=1` yapar ve
+  zorunlu değişim tamamlanmadan çalışma alanı gösterilmez.
+
+### Proje sahipliği ve yetki
+
+- `projects` aynı `project_id`'nin doğrulanmış, normalize edilmiş tek klasör
+  yolunu ve `owner_user_id`'yi tutar. Aynı kimliğin farklı klasöre bağlanması
+  reddedilir.
+- Normal kullanıcı yalnız sahibi olduğu veya `project_access` ile atanmış
+  projeleri listeler. Owner bütün kayıtlı projeleri ayrı erişim satırı olmadan
+  görür. Normal kullanıcının oluşturduğu proje otomatik onun mülkiyetine ve
+  erişimine girer.
+- Dosya sistemi proje oluşturma başarılı fakat DB kaydı başarısız olursa yalnız
+  o çağrının yeni, doğrulanmış `dataset_root/projects/<project_id>` dizini
+  telafi olarak kaldırılır. Erişim kaldırma hiçbir proje dosyasını silmez.
+- `AppState.open_project`, proje/katılımcı listeleme-oluşturma,
+  `prepare_capture`, kayıt öncesi doğrulama ve admin işlemleri servis katmanında
+  aktif kullanıcı + erişim kontrolünü tekrar yapar. `last_project_path`
+  doğrudan açılmaz; tek erişilebilir proje otomatik açılır, sıfır/çok projede
+  Projeler sayfası gösterilir.
+
+### Minimum katılımcı ve otomatik çekim oturumu
+
+- Yeni `Participant`: `participant_id`, `code`, `created_at`,
+  `created_by_user_id`, `schema_version`. Boy, kilo, dominant taraf ve serbest
+  not yeni modelden ve Katılımcılar ekranından çıkarıldı.
+- `participant_id == code` (`P0001`, `P0002`, ...). Kod proje içinde anonim,
+  değişmez ve kompakt kalıcı kimliktir. Kompaktlık Windows'taki derin take
+  yollarının üçüncü taraf araç sınırını aşmaması için önemlidir.
+- Kod + proje sayacı, proje kökündeki exclusive allocation lock altında
+  birlikte güncellenir. Ayrı `ProjectWorkspace` nesnelerinden eşzamanlı 12
+  tahsis testi `P0001..P0012` sonucunu verdi.
+- Katılımcılar sayfası arama, kod, kayıt sayısı, son kayıt zamanı,
+  `Katılımcı Ekle`, `Kayda Başla` ve `Kayıtlarını Gör` içerir. Manuel oturum,
+  onam, operatör ve biyometrik form yoktur.
+- `Kayda Başla` erişimi yeniden doğrular; tek planı otomatik, plan yoksa
+  serbest modu seçer, yalnız birden fazla planda kısa seçim ister. Aynı uygulama
+  çalışmasında aynı kullanıcı/proje/katılımcı/plan için uygun açık otomatik
+  session yeniden kullanılır.
+- Proje/katılımcı değişimi, logout ve güvenli kapanış otomatik session'ı
+  `ended_at` + neden ile kapatır. Önceki uygulama çalışmasından açık otomatik
+  session yeni çekimde deterministik olarak orphan sayılıp kapatılır; sessizce
+  aktif kabul edilmez.
+- `Session.operator` okunabilir ad snapshot'ıdır; yeni
+  `Session.operator_user_id` kalıcı kullanıcı bağlantısıdır. Aynı alan
+  `Take.operator_user_id` içine de kopyalanır; kullanıcı adı değişse bile kayıt
+  operatörü kaybolmaz.
+
+### GUI
+
+- `MainWindow` çalışma shell'ini `AuthPage` arkasında tutar; kimlik doğrulama
+  bitmeden sayfalar ve last-project açma görünür/aktif değildir.
+- İlk kurulum, normal login, parola göster/gizle, Enter ile login, alan bazlı
+  self-registration, zorunlu parola değiştirme ve owner-only
+  `Kullanıcılar ve Erişimler` dialogu eklendi.
+- Admin dialogu ad/unvan/kullanıcı adı/durum/proje sayısı/son giriş gösterir;
+  normal kullanıcı oluşturma, profil düzenleme, aktif/pasif, geçici parola ve
+  proje atama/kaldırma sağlar. Fiziksel silme veya rol kontrolü yoktur; servis
+  bu çağrıları ayrıca açıkça reddeder.
+- Üst bağlam artık **Kullanıcı | Proje | Katılımcı | Kamera | Disk**;
+  `Oturum` chip'i kaldırıldı. Kullanıcı menüsü Şifre Değiştir, Oturumu Kapat ve
+  owner için Kullanıcıları Yönet eylemlerini içerir.
+- Projeler normal kullanıcıda yalnız erişilebilir kayıtları gösterir; teknik
+  klasör/root kontrolleri yalnız owner'da görünür. Kayıt Planı formu plan adı,
+  satır başına sıralı hareket ve özetle başlar; hedef ayrıntıları varsayılan
+  kapalı Gelişmiş hedefler altındadır.
+
+### Sürümler ve doğrulama
+
+- Uygulama/paket: **0.8.0**.
+- `PROJECT_SCHEMA_VERSION`: **1.1.0**.
+- `SESSION_SCHEMA_VERSION`: **2.0.0** (minimum participant +
+  `operator_user_id`).
+- `TAKE_SCHEMA_VERSION`: **1.1.0** (`operator_user_id`).
+- Identity SQLite schema: **1**. Annotation/export/feature/raw schema sürümleri
+  bu görevde değişmedi.
+- Yeni bağımlılık kurulmadı; yalnız standart kütüphane `sqlite3`, `hashlib`,
+  `secrets` kullanıldı.
+
+Gerçekten çalıştırılan sonuçlar:
+
+```text
+.\scripts\run_tests.ps1
+  KineSynth · Python 3.11.14 · 561 passed in 178.46 s
+
+conda run -n KineSynth python -m kinecapture --self-test
+  exit 0 · 72 kare · playback OK · ham RGB-D 72/72
+  2 hareket + 1 hata aralığı + 1 sürekli örnek · export doğrulama geçti
+
+GUI offscreen smoke/paint
+  ilk kurulum, login, self-registration, owner dialogu, bütün çalışma
+  sayfaları, minimum 1120x700 ve dark/light: geçti
+```
+
+**Bu görevde gerçek ZED kamera yeniden çalıştırılmadı.** Capture ana düzeni ve
+donanım backend'i değiştirilmedi; mock hattı ve bütün donanımsız regresyonlar
+geçti. Önceki 2026-08-24 donanım kanıtı geçerlidir fakat bu auth turunun yeni
+bir donanım doğrulaması değildir.
+
+Legacy test verisi için silme öncesi üç kesin KineCapture proje dizini
+doğrulandı (`muhasebe`, `Full Test`, `Demo`). PowerShell `Remove-Item`
+runtime güvenlik katmanı tarafından işlem başlamadan reddedildi; ardından üç
+hedefin de hâlâ var olduğu doğrulandı. **Hiçbir eski klasör silinmedi.** Yeni
+identity DB bunları otomatik kaydetmez/açmaz. Kalan kesin yollar:
+
+```text
+C:\Users\gorke\KineCapture\datasets\projects\prj_20260820T164820_1e49
+C:\Users\gorke\KineCapture\datasets\projects\prj_20260821T111333_a60a
+C:\Users\gorke\AppData\Local\Temp\shots4_iu_kvaue\datasets\projects\prj_20260824T135007_2cb6
+```
+
+## 6F. Capture ve İnceleme/Etiketleme sadeleştirme promptu (2026-08-27)
+
+> **Tarihsel.** Bu bölüm görev öncesi durumu ve prompt hazırlığını anlatır.
+> Uygulanmış sonuç için **bölüm 6G**'ye bakın; buradaki "bugün şöyle"
+> ifadeleri artık geçerli değildir.
+
+**Durum: yalnız uygulama promptu hazırlandı; bu bölümdeki GUI değişiklikleri
+henüz uygulanmadı.** Claude'un uygulaması için
+`CLAUDE_CAPTURE_REVIEW_LABELING_UI_PROMPT.md` repository köküne eklendi.
+
+### Kullanıcının yeni ürün kararları
+
+1. Capture ekranındaki Ön kontrol, Kayıt Planı, Kayıt bilgisi, Kaydedilecek
+   kişi ve Ham RGB-D arşivi kartları kalıcı sağ sütunda yer kaplamayacak;
+   görünür bir düğmeyle açılan ayrı bilgi penceresinde erişilecek. RGB/derinlik
+   ile 3B iskelet görüntüleri ana yatay alanın çoğunu kullanacak. Kayıt kaybı,
+   disk, bağlantı ve kişi belirsizliği gibi kritik durumların kompakt uyarıları
+   ana ekranda kalacak.
+2. İnceleme ekranında yalnız kayıt sırasında seçilen/ilişkilendirilen kişinin
+   iskeleti gösterilecek. Subject lock bulunan kayıtta otoritatif kaynak
+   `SkeletonFrame.subject_body()` olacak; kişi o karede yoksa başka gövdeye
+   fallback yapılmayacak. Legacy kayıtta kimlik uydurulmayacak.
+3. RGB + İskelet kayması sabit görsel ofsetle değil; aynı RGB/skeleton karesi,
+   tracker 2B noktaları, gerçek kamera calibration'ı, görüntü çözünürlüğü ve
+   letterbox dönüşümü doğrulanarak çözülecek. Güvenilir projeksiyon verisi yoksa
+   yaklaşık bindirme göstermek yerine dürüstçe kullanılamaz denecek.
+4. İnceleme/Etiketleme ekranında yalnız iki yazılabilir zamansal katman olacak:
+   **Hareket** ve seçili hareketin içindeki **Hata**. `Hareket ekle` / `Hata
+   ekle` timeline çizimini hazırlar; mevcut aralığa çift tıklama, sınıf seçme
+   ve yeni sınıf oluşturmayı sağlayan küçük bir pencere açar. Hareket
+   sözlüğüne ekleme de hata sözlüğü gibi etiketleme anında mümkün olacak ve
+   proje `label_schema.json` dosyasına atomik kaydolacak.
+5. İnceleme ekranındaki Aktivite modu/şeridi/kartı/F3 akışı emekliye ayrılacak;
+   arka plan/geçiş/hedef egzersiz/diğer hareket authoring'i yapılmayacak. Bu
+   karar 6D'deki sürekli aktivite GUI kararını ürün akışı açısından geçersiz
+   kılar. Buna rağmen eski `activity_intervals`, eski release'ler ve ham kayıt
+   silinmeyecek veya otomatik olarak başka etikete dönüştürülmeyecek; geriye
+   dönük okuma/kayıpsız koruma sürdürülecek.
+
+### Prompt hazırlanırken gerçek kodda doğrulananlar
+
+- `CapturePage` iki görüntü kartını ayrı bir yatay splitter'da tutuyor; ana
+  splitter kalıcı sağ panel için `[900, 460]` başlangıç boyutu ve `3:2` stretch
+  kullanıyor. Yan panelin minimum genişliği 400 px.
+- `ReviewPage` görüntü/yan panel için `[820, 540]` ve `3:2` splitter kullanıyor.
+  `Gövde` seçicisi olsa da `_redraw()` bütün `frame.bodies` listesini
+  `SceneView`'a geçiriyor; seçici yalnız `active_id` değerini değiştiriyor.
+  Dolayısıyla seçilmeyen iskeletler gerçekten çiziliyor.
+- `SkeletonFrame.subject_body()` otoritatif subject tracker kimliğini buluyor
+  ve başka gövdeye fallback yapmıyor; mevcut Review çizimi bu metodu
+  kullanmıyor.
+- `VideoView` kayıtlı `joint_positions_2d` varsa gerçek görüntü pikselini
+  kullanıyor; alan yoksa `_focal_ratio = 0.75` tahminine düşüyor.
+  `LoadedTake.video_position_for()` pozisyonu özdeş varsayıp kısa proxy'de son
+  kareye clamp ediyor. Prompt her iki dürüstlük/senkronizasyon riskini test
+  edilerek kaldırmayı şart koşuyor.
+- `LabelSchema` hem `add_exercise()` hem `add_error_type()` sağlıyor ve
+  `ProjectWorkspace.save_label_schema()` mevcut atomik JSON yolunu kullanıyor.
+  Review'daki yerinde picker/oluşturma akışı bugün yalnız hata türünde var.
+- Aktivite UI'si `TimelineMode.ACTIVITY`, sağ Aktivite kartı, timeline lane'i ve
+  F3 kısayoluyla gerçekten mevcut; ekran görüntüsündeki `Aktivite durumları`
+  düğmesi bu akışa ait.
+
+### Sürümler ve bu prompt hazırlama turunun doğrulaması
+
+- Gerçek kod sürümleri değişmedi: uygulama/paket **0.7.0**; project **1.1.0**;
+  session **2.0.0**; take **1.1.0**; skeleton stream **1.1.0**; annotation,
+  label ve release **2.0.0**; raw archive **1.0.0**; feature spec **1.0.0**;
+  identity SQLite schema **1**.
+- Kaynak kod, veri şeması ve paket sürümü değiştirilmedi; yalnız Claude görev
+  promptu ile bu hafıza bölümü eklendi.
+- Görsel ek `codex-clipboard-0bdf70b7-f06a-4114-bada-b2363291820b.png`
+  incelendi; geniş sağ kart, Hareket/Hata/Aktivite modları ve sürekli açık
+  hareket sınıfı alanı kullanıcının tarif ettiği yer kaybını doğruluyor.
+- Bu turda test paketi veya self-test çalıştırılmadı; uygulama kodu değişmedi.
+  Yalnız metin/kod incelemesi yapıldı. ZED kamera çalıştırılmadı ve GUI
+  davranışı uygulanmış olarak doğrulanmadı.
+
+## 6G. Capture ve İnceleme/Etiketleme sadeleştirmesi — UYGULANDI (2026-08-28)
+
+`CLAUDE_CAPTURE_REVIEW_LABELING_UI_PROMPT.md` uygulandı. Bölüm 6F o promptun
+hazırlık analiziydi; burası uygulamanın kendisi.
+
+### Capture ekranı
+
+- Kalıcı sağ sütun kaldırıldı. **Ön kontrol, Kayıt Planı, Kayıt bilgisi,
+  Kaydedilecek kişi ve Ham RGB-D arşivi** kartları aynen korundu, fakat artık
+  tek örnekli, modeless `InfoWindow` içinde (`gui/widgets/info_window.py`).
+  `Kayıt bilgileri` düğmesi ve `F4` açar/kapatır; pencere açıkken kayıt ve
+  önizleme sürer.
+- İki canlı görünüm (RGB/derinlik + 3B iskelet) splitter'ı ekranın tamamını
+  kullanıyor (`setSizes([760, 640])`, eşit stretch).
+- **Kritik uyarı şeridi ana ekranda kaldı**: `_build_alerts` + `_refresh_alerts`.
+  Öncelik sırası — bağlantı yok → kamera hatası → kayıt kaybı → disk
+  yetersizliği → kişi belirsiz → kişi geçici kayıp → kişi seçilmedi.
+  `Kimliği yeniden doğrula` ve `Seçimi kaldır` düğmeleri bu şeridin içinde,
+  yani sorunun yanında.
+- Kişi durumu chip'i canlı RGB kartının başlığında; sayısal ayrıntılar
+  (`Mantıksal kimlik`, `Eşlenen tracker ID`, kayıp süresi, yeniden eşleştirme,
+  belirsiz kare) info penceresinde.
+- `_disk_shortfall` alanı `_refresh_archive_card` tarafından doldurulur ve
+  uyarı şeridini besler.
+
+### İnceleme ekranı — yalnızca kaydedilen kişi
+
+- `ReviewPage._redraw()` artık **tek gövde** çiziyor:
+  `LoadedTake.review_body_at(position)` → kilit varsa `frame.subject_body()`,
+  yoksa `None`. Başka gövde soluk bile çizilmiyor.
+- **Gövde/tracker seçicisi kaldırıldı** (`_body_selector` yok).
+- Kişi bulunamayan karede iskelet çizilmez, uyarı şeridinde
+  `Seçilen kişi bu karede bulunamadı — iskelet çizilmiyor.` yazar, önceki
+  karenin pozu **donmaz**.
+- Zaman çizelgesindeki kapsam eğrisi `LoadedTake.subject_coverage_curve()`
+  ile aynı gövdeden geliyor; eskiden `coverage_curve(None)` en iyi takip
+  edilen gövdeyi çiziyordu ve katılımcının kaybolduğu aralıkta "tam kapsam"
+  iddia ediyordu.
+- **Eski (kilitsiz) kayıtlar:** `SkeletonStream.dominant_tracking_id` — kayıtta
+  en çok görünen gövde. Bu bir tahmindir, öyle işaretlenir
+  (`Kilit yok · tahmin ID n` + açılış bildirimi) ve `ReleaseBuilder`'ın aynı
+  kayıtlara uyguladığı kuralla birebir aynıdır. Uydurma kimlik yazılmaz.
+
+### Bindirme hizası — KÖK NEDEN, ofis ofseti değil
+
+- **Sebep:** `joint_positions_2d` *kameranın* görüntüsünün pikselleri;
+  inceleme ekranındaki resim ise küçültülmüş proxy video. `VideoView`
+  gösterilen görüntünün genişliğine bölüyordu.
+- **Ölçüm (gerçek kayıt):** kamera 960x540, proxy 640x360, 2B x aralığı
+  402–557 → her eklem **1.5x** fazla sağda. HD720 + `proxy_video_width=640`
+  ile çarpan **2.0x**.
+- **Düzeltme:** `VideoView.set_joint_space(resolution, calibration=...)`.
+  İzdüşüm normalize koordinatlar üzerinden yapılıyor, çizim boyutundan
+  bağımsız. `LoadedTake.joint_pixel_space` (`camera_info.resolution`) ve
+  `LoadedTake.camera_calibration` (`extra.left_camera_calibration`) besliyor.
+- Tahmini `_focal_ratio = 0.75` izdüşümü **silindi**. 2B yoksa doğrulanmış
+  kalibrasyonla pinhole izdüşüm; o da yoksa `can_overlay()` False döner,
+  bindirme çizilmez ve nedeni ekrana yazılır.
+- Canlı Capture etkilenmiyordu çünkü orada tam çözünürlüklü kare gösteriliyor;
+  iki uzay çakışıyor. Hata yalnız İnceleme'de görünüyordu.
+- `LoadedTake.video_position_for()` artık **clamp etmiyor**, `Optional[int]`
+  döndürüyor. Renkli kare yoksa `SceneView.set_frame(..., rgb_missing_reason=)`
+  ile resim temizlenir ve neden yazılır; başka bir anın resmi gösterilmez.
+
+### Etiketleme arayüzü — iki katman, iki küçük pencere
+
+- Kalıcı sağ panel, hareket listesi, hata listesi ve sürekli açık sınıf
+  formları kaldırıldı. Zaman çizelgesi hem liste hem seçim yüzeyi.
+- Kompakt, her zaman görünür eylem satırı: `Hareket ekle`, `Hata ekle`,
+  `Etiketle`, sil/geri al/yinele/oynat-döngüle (ikon), ilerleme chip'i,
+  `Sonraki eksik`, `Diğer…` menüsü (böl, birleştir, dışla, marker'lardan
+  oluştur, yakınlaştır).
+- **Çift tık** (veya `Enter`): hareket bandında `MovementLabelDialog`, hata
+  bandında `ErrorLabelDialog` (`gui/widgets/label_dialogs.py`).
+- Ortak `LabelClassPicker` (`gui/widgets/label_picker.py`, `LabelKind`
+  parametreli) hem hareket hem hata sözlüğüne hizmet ediyor. Eski
+  `gui/widgets/error_picker.py` **silindi** (kullanan kalmadı).
+- Aralık **oluşturmak** pencere açmaz. Arka arkaya on tekrar çizerken on modal
+  kabul edilemez; etiketleme ayrı ve açık bir eylem.
+- `ReviewPage._run_dialog(dialog)` tek modal noktası — testler bu metodu
+  değiştirerek gerçek diyalog widget'ını insansız sürüyor.
+
+### Sınıf oluşturma, iptal ve hazır olma semantiği
+
+- `LabelSchema.match_exercise/search_exercises/ensure_exercise` eklendi;
+  `add_exercise` artık `add_error_type` ile **aynı** NFKC/casefold/boşluk
+  yinelenen-ad kuralını kullanıyor. `ensure_exercise("Squat")` ve
+  `ensure_exercise("  SQUAT ")` aynı `squat` seçeneğini döndürür.
+- `AnnotationRepository.ensure_movement_class` / `assign_new_movement_class`
+  eklendi; `ensure_error_class` ile aynı sözleşme.
+- **Sınıf eklemek proje düzeyinde bir değişikliktir**: `label_schema.json`
+  dosyasına anında ve atomik yazılır, etiketleme undo yığınına **girmez**, ve
+  diyalog **İptal** ile kapatılsa bile tanımlı kalır. İptal yalnızca "bu
+  aralığa atama"yı geri alır. Gerekçe: sınıf başka take'lerde kullanılıyor
+  olabilir; bir pencerenin kapatılması onu tanımsız yapamaz.
+- Yarım kalmış aralık **hazır sayılmaz**: türsüz hata aralığı hem
+  `evaluate_sample()` hem ekran metninde eksik görünür; export aynı kuralı
+  okur.
+
+### Aktivite yazımının emekliye ayrılması
+
+- `TimelineMode.ACTIVITY`, aktivite şeridi, aktivite kartı, F3 kısayolu,
+  bütün aktivite CRUD handler'ları ve `TimelineWidget`'ın aktivite sinyalleri
+  **kaldırıldı**. Gizli üçüncü şeride dönüştürülmedi: `list(TimelineMode)`
+  artık tam olarak `[MOVEMENT, ERROR]`.
+- **Veri korunuyor.** `domain/activity.py`, `AnnotationRepository`'nin aktivite
+  okuma/yazma yolu ve `export/continuous.py` yerinde. Mevcut
+  `activity_intervals` silinmiyor, dönüştürülmüyor, okuma sırasında migration
+  yapılmıyor.
+- `ProjectWorkspace.save_samples()` artık **tanımadığı üst düzey blokları**
+  aynen koruyor (`_ANNOTATION_KNOWN_KEYS` dışındaki her şey). Böylece emekli
+  bir özellik ya da daha yeni bir sürümün yazdığı blok, sonraki ilk kayıtla
+  sessizce kaybolmuyor.
+- **Export ekranı kararı:** `Sürekli aktivite` seçeneği silinmedi, *koşullu*
+  hale getirildi. `_refresh_continuous_availability()` projede aktivite
+  etiketi taşıyan kayıt sayar; sıfırsa seçenek pasifleşir ve nedeni yazar.
+  Gerekçe: eski etiketli kayıtlardan hâlâ geçerli bir sürekli release
+  üretilebilir, fakat aktivite etiketi olmayan bir projede seçenek yalnızca
+  tamamı etiketsiz bir dataset üretebilirdi.
+
+### Yerleşim — 1120x700 / 1366x768 / 1600x980, iki tema
+
+- `gui/widgets/flow_layout.py`: `FlowLayout` + `flow_row()`. Yoğun satırlar
+  (9 metrik kutusu, 10 eylem düğmesi) kırpılmak yerine alt satıra sarıyor.
+- `_ASSUMED_MIN_WIDTH = 760`: Qt bir height-for-width satırının *minimum*
+  yüksekliğini kendi minimum genişliğinde sorar; gerçek minimum (tek kontrol)
+  bırakılırsa dokuz kutu dokuz satır iddia eder ve sayfa 700 px yüksekliğe
+  hiç inemez. 1120 px pencerede içerik alanı 834 px, bu yüzden 760 gerçekçi
+  ve ilk yerleşim geçişinde doğru.
+- `common.ElidedLabel`: sayfa başlığı, açıklaması, uyarı ve konum satırları
+  sarmak yerine kısaltıyor. Sarılan bir açıklama altı satır kaplayıp o yeri
+  kamera görüntüsünden alıyordu.
+- `Card(compact=True)` (İnceleme'nin iki kartı), `KeyValueList` anahtar
+  sütunu sarıyor, `MetricTile` en fazla 135 px, video/iskelet görünümleri
+  minimum 240x120, timeline şerit yükseklikleri 16 px kısaldı.
+- Ölçülen minimumlar: **CapturePage 529 px, ReviewPage 596 px** yükseklik
+  (1120x700 penceresinde sayfaya kalan alan 606 px); genişlikte
+  **951 / 1101 (capture, tema başına) ve 938 (review)** — hepsi 1120'nin
+  altında. Yatay kaydırma ve kırpma yok.
+
+### Sürümler
+
+- `APP_VERSION` ve paket sürümü **0.7.0 → 0.8.0**.
+- **Hiçbir şema sürümü değişmedi** — veri sözleşmesi aynı: project 1.1.0,
+  session 2.0.0, take 1.1.0, skeleton stream 1.1.0, annotation 2.0.0,
+  label 2.0.0, release 2.0.0, feature spec 1.0.0, raw archive 1.0.0,
+  identity SQLite schema 1.
+
+### Bu turda GERÇEKTEN çalıştırılanlar
+
+- `python -m pytest tests/` → **585 passed**, 196.75 s (uygulama sonrası tam
+  tur; ara turlarda 25 kırmızı test yeni arayüze göre yeniden yazıldı).
+- `.\scripts\run_tests.ps1 -Quiet` → "Testler gecti." (KineSynth, Python 3.11.14).
+- `python -m kinecapture --self-test` → uçtan uca sentetik akış OK; export
+  `dataset_v001`, 2 hareket örneği, 1 sürekli örnek, doğrulama geçti.
+- İki ekran offscreen olarak **1120x700, 1366x768, 1600x980** boyutlarında ve
+  **dark/light** temalarda gerçek `grab()` ile render edildi; `minimumSizeHint`
+  değerleri ölçüldü, `FlowContainer` içindeki her kontrolün kutusunun içinde
+  kaldığı test edildi.
+- **Donanımda doğrulanmadı:** bu turda ZED 2i ile canlı kayıt alınmadı. Kişi
+  kilidi, ham arşiv ve bindirme hizası mock backend ile ve daha önce (bölüm
+  6D) alınmış gerçek kayıtların dosyalarıyla doğrulandı. Gerçek kamerada
+  Capture uyarı şeridinin canlı kayıt kaybı senaryosu tetiklenmedi.
+
 ## 7. Mimari sınırlar
 
 ```text
 gui/            PySide6; kameraya ve diske dokunmaz
-gui/state.py    tek AppState; açık proje/katılımcı/oturum burada
+gui/state.py    authenticated AppState; user/proje/katılımcı/auto-session
+identity/       SQLite schema + repository + scrypt + auth/access service
 capture/        CaptureService: acquisition thread + writer thread
 camera/         base (sözleşme) · mock · zed  ← pyzed yalnız burada, gecikmeli
 recording/      TakeWriter, ProxyVideoWriter, kalite akümülatörü
@@ -803,7 +1216,7 @@ Hepsi kullanıcının Windows makinesinde, `KineSynth` environment içinde
 | Doğrulama | Komut | Sonuç |
 |---|---|---|
 | Interpreter | `conda run -n KineSynth python -c "import sys; print(sys.executable)"` | `C:\Users\gorke\anaconda3\envs\KineSynth\python.exe`, Python 3.11.14 |
-| Test paketi | `python -m pytest` | **528 passed**, 0 warning, 160.1 s (2026-08-24) |
+| Test paketi | `.\scripts\run_tests.ps1` | **561 passed**, 178.46 s (2026-08-26) |
 | ZED'siz import | alt süreçte `sys.modules` kontrolü | `pyzed` hiç yüklenmedi |
 | Self test | `python -m kinecapture --self-test` | exit 0; proje→export tamamı OK |
 | Cihaz listesi | `python -m kinecapture --list-devices` | ZED SDK 5.4.1, ZED 2i S/N 31844341 AVAILABLE |
@@ -1057,6 +1470,12 @@ gerektirmeden regresyonu yakalar.
 - Eş zamanlı iki uygulama örneği aynı projeyi açarsa kilitleme yok.
 - Dataset index metadata dosyalarını her yenilemede tarıyor; çok büyük
   datasetlerde kalıcı bir index/cache gerekebilir.
+- Üç doğrulanmış legacy test projesi runtime silme politikası nedeniyle diskte
+  kaldı (kesin yollar bölüm 6E'de). Identity DB'ye otomatik kaydedilmezler;
+  owner içe aktarmadıkça GUI'de görünmezler.
+- Mevcut kullanıcı tercihindeki `dataset_root`, önceki donanım testinin geçici
+  `shots4_iu_kvaue` klasörünü gösteriyor. Bu görev tercih dosyasını silmedi;
+  owner Projeler → Veri klasörü ile kalıcı hedefi seçmelidir.
 - `kinecapture.exe` script'i PATH'te değil (pip uyarısı); `python -m
   kinecapture` kullanılıyor.
 

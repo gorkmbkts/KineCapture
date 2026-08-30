@@ -36,6 +36,7 @@ def qapp():
 def review(qapp, workspace, session):
     """A window on the Review page with one recorded, unlabelled take."""
     from kinecapture.gui.main_window import MainWindow
+    from tests.conftest import authenticate_state
 
     schema = workspace.label_schema
     schema.add_exercise("Squat")
@@ -53,7 +54,8 @@ def review(qapp, workspace, session):
     )
     window = MainWindow(config)
     window.resize(1366, 768)
-    window.state.open_project(workspace.root)
+    user = authenticate_state(window.state, workspace, open_workspace=False)
+    window._authentication_completed(user)
     qapp.processEvents()
     window.navigate("review")
     qapp.processEvents()
@@ -68,6 +70,73 @@ def review(qapp, workspace, session):
 def make_sample(page, start=2, end=25):
     page._create_sample_range(start, end)
     return page._current_sample()
+
+
+def label_movement(
+    page,
+    sample_id,
+    *,
+    exercise="",
+    correctness=None,
+    note="",
+    new_class="",
+    accept=True,
+):
+    """Drive the movement label dialog exactly as a user would.
+
+    ``ReviewPage._run_dialog`` is the single place the page blocks on a modal,
+    so replacing it here exercises the real dialog widget - its picker, its
+    verdict buttons, its draft semantics - without a human to click Save.
+    """
+
+    def run(dialog):
+        if new_class:
+            dialog.picker._search.setText(new_class)
+            dialog.picker._activate_current()
+        elif exercise:
+            dialog.picker.class_chosen.emit(exercise)
+        if correctness is not None:
+            dialog._set_verdict(correctness)
+        if note:
+            dialog._note.setPlainText(note)
+        return accept
+
+    page._run_dialog = run
+    try:
+        page._open_movement_dialog(sample_id)
+    finally:
+        del page._run_dialog
+
+
+def label_error(
+    page,
+    interval_id,
+    *,
+    error_code=None,
+    note="",
+    new_class="",
+    delete=False,
+    accept=True,
+):
+    """Drive the error label dialog. See :func:`label_movement`."""
+
+    def run(dialog):
+        if new_class:
+            dialog.picker._search.setText(new_class)
+            dialog.picker._activate_current()
+        elif error_code:
+            dialog.picker.class_chosen.emit(error_code)
+        if note:
+            dialog._note.setPlainText(note)
+        if delete:
+            dialog.delete_requested = True
+        return accept
+
+    page._run_dialog = run
+    try:
+        page._open_error_dialog(interval_id)
+    finally:
+        del page._run_dialog
 
 
 # ------------------------------------------------------------ scene modes
@@ -139,67 +208,182 @@ def test_mode_hint_names_the_active_level(review, qapp) -> None:
     assert page._timeline_mode_buttons[TimelineMode.ERROR].isChecked()
     error_hint = page._mode_hint.text()
     assert error_hint != movement_hint
-    # It names the movement being worked inside, and the constraint.
+    # It names the movement being worked inside.
     assert f"Hareket {sample.index}" in error_hint
     assert "HATA" in error_hint
-    assert "dışına çıkamaz" in error_hint
 
 
-def test_error_card_is_disabled_until_a_movement_exists(review, qapp) -> None:
+def test_only_two_writable_layers_exist(review, qapp) -> None:
+    """Movement and error. There is no third lane, hidden or otherwise."""
     _window, page, _workspace, _take = review
-    assert not page._error_card.isEnabled()
+    assert set(page._timeline_mode_buttons) == {
+        TimelineMode.MOVEMENT,
+        TimelineMode.ERROR,
+    }
+    assert len(list(TimelineMode)) == 2
+
+
+def test_adding_an_error_is_blocked_until_a_movement_exists(review, qapp) -> None:
+    _window, page, _workspace, _take = review
+    assert not page._add_error_button.isEnabled()
     make_sample(page)
-    assert page._error_card.isEnabled()
+    assert page._add_error_button.isEnabled()
 
 
 # ------------------------------------------------------- movement labelling
 
 
-def test_creating_a_movement_selects_it(review, qapp) -> None:
+def test_creating_a_movement_selects_it_without_a_dialog(review, qapp) -> None:
+    """Drawing ten repetitions must not mean dismissing ten modal windows."""
     _window, page, _workspace, _take = review
+    opened: list[object] = []
+    page._run_dialog = lambda dialog: opened.append(dialog) or False
+
     sample = make_sample(page, 2, 25)
     assert sample is not None
     assert page._timeline.selected_sample_id == sample.sample_id
-    assert page._sample_list.count() == 1
+    assert page._selected_sample_id == sample.sample_id
+    assert opened == [], "creating a movement must not open a modal"
 
 
-def test_verdict_buttons_are_binary(review, qapp) -> None:
+def test_labelling_a_movement_through_its_dialog(review, qapp) -> None:
     _window, page, _workspace, _take = review
-    assert set(page._verdict_buttons) == {Correctness.CORRECT, Correctness.INCORRECT}
-    sample = make_sample(page)
+    sample = make_sample(page, 2, 40)
+
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.CORRECT, note="ilk tekrar")
+    qapp.processEvents()
+
+    updated = page._current_sample()
+    assert updated.exercise == "squat"
+    assert updated.correctness is Correctness.CORRECT
+    assert updated.note == "ilk tekrar"
+    assert page._repo.readiness(updated).is_ready
+
+
+def test_cancelling_the_movement_dialog_changes_nothing(review, qapp) -> None:
+    """Cancel means cancel: the draft is discarded, not half-applied."""
+    _window, page, _workspace, _take = review
+    sample = make_sample(page, 2, 40)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.CORRECT)
+    before = page._current_sample()
+
+    label_movement(page, sample.sample_id, exercise="", correctness=None,
+                   note="bu not kaydedilmemeli", accept=False)
+    qapp.processEvents()
+
+    after = page._current_sample()
+    assert after.exercise == before.exercise
+    assert after.correctness is before.correctness
+    assert after.note == before.note
+
+
+def test_a_half_finished_movement_is_not_ready(review, qapp) -> None:
+    """Saving with a field missing records that fact rather than hiding it."""
+    _window, page, _workspace, _take = review
+    sample = make_sample(page, 2, 40)
+
+    label_movement(page, sample.sample_id, exercise="squat", correctness=None)
+    qapp.processEvents()
+    assert page._repo.readiness(page._current_sample()) is SampleReadiness.UNLABELLED
+
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.INCORRECT)
+    qapp.processEvents()
+    assert page._repo.readiness(page._current_sample()) is (
+        SampleReadiness.NEEDS_ERROR_INTERVAL
+    )
+    assert "1/1" not in page._progress_chip._text.text()
+
+
+def test_creating_a_movement_class_from_the_dialog(review, qapp) -> None:
+    """Movement classes are created in place, exactly like error classes."""
+    _window, page, workspace, _take = review
+    sample = make_sample(page, 2, 40)
+
+    label_movement(page, sample.sample_id, new_class="Bulgar Split Squat",
+                   correctness=Correctness.CORRECT)
+    qapp.processEvents()
+
+    updated = page._current_sample()
+    assert updated.exercise
+    reopened = type(workspace).open(workspace.root)
+    assert updated.exercise in reopened.label_schema.exercise_codes()
+
+
+def test_a_near_duplicate_movement_class_reuses_the_existing_one(
+    review, qapp
+) -> None:
+    _window, page, workspace, _take = review
+    first = make_sample(page, 2, 20)
+    label_movement(page, first.sample_id, new_class="Bulgar Split Squat",
+                   correctness=Correctness.CORRECT)
+    code = page._current_sample().exercise
+
+    second_sample = page._repo.create_sample(30, 50)
+    label_movement(page, second_sample.sample_id,
+                   new_class="  bulgar   SPLIT squat ",
+                   correctness=Correctness.CORRECT)
+    qapp.processEvents()
+
+    codes = {s.exercise for s in page._repo.samples}
+    assert codes == {code}
+    live = page.state.workspace.label_schema
+    assert len([o for o in live.exercises if o.code == code]) == 1
+
+
+def test_a_class_created_in_a_cancelled_dialog_still_exists(review, qapp) -> None:
+    """Adding a class is a project edit; cancelling only drops the assignment."""
+    _window, page, workspace, _take = review
+    sample = make_sample(page, 2, 40)
+
+    label_movement(page, sample.sample_id, new_class="Goblet Squat", accept=False)
+    qapp.processEvents()
+
+    live = page.state.workspace.label_schema
+    assert any(o.label == "Goblet Squat" for o in live.exercises)
+    # ... but it was not assigned to the interval the dialog was opened for.
+    assert page._current_sample().exercise == ""
+
+
+def test_verdict_shortcut_stays_on_the_keyboard(review, qapp) -> None:
+    """1 and 2 are the fastest path and must not require the dialog."""
+    _window, page, _workspace, _take = review
+    make_sample(page, 2, 40)
     page._set_verdict(Correctness.CORRECT)
     assert page._current_sample().correctness is Correctness.CORRECT
-    assert page._verdict_buttons[Correctness.CORRECT].isChecked()
-    assert not page._verdict_buttons[Correctness.INCORRECT].isChecked()
+    page._set_verdict(Correctness.INCORRECT)
+    assert page._current_sample().correctness is Correctness.INCORRECT
 
 
 def test_readiness_is_shown_and_matches_the_repository(review, qapp) -> None:
     _window, page, _workspace, _take = review
     sample = make_sample(page)
-    page._label_edited()  # no exercise yet
     assert page._repo.readiness(page._current_sample()) is SampleReadiness.UNLABELLED
-    assert "seçilmedi" in page._exercise_row._error.text()
+    assert "Etiketlenmedi" in page._status_label.text()
 
-    page._exercise_selector.setCurrentIndex(
-        page._exercise_selector.findData("squat")
-    )
-    page._set_verdict(Correctness.CORRECT)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.CORRECT)
     qapp.processEvents()
     assert page._repo.readiness(page._current_sample()).is_ready
-    assert "1/1 hazır" in page._movement_progress._text.text()
+    assert "1/1 hazır" in page._progress_chip._text.text()
+    assert "Hazır" in page._status_label.text()
 
 
 def test_marking_incorrect_points_at_the_next_step(review, qapp) -> None:
     _window, page, _workspace, _take = review
+    messages: list[str] = []
+    page.state.notify = lambda text, timeout=4000: messages.append(text)
+
     sample = make_sample(page)
-    page._exercise_selector.setCurrentIndex(
-        page._exercise_selector.findData("squat")
-    )
-    page._set_verdict(Correctness.INCORRECT)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.INCORRECT)
     qapp.processEvents()
-    state = page._repo.readiness(page._current_sample())
-    assert state is SampleReadiness.NEEDS_ERROR_INTERVAL
-    assert "Aralık gerekli" in page._error_chip._text.text()
+    assert page._repo.readiness(page._current_sample()) is (
+        SampleReadiness.NEEDS_ERROR_INTERVAL
+    )
+    assert any("hata" in text.lower() for text in messages)
 
 
 # ------------------------------------------------------ error localisation
@@ -207,7 +391,7 @@ def test_marking_incorrect_points_at_the_next_step(review, qapp) -> None:
 
 def test_creating_an_error_interval_from_the_timeline(review, qapp) -> None:
     _window, page, _workspace, _take = review
-    sample = make_sample(page, 2, 40)
+    make_sample(page, 2, 40)
     page._create_interval_range(10, 20)
     qapp.processEvents()
 
@@ -229,7 +413,7 @@ def test_an_interval_cannot_be_drawn_outside_its_movement(review, qapp) -> None:
     assert interval.end_frame <= sample.end_frame
 
 
-def test_picking_an_existing_class_assigns_it(review, qapp) -> None:
+def test_picking_an_existing_error_class_assigns_it(review, qapp) -> None:
     _window, page, workspace, _take = review
     schema = workspace.label_schema
     option = schema.add_error_type("Diz içe çöküyor")
@@ -238,92 +422,123 @@ def test_picking_an_existing_class_assigns_it(review, qapp) -> None:
 
     make_sample(page, 2, 40)
     page._create_interval_range(10, 20)
-    page._assign_error_class(option.code)
+    label_error(page, page._selected_interval_id, error_code=option.code)
     qapp.processEvents()
 
     assert page._current_sample().error_intervals[0].error_code == option.code
 
 
-def test_creating_a_class_from_the_picker_persists_and_assigns(review, qapp) -> None:
+def test_creating_an_error_class_from_the_dialog_persists_and_assigns(
+    review, qapp
+) -> None:
     _window, page, workspace, _take = review
     make_sample(page, 2, 40)
     page._create_interval_range(10, 20)
-    page._create_error_class("Topuk kalkıyor")
+    label_error(page, page._selected_interval_id, new_class="Topuk kalkıyor")
     qapp.processEvents()
 
     interval = page._current_sample().error_intervals[0]
     assert interval.error_code
-    # Written to the project, so it survives a reopen and shows up elsewhere.
     reopened = type(workspace).open(workspace.root)
     assert interval.error_code in reopened.label_schema.error_type_codes()
-    # And it is immediately offered by the picker.
-    assert interval.error_code in [
-        o.code for o in page._picker._schema.error_types
-    ]
 
 
-def test_a_near_duplicate_class_name_reuses_the_existing_class(review, qapp) -> None:
+def test_a_near_duplicate_error_class_reuses_the_existing_class(
+    review, qapp
+) -> None:
     _window, page, workspace, _take = review
     make_sample(page, 2, 40)
     page._create_interval_range(10, 20)
-    page._create_error_class("Diz İçe Çöküyor")
+    label_error(page, page._selected_interval_id, new_class="Diz İçe Çöküyor")
     first = page._current_sample().error_intervals[0].error_code
 
     page._create_interval_range(25, 35)
-    page._create_error_class("  diz içe   çöküyor ")
+    label_error(page, page._selected_interval_id,
+                new_class="  diz içe   çöküyor ")
     codes = [i.error_code for i in page._current_sample().error_intervals]
 
     assert codes.count(first) == 2
-    # The page's own workspace is the one the app writes through; the fixture
-    # holds a separate instance with its own cached schema.
     assert len(page.state.workspace.label_schema.error_types) == 1
     assert len(type(workspace).open(workspace.root).label_schema.error_types) == 1
 
 
-def test_completing_the_flow_makes_the_movement_ready(review, qapp) -> None:
+def test_cancelling_the_error_dialog_leaves_the_interval_alone(
+    review, qapp
+) -> None:
     _window, page, _workspace, _take = review
     make_sample(page, 2, 40)
-    page._exercise_selector.setCurrentIndex(
-        page._exercise_selector.findData("squat")
-    )
-    page._set_verdict(Correctness.INCORRECT)
     page._create_interval_range(10, 20)
-    page._create_error_class("Diz içe çöküyor")
+    interval_id = page._selected_interval_id
+    label_error(page, interval_id, new_class="Topuk kalkıyor")
+    before = page._current_interval().error_code
+    assert before
+
+    label_error(page, interval_id, error_code="", note="atılacak", accept=False)
+    qapp.processEvents()
+    after = page._current_interval()
+    assert after.error_code == before
+    assert after.note == ""
+
+
+def test_an_unclassified_interval_keeps_the_movement_unready(review, qapp) -> None:
+    """A half-finished interval must not be silently counted as done."""
+    _window, page, _workspace, _take = review
+    sample = make_sample(page, 2, 40)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.INCORRECT)
+    page._create_interval_range(10, 20)
+    qapp.processEvents()
+
+    assert not page._repo.readiness(page._current_sample()).is_ready
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
+    qapp.processEvents()
+    assert page._repo.readiness(page._current_sample()).is_ready
+
+
+def test_deleting_from_the_error_dialog(review, qapp) -> None:
+    _window, page, _workspace, _take = review
+    make_sample(page, 2, 40)
+    page._create_interval_range(10, 20)
+    label_error(page, page._selected_interval_id, delete=True)
+    qapp.processEvents()
+    assert page._current_sample().error_intervals == []
+
+
+def test_completing_the_flow_makes_the_movement_ready(review, qapp) -> None:
+    _window, page, _workspace, _take = review
+    sample = make_sample(page, 2, 40)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.INCORRECT)
+    page._create_interval_range(10, 20)
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     qapp.processEvents()
 
     assert page._repo.readiness(page._current_sample()).is_ready
-    assert "1 aralık" in page._error_chip._text.text()
+    assert "1 hata aralığı" in page._status_label.text()
 
 
-def test_overlapping_intervals_are_listed_separately(review, qapp) -> None:
+def test_overlapping_intervals_stay_separate(review, qapp) -> None:
     _window, page, _workspace, _take = review
     make_sample(page, 2, 50)
     page._create_interval_range(10, 25)
-    page._create_error_class("Diz içe çöküyor")
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     page._create_interval_range(20, 35)
-    page._create_error_class("Sırt yuvarlanıyor")
+    label_error(page, page._selected_interval_id, new_class="Sırt yuvarlanıyor")
     qapp.processEvents()
 
     sample = page._current_sample()
     assert len(sample.error_intervals) == 2
     assert sample.error_intervals[0].overlaps(sample.error_intervals[1])
-    # Both readable in the list, each with its class name.
-    rows = [
-        page._interval_list.item(i).text() for i in range(page._interval_list.count())
-    ]
-    assert any("Diz içe çöküyor" in row for row in rows)
-    assert any("Sırt yuvarlanıyor" in row for row in rows)
+    assert len({i.error_code for i in sample.error_intervals}) == 2
 
 
 def test_deleting_an_interval_updates_readiness(review, qapp) -> None:
     _window, page, _workspace, _take = review
-    make_sample(page, 2, 40)
-    page._exercise_selector.setCurrentIndex(
-        page._exercise_selector.findData("squat")
-    )
-    page._set_verdict(Correctness.INCORRECT)
+    sample = make_sample(page, 2, 40)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.INCORRECT)
     page._create_interval_range(10, 20)
-    page._create_error_class("Diz içe çöküyor")
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     assert page._repo.readiness(page._current_sample()).is_ready
 
     page._delete_interval()
@@ -338,7 +553,7 @@ def test_undo_after_creating_a_class_keeps_the_class(review, qapp) -> None:
     _window, page, workspace, _take = review
     make_sample(page, 2, 40)
     page._create_interval_range(10, 20)
-    page._create_error_class("Topuk kalkıyor")
+    label_error(page, page._selected_interval_id, new_class="Topuk kalkıyor")
     code = page._current_sample().error_intervals[0].error_code
 
     page._undo()
@@ -354,13 +569,11 @@ def test_undo_after_creating_a_class_keeps_the_class(review, qapp) -> None:
 
 def test_edits_autosave_and_reload(review, qapp) -> None:
     _window, page, workspace, take = review
-    make_sample(page, 2, 40)
-    page._exercise_selector.setCurrentIndex(
-        page._exercise_selector.findData("squat")
-    )
-    page._set_verdict(Correctness.INCORRECT)
+    sample = make_sample(page, 2, 40)
+    label_movement(page, sample.sample_id, exercise="squat",
+                   correctness=Correctness.INCORRECT)
     page._create_interval_range(10, 20)
-    page._create_error_class("Diz içe çöküyor")
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     page._save_now()
 
     reloaded = workspace.load_samples(take)
@@ -373,18 +586,39 @@ def test_edits_autosave_and_reload(review, qapp) -> None:
 
 def test_narrowing_a_movement_warns_the_user(review, qapp, monkeypatch) -> None:
     _window, page, _workspace, _take = review
+    make_sample(page, 2, 50)
+    page._create_interval_range(40, 48)
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
+
     messages: list[str] = []
     monkeypatch.setattr(
         page.state, "notify", lambda text, timeout=4000: messages.append(text)
     )
-
-    make_sample(page, 2, 50)
-    page._create_interval_range(40, 48)
-    page._create_error_class("Diz içe çöküyor")
-
     sample = page._current_sample()
     page._sample_bounds_changed(sample.sample_id, 2, 20)
     qapp.processEvents()
 
     assert any("kaldırıldı" in text and "Ctrl+Z" in text for text in messages)
     assert page._current_sample().error_intervals == []
+
+
+# --------------------------------------------------------------- info window
+
+
+def test_take_information_lives_in_a_window_not_a_column(review, qapp) -> None:
+    """The viewer and the timeline own the screen; the rest opens on demand."""
+    _window, page, _workspace, _take = review
+    assert page._info is None, "the info window is not built until it is wanted"
+    for gone in ("_sample_list", "_interval_list", "_picker", "_exercise_selector"):
+        assert not hasattr(page, gone), f"{gone} should no longer exist"
+
+    page._toggle_info()
+    qapp.processEvents()
+    assert page._info is not None and page._info.isVisible()
+    rows = {key.text(): value.text() for key, value in page._take_details._rows}
+    assert rows["Kayıt"]
+    assert "Kişi kilidi" in {
+        key.text() for key, _value in page._diagnostics._rows
+    }
+    page._toggle_info()
+    assert not page._info.isVisible()

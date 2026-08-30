@@ -160,8 +160,16 @@ class SceneView(QWidget):
         spec: Optional[SkeletonSpec],
         *,
         active_id: Optional[int] = None,
+        rgb_missing_reason: str = "",
     ) -> None:
-        """Show one playback position in whichever mode is active."""
+        """Show one playback position in whichever mode is active.
+
+        ``rgb_missing_reason`` distinguishes "this take has no video" from "this
+        take has video but not for *this* position". The second used to leave
+        the previous picture on screen while the skeleton moved on, so the pose
+        appeared to drift away from a person frozen in time. There is no frame
+        to show, so nothing is shown, and the reason is written on the panel.
+        """
         self._rgb = rgb
         self._bodies = tuple(bodies)
         self._spec = spec
@@ -173,9 +181,27 @@ class SceneView(QWidget):
 
         if rgb is not None:
             self._video.set_rgb(rgb)
+        elif rgb_missing_reason:
+            self._video.set_rgb(None)
+            self._video.set_placeholder_text(rgb_missing_reason)
         elif not self._has_video:
             self._refresh_video_placeholder()
         self._video.set_bodies(self._bodies, spec, active_id=active_id)
+
+    def set_joint_space(
+        self,
+        resolution: Optional[tuple[int, int]],
+        *,
+        calibration: Optional[dict] = None,
+    ) -> None:
+        """Tell the RGB view which image the 2D joints were measured in."""
+        self._video.set_joint_space(resolution, calibration=calibration)
+
+    def set_overlay_unavailable(self, reason: str) -> None:
+        self._video.set_overlay_unavailable(reason)
+
+    def can_overlay(self, bodies: Sequence[BodyPose]) -> bool:
+        return self._video.can_overlay(bodies)
 
     def clear(self) -> None:
         self._rgb = None

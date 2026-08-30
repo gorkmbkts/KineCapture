@@ -9,19 +9,23 @@ Windows · Python 3.11 · PySide6 · ZED SDK 5.4
 
 ## Durum
 
-Uçtan uca dikey dilim çalışır durumda: **proje → katılımcı → oturum → kayıt →
-oynatma → tekrar segmentasyonu → etiketleme → dataset sürümü.** Akış hem
+Uçtan uca dikey dilim çalışır durumda: **giriş → proje → katılımcı → kayıt →
+oynatma → tekrar segmentasyonu → etiketleme → dataset sürümü.** Teknik çekim
+oturumu kullanıcıdan gizlenir ve arka planda otomatik yönetilir. Akış hem
 gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışır.
 
 | Bileşen | Durum |
 |---|---|
+| SQLite kullanıcı kimliği, güvenli şifre doğrulama ve proje erişimi | Çalışıyor |
+| Tek Sistem Sahibi + normal kullanıcı self-registration | Çalışıyor |
+| Proje erişimine göre filtreleme ve otomatik operatör bağlama | Çalışıyor |
 | Sentetik (mock) backend | Çalışıyor, deterministik, testlerin temeli |
 | ZED 2i backend (RGB / derinlik / vücut takibi / SVO2) | Çalışıyor, gerçek donanımda doğrulandı |
 | Kayıt, finalize, checksum, yarım kayıt kurtarma | Çalışıyor |
 | Senkron oynatma + zaman çizelgesi | Çalışıyor |
 | Hareket segmentasyonu (oluştur/böl/birleştir/dışla, undo/redo) | Çalışıyor |
 | İki seviyeli etiketleme (hareket + zamansal hata aralığı) | Çalışıyor |
-| Etiketleme sırasında hata türü oluşturma | Çalışıyor |
+| Etiketleme sırasında hata **ve hareket** türü oluşturma | Çalışıyor |
 | Autosave + undo/redo | Çalışıyor |
 | Dataset paneli + kalite bulguları | Çalışıyor |
 | Sürümlü export (manifest / spec / mapping / fingerprint / doğrulama) | Çalışıyor |
@@ -29,7 +33,7 @@ gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışı
 | Export ekranında aranabilir özellik seçimi + presetler | Çalışıyor |
 | Zorunlu ham RGB-D arşivi (ölçülen derinlik + SVO2) | Çalışıyor, gerçek donanımda doğrulandı |
 | Görüntüye tıklayarak kişi seçimi ve kalıcı kişi kilidi | Çalışıyor, gerçek donanımda doğrulandı |
-| Sürekli aktivite etiketleme ve dataseti | Çalışıyor |
+| Sürekli aktivite dataseti | **Yalnız okuma** — etiketleme arayüzü kaldırıldı, mevcut veri korunuyor |
 | KineSynthV3 26-eklem eşleştirmesi | **Kısmi** — 23/26 eklem; 3 eklem eşleşmiyor ve NaN yazılıyor |
 | Otomatik tekrar algılama, çok kameralı kayıt, çok uzmanlı consensus | Uygulanmadı |
 
@@ -40,13 +44,21 @@ Aynı kayıttan iki farklı dataset üretilebilir ve ikisi birbirinden bağıms�
 **1. Hareket örnekleri (varsayılan, eskiden beri).** Etiketli her tekrar ayrı
 bir örnektir. Tekrarların dışındaki zaman datasete girmez.
 
-**2. Sürekli aktivite (yeni, isteğe bağlı).** Bir örnek = bir kaydın tamamı,
-gerçek uzunluğunda. Her kare için "kişi ne yapıyordu" etiketi taşır. Bekleme,
-geçiş, egzersiz ve egzersiz dışı hareket birlikte saklanır; egzersizin nerede
-başlayıp bittiği kare bazında hedeftir.
+**2. Sürekli aktivite (yalnız okuma).** Bir örnek = bir kaydın tamamı,
+gerçek uzunluğunda. Her kare için "kişi ne yapıyordu" etiketi taşır.
 
-Export ekranında biri, diğeri veya ikisi birden seçilebilir. **Varsayılan
-yalnızca hareket örnekleridir**, yani mevcut iş akışı hiç değişmez.
+> **Bu sürümde aktivite etiketleme arayüzü kaldırıldı.** İnceleme ekranı iki
+> yazılabilir katmana indi: hareket ve hata. Aktivite şeridi, modu ve F3
+> kısayolu yok.
+>
+> Daha önce girilmiş `activity_intervals` **silinmez, dönüştürülmez ve üzerine
+> yazılmaz**: dosyada olduğu gibi durur, her kayıt sonrası korunur, ve
+> export'ta hâlâ okunabilir. Export ekranındaki "Sürekli aktivite" seçeneği
+> yalnızca projede aktivite etiketi taşıyan kayıt varsa açılır; olmayan bir
+> projede seçilebilir olsaydı tamamı etiketsiz bir dataset üretirdi.
+
+Export ekranında biri, diğeri veya (veri varsa) ikisi birden seçilebilir.
+**Varsayılan yalnızca hareket örnekleridir.**
 
 #### Aktivite sınıfları
 
@@ -136,15 +148,35 @@ conda run -n KineSynth python -m kinecapture --backend mock
 
 ## Uygulama akışı
 
+```text
+Uygulamayı aç
+    → Kullanıcı adı ve şifreyle giriş yap
+    → Erişilebilir projeyi seç
+    → Katılımcıyı seç veya ekle
+    → Kayda Başla
+    → Capture ekranı
+```
+
+İlk açılışta tek **Sistem Sahibi** hesabı oluşturulur. Sonraki kullanıcılar
+giriş ekranından normal kullanıcı hesabı açabilir; yalnızca kendilerine
+atanmış veya kendilerinin oluşturduğu projeleri görür. Sistem Sahibi kullanıcı
+durumlarını, geçici parola sıfırlamayı ve proje atamalarını yönetir. Parola
+saklanmaz; sürümlü `scrypt` türevi saklanır.
+
 Sol gezinme çubuğunda sekiz çalışma alanı var (`Ctrl+1` … `Ctrl+8`,
 `Ctrl+B` daraltır):
 
 1. **Ana Sayfa** — sayımlar, yarım kayıtlar, etiket bekleyenler, sistem durumu.
-2. **Projeler ve Protokoller** — proje oluştur/aç, çekim planı tanımla.
-3. **Katılımcılar ve Oturumlar** — anonim katılımcı (`P0001`), oturum formu.
-4. **Capture** — canlı RGB/derinlik, 3B iskelet, ön kontrol paneli, kayıt.
-5. **İnceleme ve Etiketleme** — senkron oynatma, iki modlu zaman çizelgesi,
-   hareket ve hata etiketleri.
+2. **Projeler** — erişilebilir projeyi oluştur/aç, Kayıt Planı tanımla.
+3. **Katılımcılar** — anonim katılımcı (`P0001`) seç/ekle ve Kayda Başla.
+4. **Capture** — canlı RGB/derinlik ve 3B iskelet ekranın tamamını kullanır;
+   ön kontrol, kayıt planı, kayıt bilgisi, kaydedilecek kişi ve ham arşiv
+   ayrıntıları **Kayıt bilgileri** penceresindedir (`F4`). Kritik uyarılar
+   (kayıt kaybı, bağlantı hatası, disk yetersizliği, belirsiz kişi) ana
+   ekranda, düzeltme düğmelerinin yanında kalır.
+5. **İnceleme ve Etiketleme** — senkron oynatma, iki katmanlı zaman çizelgesi,
+   hareket ve hata etiketleri. Etiket formları kalıcı bir panelde değil,
+   aralığa **çift tıklayınca** açılan küçük pencerelerdedir.
 6. **Dataset** — bileşim, filtreler, kalite bulguları.
 7. **Export** — sürümlü dataset yayını.
 8. **Ayarlar ve Tanılama** — tercihler, yakalama profili, etiket şeması, tanı.
@@ -157,21 +189,37 @@ Sol gezinme çubuğunda sekiz çalışma alanı var (`Ctrl+1` … `Ctrl+8`,
 | `Boşluk` | Önizlemeyi aç / kapat |
 | `M` | Marker bırak |
 | `Esc` | Kaydı durdur |
+| `F4` | Kayıt bilgileri penceresi |
 
 Metin alanına yazarken bu kısayollar tetiklenmez.
 
 ### Etiketleme akışı
 
 1. Kaydı oynatın veya zaman çizelgesinde gezinin.
-2. **Hareket modunda** (F1) HAREKET şeridinde sürükleyerek bir tekrar çizin.
+2. **Hareket modunda** (F1) HAREKET şeridinde sürükleyerek bir tekrar çizin —
+   ya da `Hareket ekle` (`N`) ile oynatma konumunda oluşturun. Arka arkaya on
+   tekrar çizerken araya pencere girmez.
 3. Hareketi seçin, gerekirse sadece onu döngüde oynatıp sınırlarını düzeltin.
-4. Hareket türünü ve doğru/yanlış kararını verin (`1` / `2`).
-5. Hareket yanlışsa **hata moduna** (F2 veya `E`) geçin, HATA şeridinde hatanın
-   göründüğü aralığı çizin ve hata türünü seçin.
+4. Hareket bandına **çift tıklayın** (veya `Enter`): açılan küçük pencerede
+   hareket türünü arayın/seçin ve doğru/yanlış kararını verin. Karar için
+   pencereye girmeden `1` / `2` de kullanılabilir.
+5. Hareket yanlışsa `Hata ekle` (`E`) ile HATA şeridinde hatanın göründüğü
+   aralığı çizin, sonra o aralığa **çift tıklayıp** hata türünü seçin.
 6. Aynı harekete başka hata aralıkları ekleyin, sonra sonraki harekete geçin.
+   `Sonraki eksik`, bu kayıtta etiketi tamamlanmamış bir sonraki harekete —
+   kalmadıysa eksik bir sonraki kayda — atlar.
 
-Aranan hata türü yoksa, adı yazıp Enter'a basmak yeni türü projeye kalıcı
-olarak ekler ve seçili aralığa atar; ekrandan çıkmanız gerekmez.
+Aranan tür listede yoksa, adı yazıp Enter'a basmak **hem hareket hem hata**
+için yeni türü projeye kalıcı olarak ekler ve seçili aralığa atar; ekrandan
+çıkmanız gerekmez. İki tür de aynı yinelenen-ad kontrolünü kullanır: büyük/
+küçük harf, fazladan boşluk ve Unicode biçim farkları mevcut türü seçer, yeni
+tür yaratmaz.
+
+**Yeni sınıf eklemek proje düzeyinde bir değişikliktir.** `label_schema.json`
+dosyasına anında ve atomik yazılır, etiketleme undo yığınına **girmez**, ve
+pencereyi **İptal** ile kapatsanız bile tanımlı kalır — iptal yalnızca "bu
+aralığa atama" işlemini geri alır. Türü seçilmemiş bir aralık "tamamlandı"
+sayılmaz: hem ekranda hem export kuralında eksik görünür.
 
 ### İnceleme kısayolları
 
@@ -184,14 +232,49 @@ olarak ekler ve seçili aralığa atar; ekrandan çıkmanız gerekmez.
 | `E` | Konumda yeni hata aralığı |
 | `S` | Seçili hareketi böl |
 | `X` | Dışla / geri al |
-| `C` | Önceki hareketin etiketini kopyala |
+| `L` | Seçili aralığı döngüde oynat |
+| `Enter` | Seçili aralığın etiket penceresini aç |
+| `Delete` | Seçili aralığı sil |
 | `1` / `2` | Doğru / Hatalı |
-| `Ctrl+F` | Hata türü aramasına odaklan |
+| `F4` | Kayıt bilgileri penceresi |
 | `Ctrl+1`/`2`/`3` | RGB / İskelet / RGB + İskelet |
 | `Ctrl+Z`, `Ctrl+Y` | Geri al / yinele |
 | `Ctrl+S` | Hemen kaydet |
 
 Metin alanına yazarken bu kısayollar tetiklenmez.
+
+### Ekranda yalnızca kaydedilen kişi çizilir
+
+İnceleme ekranı, kayıt sırasında seçilmiş kişiyi çizer ve **başka hiç kimseyi
+çizmez** — soluk da olsa. Otorite `subject_body()`'dir; o kişi bir karede
+bulunamadıysa iskelet çizilmez ve panelde "Seçilen kişi bu karede bulunamadı"
+yazar. Önceki karenin pozu ekranda **donmaz**, en iyi takip edilen gövde
+yerine geçirilmez. Zaman çizelgesindeki takip kapsamı eğrisi de aynı kişiyi
+anlatır, böylece grafik "veri var" derken görüntü boş kalamaz. Gövde/tracker
+kimliği seçici kaldırıldı: seçilecek bir şey yok.
+
+Kişi kilidi eklenmeden önce alınmış kayıtlarda kayıtlı bir cevap yoktur. Bu
+durumda kayıtta **en çok görünen** gövde çizilir, bu bir tahmin olarak
+işaretlenir (`Kilit yok · tahmin ID n`) ve kayıt açılırken uyarı verilir.
+Uydurma bir kimlik yazılmaz; export aynı kaydı aynı kuralla okur.
+
+### RGB üzerine iskelet hizası
+
+2B eklem konumları **kameranın kendi görüntüsünün** pikselleridir. İnceleme
+ekranında görünen resim ise küçültülmüş proxy videodur (`proxy_video_width`,
+varsayılan 640). Bu iki uzayı aynı saymak, HD720 bir kayıtta her eklemi 2x,
+960x540 bir kayıtta 1.5x sağa kaydırıyordu. Artık eklem uzayının çözünürlüğü
+kaydın kamera bilgisinden okunur ve izdüşüm normalize koordinatlar üzerinden
+yapılır; sonuç, resmin ekranda hangi boyutta çizildiğinden bağımsızdır.
+Düzeltme bir piksel ofseti değil, ölçek hatasının kaynağının giderilmesidir.
+
+2B eklem yoksa kaydın **doğrulanmış** kamera kalibrasyonu (fx/fy/cx/cy)
+kullanılır. İkisi de yoksa bindirme **çizilmez** ve nedeni yazılır —
+yaklaşık yerleştirilmiş bir iskelet, takip hatasından ayırt edilemez.
+
+Bir karenin proxy görüntüsü eksikse eski kare tekrar gösterilmez: renkli kare
+olmadığı söylenir. Aynı poz başka bir anın resmiyle eşleştirilirse ortaya
+çıkan görüntü, tam olarak bir takip hatasına benzer.
 
 ---
 
@@ -370,6 +453,16 @@ manifestte `legacy_active_body: true` diye işaretler.
 
 ## Disk yapısı
 
+Kullanıcı ve proje erişim veritabanı datasetin dışında tutulur:
+
+```text
+%LOCALAPPDATA%/KineCapture/identity.sqlite3   # Windows, identity schema v1
+```
+
+SQLite yalnız hesap, parola türevi, aktiflik, proje sahipliği/ataması ve küçük
+audit metadata'sını saklar. RGB, derinlik, SVO2, MP4 ve JSONL dosyaları SQLite'a
+konmaz.
+
 ```text
 dataset_root/
 └── projects/<project_id>/
@@ -377,7 +470,7 @@ dataset_root/
     ├── label_schema.json
     ├── participants/<participant_id>/          # P0001, P0002, ... (anonim)
     │   ├── participant.json
-    │   └── sessions/<session_id>/
+    │   └── sessions/<session_id>/            # arka planda otomatik yönetilir
     │       ├── session.json
     │       └── takes/<take_id>/
     │           ├── take.json                   # yakalama metadata + provenance
@@ -398,8 +491,9 @@ dataset_root/
 - **Append-safe iskelet akışı.** Her kare sonrası flush edilir. Elektrik
   kesilse bile o ana kadarki kareler okunabilir; yarım kalan son satır
   tolere edilir ve `truncated` olarak bildirilir.
-- **Derinlik iki kez saklanmaz.** SVO2 derinliği yeniden üretebildiği için
-  kare başına derinlik varsayılan olarak yazılmaz (`store_depth_frames`).
+- **Ölçülen derinlik zorunlu saklanır.** SVO2 yeniden oynatımının kayıt anındaki
+  derinliği bit düzeyinde üretmediği gerçek donanımda ölçüldü. Bu nedenle ZED
+  rengi SVO2'de, ölçülen float32 derinlik ise chunk'lı RGB-D arşivinde tutulur.
 - **Yarım kayıtlar kaybolmaz.** Finalize edilmemiş kayıt `PARTIAL` kalır,
   açılışta bulunur ve kurtarılabilir.
 - **Uzun yol desteği.** Windows 260 karakter sınırı `\\?\` önekiyle aşılır
@@ -635,8 +729,10 @@ Varsayılan export **native** eklem sırasındadır.
 
 ```text
 GUI (PySide6)          gui/pages/*, gui/widgets/*, gui/main_window.py
-   │  yalnız okur; kamera veya diske dokunmaz
-AppState               gui/state.py
+   │
+Auth / Access          identity/ (SQLite schema, repository, scrypt, service)
+   │  hesap + proje yetkisi; büyük çekim dosyası içermez
+Authenticated AppState gui/state.py
    │
 CaptureService         capture/service.py
    ├── acquisition thread ── backend.grab_frame()
@@ -667,11 +763,14 @@ Domain                 domain/ (Qt ve pyzed içermez)
 conda run -n KineSynth python -m pytest -k export
 ```
 
-**528 test, tamamı geçiyor** (~160 s). Testler gerçek kamera gerektirmez ve
+**561 test, tamamı geçiyor** (~177 s). Testler gerçek kamera gerektirmez ve
 gerçek zaman beklemez; GUI testleri `QT_QPA_PLATFORM=offscreen` ile çalışır.
 
 Kapsam: ortam ve opsiyonel `pyzed` importu, config doğrulama, domain
 shape/dtype, ZED iskelet tabloları, eklem eşleştirme, mock determinizmi,
+ilk kurulum ve tek-owner DB kısıtı, self-registration, parola hash/verify,
+pasif kullanıcı, parola sıfırlama ve zorunlu değişim, proje sahipliği/ataması,
+yetkisiz proje yolu, eşzamanlı katılımcı kodu tahsisi, otomatik çekim oturumu,
 çok gövde ve takip kaybı senaryoları, state machine, capture servisi,
 atomik yazım ve overwrite koruması, checksum, yarım kayıt kurtarma,
 oynatma, hareket segmentasyonu, hata aralıkları (tek/çok/tekrarlı/çakışan),

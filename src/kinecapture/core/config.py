@@ -15,6 +15,7 @@ Runtime directories (data, logs) never live inside the source tree.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -48,6 +49,23 @@ def default_config_path() -> Path:
 
 def _resolve_user_path(value: str | Path) -> Path:
     return Path(value).expanduser()
+
+
+def default_application_data_dir() -> Path:
+    """Deterministic per-user application data directory.
+
+    Identity data is intentionally separate from both datasets and user
+    preferences so it cannot be mistaken for a scientific project.
+    """
+    if os.name == "nt":
+        base = Path(os.environ.get("LOCALAPPDATA") or (Path.home() / "AppData" / "Local"))
+    else:
+        base = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share"))
+    return base.expanduser() / "KineCapture"
+
+
+def default_identity_database_path() -> Path:
+    return default_application_data_dir() / "identity.sqlite3"
 
 
 @dataclass
@@ -89,6 +107,11 @@ class AppConfig:
     )
     log_dir: Path = field(default_factory=lambda: Path.home() / "KineCapture" / "logs")
     last_project_path: Optional[Path] = None
+    #: Injected in tests; defaults to the OS-local application data folder.
+    #: This path is not written to the user preference file.
+    identity_db_path: Optional[Path] = None
+    #: The only login value preferences may remember. Passwords are never saved.
+    last_username: str = ""
     #: Feature ids the export screen was last configured with. A preference,
     #: not a contract: unknown ids are dropped when the registry loads them, so
     #: a stale settings file can never inject a feature that no longer exists.
@@ -116,6 +139,9 @@ class AppConfig:
         self.log_dir = _resolve_user_path(self.log_dir)
         if self.last_project_path is not None:
             self.last_project_path = _resolve_user_path(self.last_project_path)
+        self.identity_db_path = _resolve_user_path(
+            self.identity_db_path or default_identity_database_path()
+        )
 
         if self.preview_fps <= 0:
             raise ConfigError("preview_fps 0'dan büyük olmalıdır.")
@@ -161,6 +187,8 @@ class AppConfig:
             "last_project_path": (
                 str(self.last_project_path) if self.last_project_path else None
             ),
+            "identity_db_path": str(self.identity_db_path),
+            "last_username": self.last_username,
             "export_feature_ids": list(self.export_feature_ids),
             "capture": self.capture.to_dict(),
             "mock": asdict(self.mock),
@@ -242,6 +270,7 @@ def save_user_state(config: AppConfig) -> Path:
         "last_project_path": (
             str(config.last_project_path) if config.last_project_path else None
         ),
+        "last_username": config.last_username,
         "export_feature_ids": list(config.export_feature_ids),
         "capture": config.capture.to_dict(),
         "mock": asdict(config.mock),
@@ -267,7 +296,9 @@ __all__ = [
     "ConfigError",
     "MockSettings",
     "USER_STATE_PATH",
+    "default_application_data_dir",
     "default_config_path",
+    "default_identity_database_path",
     "load_config",
     "save_user_state",
 ]
