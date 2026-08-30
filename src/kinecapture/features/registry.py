@@ -1029,6 +1029,11 @@ class FeaturePreset:
     label: str
     description: str
     feature_ids: tuple[str, ...]
+    #: Kept for existing automation, not offered as a way to start. A legacy
+    #: preset is hidden behind the advanced list rather than deleted, because
+    #: removing it would break scripts that name it - and it still describes a
+    #: real, reproducible selection.
+    legacy: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1036,6 +1041,7 @@ class FeaturePreset:
             "label": self.label,
             "description": self.description,
             "feature_ids": list(self.feature_ids),
+            "legacy": self.legacy,
         }
 
 
@@ -1063,22 +1069,34 @@ _SYMMETRY = (
 
 PRESETS: tuple[FeaturePreset, ...] = (
     FeaturePreset(
+        "canonical",
+        "Kanonik dataset (önerilen)",
+        (
+            "Modelden bağımsız temel: ham eklem koordinatları, güven ve "
+            "geçerlilik maskeleri, kare/zaman izlenebilirliği ve gövde durumu. "
+            "Normalizasyon, sabit dizi uzunluğu ve pencereleme eğitim "
+            "hattının işidir; burada yapılmaz."
+        ),
+        _QUALITY,
+    ),
+    FeaturePreset(
         "minimal",
-        "Minimum canonical",
-        "Yalnız ham iskelet, kare numaraları ve zaman damgaları.",
+        "Yalnız ham iskelet",
+        "Eklem koordinatları, kare numaraları ve zaman damgaları.",
         (),
     ),
     FeaturePreset(
         "kinesynth_compat",
-        "KineSynth temel uyumluluk",
+        "Eski: KineSynth temel uyumluluk",
         (
-            "Mevcut KineSynth modelinin beklediği kanallar: ham koordinat, "
-            "kök merkezli koordinat ve KARE FARKI (joint_displacement). "
-            "KineSynth'in 'velocity' kanalı fiziksel hız değildir; fiziksel hız "
-            "bu presete dahil edilmez."
+            "ESKİ. Yalnız KineSynthV3 dönemi otomasyonu için tutuluyor; yeni "
+            "dataset'ler için önerilmez. Kanallar: ham koordinat, kök merkezli "
+            "koordinat ve KARE FARKI (joint_displacement). KineSynth'in "
+            "'velocity' kanalı fiziksel hız değildir."
         ),
         ("joint_confidences", "validity_masks", "root_centered_positions",
          "joint_displacement"),
+        legacy=True,
     ),
     FeaturePreset(
         "kinematics_research",

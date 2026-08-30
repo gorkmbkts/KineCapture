@@ -25,7 +25,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
+from PySide6.QtGui import QCloseEvent, QKeySequence, QPixmap, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -47,6 +47,7 @@ from kinecapture import APP_NAME, APP_VERSION
 from kinecapture.core.config import AppConfig
 from kinecapture.core.errors import KineCaptureError
 from kinecapture.core.logging import get_logger
+from kinecapture.gui.assets import YTU_LOGO, asset_bytes
 from kinecapture.domain.enums import CaptureState
 from kinecapture.gui.icons import app_icon, clear_icon_cache, get_icon, icon_size
 from kinecapture.gui.admin import ManageUsersDialog
@@ -80,6 +81,26 @@ _PAGES = (
 
 _NAV_EXPANDED_WIDTH = 208
 _NAV_COLLAPSED_WIDTH = 56
+#: Tall enough to read the crest, short enough that at 700px the navigation
+#: items and the collapse button still fit above it.
+_NAV_LOGO_MAX_HEIGHT = 96
+
+
+def _load_logo_pixmap() -> Optional[QPixmap]:
+    """The university logo as a pixmap, or ``None`` if it cannot be loaded.
+
+    Never raises. A decoration that fails to load must leave the navigation
+    completely usable, and leave a diagnosable warning in the log rather than
+    a crash on start.
+    """
+    data = asset_bytes(YTU_LOGO)
+    if not data:
+        return None
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(data, "PNG") or pixmap.isNull():
+        logger.warning("Logo görseli çözümlenemedi: %s", YTU_LOGO)
+        return None
+    return pixmap
 _CONTEXT_REFRESH_MS = 1000
 
 
@@ -116,6 +137,16 @@ class NavigationRail(QFrame):
         layout.addLayout(self._items)
         layout.addStretch(1)
 
+        # The university mark sits at the foot of the rail, above the collapse
+        # button. It is decoration: it is given whatever space is left after
+        # the navigation has taken what it needs, so on a 700px-tall screen the
+        # logo shrinks rather than pushing a page button off the bottom.
+        self._logo_source = _load_logo_pixmap()
+        self._logo = QLabel()
+        self._logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._logo.setVisible(self._logo_source is not None)
+        layout.addWidget(self._logo, 0, Qt.AlignmentFlag.AlignHCenter)
+
         self._toggle = QPushButton()
         self._toggle.setProperty("role", "nav")
         self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -124,6 +155,7 @@ class NavigationRail(QFrame):
 
         self.setFixedWidth(_NAV_EXPANDED_WIDTH)
         self._refresh_toggle()
+        self._refresh_logo()
 
     def add_page(self, key: str, title: str, icon: str) -> QPushButton:
         button = QPushButton(f"  {title}")
@@ -156,6 +188,7 @@ class NavigationRail(QFrame):
         self._brand.setVisible(self._expanded)
         self._version.setVisible(self._expanded)
         self._refresh_toggle()
+        self._refresh_logo()
 
     def _refresh_toggle(self) -> None:
         icon = "chevron-left" if self._expanded else "chevron-right"
@@ -163,9 +196,47 @@ class NavigationRail(QFrame):
         self._toggle.setText("  Daralt" if self._expanded else "")
         self._toggle.setToolTip("Menüyü daralt" if self._expanded else "Menüyü genişlet")
 
+    def _refresh_logo(self) -> None:
+        """Scale the logo to the collapsed/expanded rail, or hide it entirely.
+
+        Collapsed, it is hidden rather than shrunk to an icon: a 40px-wide
+        university crest is unreadable, and it would still be taking vertical
+        space from the navigation in the state chosen precisely to save space.
+        The label is emptied as well so it contributes no height.
+        """
+        source = self._logo_source
+        if source is None:
+            self._logo.setVisible(False)
+            return
+        if not self._expanded:
+            self._logo.setVisible(False)
+            self._logo.clear()
+            self._logo.setFixedHeight(0)
+            return
+
+        width = _NAV_EXPANDED_WIDTH - 4 * self._theme.space_sm
+        height = int(round(width * source.height() / max(1, source.width())))
+        height = min(height, _NAV_LOGO_MAX_HEIGHT)
+        width = int(round(height * source.width() / max(1, source.height())))
+        # Rescaled from the original every time rather than from the last
+        # scaled copy, so repeated collapse/expand cannot accumulate blur.
+        self._logo.setPixmap(
+            source.scaled(
+                width,
+                height,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+        )
+        self._logo.setFixedHeight(height)
+        self._logo.setToolTip("Yıldız Teknik Üniversitesi")
+        self._logo.setAccessibleName("Yıldız Teknik Üniversitesi logosu")
+        self._logo.setVisible(True)
+
     def apply_theme(self, theme: Theme) -> None:
         self._theme = theme
         self._refresh_toggle()
+        self._refresh_logo()
         restyle(self)
 
 
@@ -498,7 +569,26 @@ class MainWindow(QMainWindow):
     def _authentication_completed(self, _user: object) -> None:
         self._root_stack.setCurrentWidget(self._shell)
         self._context.refresh()
+        self._recover_interrupted_deletions()
         self._route_after_login()
+
+    def _recover_interrupted_deletions(self) -> None:
+        """Resolve any project deletion a crash left half-finished.
+
+        A filesystem and SQLite cannot commit together, so a deletion that dies
+        between them leaves a tombstone saying which side got there. This is
+        where that is settled - once, at login, before the user can open a
+        project that may be about to reappear or vanish underneath them.
+        """
+        try:
+            notes = self.state.recover_interrupted_deletions()
+        except Exception:  # pragma: no cover - never block login on cleanup
+            logger.exception("Yarım kalan silme kurtarması başarısız")
+            return
+        if notes:
+            self.state.notify(
+                "Yarım kalan proje silme işlemi çözüldü: " + notes[0], 9000
+            )
 
     def _route_after_login(self) -> None:
         """Apply the deterministic project-selection rules after login."""

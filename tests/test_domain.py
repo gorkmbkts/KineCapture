@@ -437,31 +437,46 @@ def test_evaluate_sample_covers_every_state() -> None:
     blank = MovementSample.create("t", 0, 20)
     assert evaluate_sample(blank)[0] is SampleReadiness.UNLABELLED
 
-    good = MovementSample.create(
-        "t", 0, 20, exercise="squat", correctness=Correctness.CORRECT
+    unreviewed = MovementSample.create("t", 0, 20, exercise="squat")
+    assert evaluate_sample(unreviewed)[0] is SampleReadiness.UNLABELLED, (
+        "an exercise alone is not a finished review"
     )
+
+    good = MovementSample.create("t", 0, 20, exercise="squat")
+    good.mark_reviewed()
     assert evaluate_sample(good)[0] is SampleReadiness.READY
+    assert good.derived_correctness is Correctness.CORRECT
 
-    contradiction = MovementSample.create(
-        "t", 0, 20, exercise="squat", correctness=Correctness.CORRECT
-    )
-    contradiction.error_intervals.append(ErrorInterval.create(2, 5, "k"))
-    assert evaluate_sample(contradiction)[0] is SampleReadiness.CONTRADICTION
+    localised = MovementSample.create("t", 0, 20, exercise="squat")
+    localised.error_intervals.append(ErrorInterval.create(2, 5, "k"))
+    localised.mark_reviewed()
+    assert evaluate_sample(localised)[0] is SampleReadiness.READY
+    assert localised.derived_correctness is Correctness.INCORRECT
 
-    pending = MovementSample.create(
-        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
-    )
-    assert evaluate_sample(pending)[0] is SampleReadiness.NEEDS_ERROR_INTERVAL
+    unclassified = MovementSample.create("t", 0, 20, exercise="squat")
+    unclassified.error_intervals.append(ErrorInterval.create(2, 5))
+    unclassified.mark_reviewed()
+    assert evaluate_sample(unclassified)[0] is SampleReadiness.INVALID_INTERVAL
 
-    stranded = MovementSample.create(
-        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
-    )
+    stranded = MovementSample.create("t", 0, 20, exercise="squat")
     stranded.error_intervals.append(ErrorInterval.create(50, 60, "k"))
+    stranded.mark_reviewed()
     assert evaluate_sample(stranded)[0] is SampleReadiness.INVALID_INTERVAL
 
-    excluded = MovementSample.create(
+    # Two shapes of legacy file whose recorded verdict its own intervals deny.
+    legacy_incorrect = MovementSample.create(
+        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
+    )
+    assert evaluate_sample(legacy_incorrect)[0] is SampleReadiness.LEGACY_CONFLICT
+
+    legacy_correct = MovementSample.create(
         "t", 0, 20, exercise="squat", correctness=Correctness.CORRECT
     )
+    legacy_correct.error_intervals.append(ErrorInterval.create(2, 5, "k"))
+    assert evaluate_sample(legacy_correct)[0] is SampleReadiness.LEGACY_CONFLICT
+
+    excluded = MovementSample.create("t", 0, 20, exercise="squat")
+    excluded.mark_reviewed()
     excluded.status = SegmentStatus.EXCLUDED
     assert evaluate_sample(excluded)[0] is SampleReadiness.EXCLUDED
 
@@ -469,10 +484,9 @@ def test_evaluate_sample_covers_every_state() -> None:
 def test_unknown_error_class_only_checked_when_vocabulary_given() -> None:
     from kinecapture.domain.enums import SampleReadiness
 
-    sample = MovementSample.create(
-        "t", 0, 20, exercise="squat", correctness=Correctness.INCORRECT
-    )
+    sample = MovementSample.create("t", 0, 20, exercise="squat")
     sample.error_intervals.append(ErrorInterval.create(2, 5, "made-up"))
+    sample.mark_reviewed()
     assert evaluate_sample(sample)[0] is SampleReadiness.READY
     assert evaluate_sample(sample, known_error_codes=["real"])[0] is (
         SampleReadiness.INVALID_INTERVAL

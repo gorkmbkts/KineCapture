@@ -55,9 +55,7 @@ def _record_and_label(
         sample = repository.create_sample(1 + index * span, (index + 1) * span)
         correct = index % 2 == 0
         repository.label_sample(
-            sample.sample_id,
-            exercise=exercise,
-            correctness=Correctness.CORRECT if correct else Correctness.INCORRECT,
+            sample.sample_id, exercise=exercise, reviewed=True
         )
         if not correct:
             # An incorrect movement is only finished once the error is located.

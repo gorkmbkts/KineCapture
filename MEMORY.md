@@ -1,9 +1,9 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: capture_review_labeling_ui_simplified
-last_updated: 2026-08-28
-app_version: 0.8.0
+status: derived_correctness_project_deletion_responsive_gui
+last_updated: 2026-08-30
+app_version: 0.9.0
 ---
 
 # KineCapture Studio — Proje Hafızası
@@ -52,6 +52,13 @@ Kısa kalıcı talimatlar `CLAUDE.md` içindedir.
   hizası kök nedeninden (proxy/kamera piksel uzayı karışması) düzeltildi,
   etiketleme iki küçük diyaloga indirildi ve aktivite yazımı emekliye ayrıldı
   (veri korunarak). Ayrıntı: bölüm 6G.
+- 2026-08-30: `CLAUDE_PROJECT_DELETE_LABELING_EXPORT_GUI_PROMPT.md` uygulandı.
+  Doğru/hatalı kararı hata aralıklarından türetilir hale geldi (annotation
+  2.1.0), yalnız Sistem Sahibinin kullanabildiği kalıcı proje silme eklendi,
+  zaman çizelgesi sürüklemesine kare önizlemesi ve tek commit getirildi, export
+  modelden bağımsız hale getirildi, Export/Ayarlar/Dataset/Projeler duyarlı
+  yapıldı ve NavigationRail'e paketlenmiş YTÜ logosu eklendi. Ayrıntı: bölüm
+  6I.
 
 Önceki scaffold aşaması bu sürümle büyük ölçüde değiştirildi. "Değişen
 kararlar" bölümleri farkları kaydeder.
@@ -883,7 +890,7 @@ models.py      User / ProjectAccess değer nesneleri; parola alanı içermez
 
 ### Sürümler ve doğrulama
 
-- Uygulama/paket: **0.8.0**.
+- Uygulama/paket: **0.9.0**.
 - `PROJECT_SCHEMA_VERSION`: **1.1.0**.
 - `SESSION_SCHEMA_VERSION`: **2.0.0** (minimum participant +
   `operator_user_id`).
@@ -1166,6 +1173,314 @@ hazırlık analiziydi; burası uygulamanın kendisi.
   kilidi, ham arşiv ve bindirme hizası mock backend ile ve daha önce (bölüm
   6D) alınmış gerçek kayıtların dosyalarıyla doğrulandı. Gerçek kamerada
   Capture uyarı şeridinin canlı kayıt kaybı senaryosu tetiklenmedi.
+
+## 6H. Sonraki Claude GUI/veri görevi — prompt hazırlığı (2026-08-30)
+
+> **Tarihsel.** Bu bölüm görev *öncesi* durumu ve onaylanan ürün
+> kararlarını kaydeder. Başlığındaki "HENÜZ UYGULANMADI" artık geçerli
+> değildir: prompt aynı gün uygulandı. Uygulanmış sonuç için **bölüm
+> 6I**'ye bakın.
+
+Kullanıcı son 0.8.0 arayüzünü yeniden değerlendirdi; mevcut kod, ilgili
+testler ve geçici/izole GUI render'ları incelendikten sonra
+CLAUDE_PROJECT_DELETE_LABELING_EXPORT_GUI_PROMPT.md oluşturuldu. Bu bölüm
+uygulanmış özellikleri değil, onaylanan ürün kararlarını ve prompt hazırlama
+denetimini kaydeder.
+
+### Onaylanan ürün kararları
+
+- **Proje silme kalıcıdır:** yalnız identity modelindeki tek System
+  Owner/admin kullanabilir. Başarılı işlem proje klasörünü; ham kayıt, proxy,
+  iskelet, annotation ve release'ler dahil fiziksel olarak kaldırmalı ve disk
+  alanını boşaltmalıdır. Listeden kaldırma, soft delete, Recycle Bin veya
+  kalıcı trash yeterli değildir. Normal user hem GUI hem servis katmanında
+  engellenmelidir.
+- Silme için proje adı/doğrulama metni isteyen güçlü bir onay, canonical path
+  ve manifest kimliği kontrolü, geniş kök/symlink-junction koruması, aktif
+  handle'ların kapanması, SQLite ilişki/audit düzeni ve kısmi hata/recovery
+  politikası promptta zorunlu tutuldu. Gerçek kullanıcı projesi üzerinde
+  destructive test yasaktır; yalnız disposable temp proje kullanılacaktır.
+- **Correctness kullanıcı seçimi değildir:** hareket sınıfı kaydedilmiş ve
+  sınıflandırılmış geçerli hata aralığı yoksa hareket otomatik Doğru ve
+  export-ready; en az bir sınıflandırılmış hata aralığı varsa Hatalı; son hata
+  aralığı silinirse yeniden Doğru olur. Sınıfsız/geçersiz hata aralığı
+  hareketi unready bırakır.
+- Mevcut 2.0.0 annotation'larda explicit Hatalı kararı olup hata aralığı
+  bulunmaması sessizce Doğru'ya çevrilmeyecek; legacy çelişkisi görünür ve
+  çözülene kadar export dışı olacaktır. Correctness otoritesi değiştiği için
+  uygulayıcı gerçek schema/reader etkisini inceleyip uygun sürümleme ve
+  idempotent migration kararı vermelidir.
+- **Timeline trim preview** hem mevcut hareket/hata aralığının start/end
+  kenarını düzenlerken hem de yeni hareket/hata aralığını ilk kez çizerken
+  sürüklenen endpoint karesini gösterir. Drag başlangıcındaki playhead
+  saklanır; release/cancel sonrasında oraya dönülür. MouseMove başına
+  repository mutation/undo/autosave yapılmaz, final değişiklik tek işlem
+  olarak commit edilir.
+- Export artık KineSynthV3 Transformer uyumluluğunu varsayılan hedef veya
+  öncelik saymayacaktır. Yeni model için modelden bağımsız, self-describing,
+  provenance/mask/unit/shape/dtype/label mapping/error interval/derived
+  correctness içeren canonical dataset önceliklidir. Legacy uyumluluk
+  gerekirse ikincil ve açıkça işaretli kalabilir.
+- Export ile Ayarlar ve Tanılama sabit yoğun yan yana sütunlar yerine
+  1120x700, 1366x768 ve 1600x980'de erişilebilir responsive/scroll
+  mimarisine geçirilecektir. Tüm sayfalar dolu fixture'larla genel geometri
+  denetimine alınacaktır.
+- files/Yıldız_Technical_University_Logo.png (RGBA, 398x405) açık
+  NavigationRail'de Daralt düğmesinin hemen üstünde, oranı korunmuş ve
+  ortalanmış gösterilecek; rail daralınca tamamen gizlenecek ve boşluk
+  bırakmayacaktır. Görsel paket kaynağına dahil edilecek, cwd-relative
+  development path'e bağlı kalmayacaktır.
+
+### Prompt hazırlama sırasında doğrulanan mevcut durum
+
+- ProjectsPage ve IdentityService'te proje silme akışı yoktur.
+- Hareket dialogu, MovementSample, evaluate_sample, Dataset ve export
+  explicit stored correctness'e bağlıdır; yalnız GUI düğmesi kaldırmak yeterli
+  değildir.
+- TimelineWidget resize/move sırasında bounds sinyallerini sürekli gönderiyor;
+  preview/restore sinyali veya tek commit transaction'ı yoktur.
+- ExportPage hâlâ KineSynthV3 uyumu metni taşır ve sabit iki sütun kullanır.
+- SettingsPage iki yoğun bağımsız scroll sütununda yatay taşan kontrol
+  grupları kullanır. İzole render'da 1120x700 ve 1366x768 boyutlarında
+  yatay scroll, sıkışan alanlar ve görünür viewport dışına kayan alt kartlar
+  doğrulandı.
+- Logo dosyası mevcuttur fakat bu turda kaynak/paketleme dosyalarına
+  eklenmedi.
+
+### Bu prompt hazırlama turunda gerçekten çalıştırılanlar
+
+- conda run -n KineSynth python -m pytest tests/test_gui_painting.py
+  tests/test_gui.py tests/test_export_gui.py tests/test_review_flow.py -q
+  → **132 test geçti**.
+- Aynı dört dosya --collect-only ile doğrulandı → **132 test toplandı**.
+- Uygulama normal launcher ile açıldı; gerçek kullanıcı hesabıyla giriş
+  yapılmadı ve gerçek veri değiştirilmedi. Export, Settings ve Projects
+  sayfaları geçici identity DB + geçici proje ile offscreen olarak 1120x700
+  ve 1366x768'de render edildi.
+- Full tests/ turu ve self-test bu prompt-only turda yeniden
+  çalıştırılmadı. Proje silme, yeni correctness, timeline preview, responsive
+  refactor ve logo **henüz uygulanmadı veya işlevsel olarak doğrulanmadı**.
+- Kaynak kod ve gerçek app/schema sürümleri değişmedi: app 0.8.0; project
+  1.1.0, session 2.0.0, take 1.1.0, skeleton stream 1.1.0, annotation 2.0.0,
+  label 2.0.0, release 2.0.0, feature spec 1.0.0, raw archive 1.0.0,
+  identity SQLite schema 1. Bu turda yalnız yeni Claude promptu ve bu MEMORY
+  bölümü eklendi.
+
+## 6I. Proje silme, türetilmiş correctness, timeline önizlemesi ve GUI (2026-08-30)
+
+`CLAUDE_PROJECT_DELETE_LABELING_EXPORT_GUI_PROMPT.md` uygulandı.
+
+### Doğru/hatalı kararı artık TÜRETİLİYOR — veri sözleşmesi değişikliği
+
+**Kural:** sınıflandırılmış hata aralığı olan hareket HATALI, olmayan DOĞRU.
+Kullanıcıya ayrıca sorulmaz. Son aralık silinince hareket yeniden DOĞRU olur.
+Sınıfsız/geçersiz/dışarı taşan aralık hareketi doğru yapmaz — eksik bırakır.
+
+- Tek kaynak: `MovementSample.derived_correctness`. Domain, repository,
+  Dataset filtre/dağılımları, timeline bandı rengi, release manifesti ve
+  continuous export **hepsi** bunu okur; hiçbiri kendi hesabını yapmaz.
+- `MovementSample.correctness` alanı korunuyor fakat **türetilmiş önbellek**:
+  `label_sample()` ve `apply_to_all()` artık `correctness` parametresi
+  **kabul etmiyor**, `to_dict()` reviewed örneklerde türetilmiş değeri yazıyor.
+  Divergence üretebilecek public API yok.
+- **"Hata yok" ile "kimse bakmadı" ayrımı:** yeni `reviewed_at` alanı. Hareket
+  penceresinin Kaydet'i onu damgalar (`mark_reviewed()`); damgasız hareket hata
+  aralığı olmasa da `UNLABELLED` kalır. Bu, aralıkların tek başına söyleyemediği
+  tek şeydir.
+- `MovementLabelDialog`'dan Doğru/Hatalı düğmeleri, `KARAR` bölümü,
+  `correctness` property'si, `_set_verdict` ve `1`/`2` kısayolları **kaldırıldı**
+  (hem dialogdan hem ReviewPage'den). Kaydet, sınıf seçilmeden **etkin olmuyor**.
+- Yeni readiness durumu: `SampleReadiness.LEGACY_CONFLICT`.
+
+### Legacy annotation politikası
+
+`is_review_complete` = `reviewed_at` var **veya** dosyadaki karar türetilmiş
+değerle **aynı**. Böylece insan kararı ile kanıt uyuşuyorsa otomatik ve kayıpsız
+geçiş olur; uyuşmuyorsa çelişki görünür kalır.
+
+| Eski dosyadaki durum | Sonuç |
+|---|---|
+| CORRECT + aralık yok | READY (kanıt ve karar aynı) |
+| INCORRECT + sınıflı aralık var | READY |
+| **INCORRECT + sınıflı aralık yok** | **LEGACY_CONFLICT**, export dışı |
+| **CORRECT + sınıflı aralık var** | **LEGACY_CONFLICT**, export dışı |
+| UNLABELLED + exercise var | UNLABELLED (sınıf yalnız başına karar değil) |
+
+- **Dosyayı açmak onu yeniden yazmaz.** Çözülmemiş legacy örnek kaydedilse bile
+  eski kararı **verbatim** korur (`to_dict()` yalnız `reviewed_at` varsa
+  türetilmiş değeri yazar). Sessiz veri kaybı yok.
+- Çözüm iki deterministik yoldan biriyle: hareket penceresini yeniden kaydetmek
+  (yeni kuralı bilinçli kabul), veya eksik hata aralığını ekleyip
+  sınıflandırmak. İkisi de idempotent ve testli.
+
+### Sürümler (gerçekten değişenler)
+
+- `APP_VERSION` / paket: **0.8.0 → 0.9.0**
+- `ANNOTATION_SCHEMA_VERSION`: **2.0.0 → 2.1.0** — `reviewed_at` ve
+  `correctness_source` eklendi, `correctness`'in otoritesi değişti. Minor:
+  2.0 reader 2.1 dosyada bildiği alanda geçerli bir ikili değer bulur; 2.1
+  reader 2.0 dosyada kararı verbatim korur ve çelişkiyi gösterir.
+- `RELEASE_SCHEMA_VERSION`: **2.0.0 → 2.1.0** — manifest `correctness_source`
+  ve `reviewed_at` taşıyor. Toplamsal; hiçbir 2.0 alanı anlam değiştirmedi.
+- **Değişmeyenler:** project 1.1.0, session 2.0.0, take 1.1.0, skeleton stream
+  1.1.0, label 2.0.0, feature spec 1.0.0, raw archive 1.0.0, identity SQLite 1.
+
+### Kalıcı proje silme (yalnız Sistem Sahibi)
+
+Yeni `kinecapture/dataset/deletion.py` + `IdentityService` uzantıları.
+
+- **Yetki servistedir:** `IdentityService.authorize_project_deletion()` owner
+  şartını uygular. Normal kullanıcı düğmeyi görmez *ve* GUI'yi atlarsa
+  `AuthorizationError` alır (test edildi).
+- **Onay:** proje adı + kimlik + **tam, elide edilmemiş, kopyalanabilir yol**,
+  ne silineceği ve geri alınamazlığı. Son düğme **proje adı birebir yazılana
+  kadar** pasif. İptal/kapatma/yanlış metin = tam no-op. İş başladıktan sonra
+  ikinci tıklama yeni iş üretmez ve **İptal düğmesi sunulmaz**.
+- **GUI thread bloklanmaz:** `DeletionWorker(QThread)` ölçüm ve silmeyi
+  yürütür; dialog ilerlemeyi gösterir. Worker'a servis değil düz bir callable
+  verilir, böylece threading hiçbir şey silmeden test edilebilir.
+- **Path guard'ları** (`inspect_target`, saf fonksiyon, yalnız DB kaydını alır):
+  resolve + kayıtla karşılaştırma, `project.json` içindeki `project_id`
+  eşleşmesi, sürücü kökü / home / dataset kökü / kaynak klasör reddi,
+  symlink & Windows junction (reparse point) reddi. Proje **içindeki**
+  bağlantı izlenmez, yalnız bağın kendisi kaldırılır (test edildi).
+- **Sıra:** authorize → preflight → aktif bağlamı bırak (capture service ve
+  video handle'ları; Windows açık handle'lı klasörü taşımaz) → `os.replace` ile
+  `datasets/.deleting/<id>__<zaman>` tombstone → DB transaction → baytları sil.
+- **DB hatası:** proje eski yerine geri taşınır, hiçbir dosya silinmez
+  (`StorageError delete_db_failed`). **Dosya kalırsa:** başarı gösterilmez,
+  kalan yollar raporlanır, `project_files_remaining` audit olayı yazılır.
+- **Audit FK:** `audit_log.project_id → projects` bağı yüzünden geçmiş
+  silinmiyor. Önce her olayın metadata'sına proje kimliği/adı kopyalanıyor,
+  sonra işaretçi `NULL` yapılıyor; `project_deleted` olayı actor + yol ile
+  ekleniyor.
+- **Kurtarma:** girişte `.deleting` taranır. `database_cleared: true` ise silme
+  tamamlanır; `false` ise proje eski yoluna geri alınır; işareti okunamayan
+  klasöre **dokunulmaz** ve bildirilir. Belirsizlik veriyi korumaktan yana.
+- **Kayıt sürerken silme reddedilir** (`recording_blocks_delete`); kayıt
+  kullanıcının haberi olmadan durdurulmaz.
+- Read-only dosyalar `onerror` içinde yazılabilir yapılıp yeniden deneniyor
+  (Windows'un klasik yarıda kalan silme sebebi); uzun yollar `long_path()`.
+
+### Timeline: video editörü tarzı kırpma önizlemesi
+
+- Yeni sinyaller: `edit_started`, `preview_position_changed(int)`,
+  `edit_finished`, `edit_cancelled`. `position_changed` kalıcı playhead için
+  ayrıldı — ikisini aynı saymak playhead'in farenin bırakıldığı yerde
+  kalmasının sebebiydi.
+- Altı sürükleme türünde de önizleme var: hareket/hata × başlangıç/bitiş
+  yeniden boyutlandırma ve yeni aralık çizme. Hata aralığı önizlemesi ana
+  hareket sınırına **son hâlle aynı kuralla** kırpılır.
+- `_Drag.tentative_start/end` ekranda çizilir (`_drawn_bounds`); repository
+  **fare bırakılana kadar hiçbir şey duymaz**. Eskiden her `mouseMove` bir
+  mutasyon + bir undo snapshot + bir autosave üretiyordu; tek sürüklemeyi geri
+  almak onlarca Ctrl+Z demekti. Artık bir sürükleme = bir yazma.
+- Bırakınca: tek commit, sonra `ReviewPage._edit_finished` playhead'i
+  **sürükleme başlamadan önceki kareye** döndürür ve oynatmayı başlatmaz.
+- `Esc`, odak kaybı ve eşik altı kısa tıklama iptal eder; kısa tıklama eski
+  scrub davranışını korur. `ReviewPage._redraw(position)` artık isteğe bağlı
+  konum alıyor: önizleme `self._position`'a dokunmuyor.
+
+### Export: modelden bağımsız
+
+- Export ekranındaki KineSynthV3 yönlendirmesi kaldırıldı; native/kanonik
+  seçenek "önerilen" olarak sunuluyor. Yeni `canonical` preset varsayılan
+  başlangıç; `kinesynth_compat` **`legacy=True`** ile korunuyor (silmek eski
+  otomasyonu bozardı) ve adı "Eski: ..." ile başlıyor.
+- Yeni "Çıktı sözleşmesi" kartı ne yazıldığını ve normalizasyon/sabit uzunluk/
+  padding/split'in **yapılmadığını** açıkça söylüyor.
+- Release doğrulaması artık *sınıflandırılmış* aralıkları sayıyor ve sınıfsız
+  aralığı ayrı bir hata olarak bildiriyor; türetilmiş correctness ile aralık
+  içeriği çelişemez.
+
+### GUI: bilgi mimarisi ve viewport denetimi
+
+- **Export**: 5 sekme (Kapsam / İskelet / Özellikler / Doğrulama / Sürümler),
+  her biri kendi dikey scroll'u; **Sürüm oluştur** sekmelerin dışında sabit
+  eylem çubuğunda, pasifse nedeni yanında yazıyor. Release tablosu
+  `ResizeToContents` yerine `Interactive` + ilk sütun `Stretch`.
+- **Ayarlar**: 6 sekme (Genel / Yakalama / Sentetik / Sınıflar / Tanılama /
+  Konumlar); iki bağımsız scroll kolonu kaldırıldı. **Kaydet** sekmelerin
+  dışında, yanında kirli/temiz durumu. Tanılama raporu monospace ve esnek
+  yükseklikte. Sınıf listeleri splitter içinde, birbirini ezmiyor.
+- **Dataset**: 8 filtre ve 12 metrik kutusu `flow_row` ile sarıyor; tablolar
+  `Interactive` sütunlarla; sayfa dikey scroll'a alındı.
+- **Projeler**: sabit 2:3 kolon yerine splitter; plan düğmeleri sarıyor.
+- **Dashboard**: yatay scrollbar kapatıldı.
+- Yeni ortak yardımcılar: `make_wrapped_label` (sarar, genişlik dayatmaz),
+  `Card(compact=True)`, `ElidedLabel` kullanımı yaygınlaştı.
+- **Ölçülen minimumlar (1120x700, dark/light):** dashboard 290x133,
+  projects 861x245, participants 586x342, capture 1101x593, review 938x598,
+  dataset 517x133, export 550x523, settings 551x447. Hepsi 1120'nin altında;
+  `pages with problems: 0`.
+- **Minimum pencere boyutu büyütülmedi**; kök neden layout/size-policy
+  üzerinden çözüldü.
+
+### NavigationRail'de YTÜ logosu
+
+- Kaynak `files/Yıldız_Technical_University_Logo.png` **dokunulmadı**;
+  bayt-bayt aynı kopya `src/kinecapture/gui/assets/` altına alındı ve
+  `pyproject.toml` içinde `package-data` olarak bildirildi. `importlib.resources`
+  ile okunuyor — cwd/repository yoluna bağlı değil. **Wheel içinde bulunduğu
+  doğrulandı** (`kinecapture-0.9.0-py3-none-any.whl`).
+- Rail açıkken Daralt düğmesinin hemen üstünde, yatayda ortalı, en-boy oranı
+  ve şeffaflık korunarak `SmoothTransformation` ile ölçekleniyor
+  (94x96 px; tavan 96 px, 700 px ekranda navigasyonu itmiyor).
+- Daraltıldığında **tamamen gizleniyor** ve `height=0` — boşluk bırakmıyor.
+  Her ölçekleme **orijinalden** yapılıyor, art arda collapse/expand görüntüyü
+  bozmuyor ve yeni pixmap sızdırmıyor (8 tur test edildi).
+- Logo yüklenemezse uygulama çalışmaya devam ediyor, yalnız warning düşüyor.
+
+### QFont::setPointSize uyarısı — Qt kaynaklı, kanıtlandı
+
+- Offscreen platformda **hiç görünmüyor**; `windows` platform eklentisinde
+  uygulama açılışında 27 kez düşüyor: `Point size <= 0 (-1)`.
+- **Minimal tekrar üretim, hiç kinecapture kodu olmadan:** px tabanlı bir
+  stylesheet (`QWidget { font-size: 13px; }`) + `QToolButton` + `QMenu` →
+  aynı uyarı 6 kez. `px` stylesheet fontu piksel boyutlu bırakıyor
+  (`pointSize() == -1`) ve Qt'nin kendi menü ölçüm kodu bu değeri geri
+  `setPointSize`'a veriyor.
+- Uygulama kodu **hiçbir zaman** pozitif olmayan punto istemiyor:
+  `monospace_font()` tema sabitleriyle çağrılıyor, timeline cetveli
+  `max(7, ...)` ile sınırlı — ikisi de testle sabitlendi.
+- Menüye açık punto vermeyi denedim: uyarı **6 → 9'a çıktı**. Yukarı akış
+  davranışı; kozmetik; düzeltilmedi ve nedeni testte belgelendi.
+
+### Gerçekten çalıştırılanlar
+
+| Komut | Sonuç |
+|---|---|
+| `python -m pytest tests/` | **732 passed**, 241.70 s |
+| `.\scripts\run_tests.ps1 -Quiet` | "Testler gecti." (KineSynth, Python 3.11.14) |
+| `python -m kinecapture --self-test` | uçtan uca OK, export doğrulama geçti |
+| `pip wheel . --no-deps` | `kinecapture-0.9.0-py3-none-any.whl`, logo içinde |
+| GUI denetimi (8 sayfa × 3 boyut × 2 tema) | `pages with problems: 0` |
+| Gerçek `windows` platform akış testi | hepsi OK (aşağıda) |
+
+Yeni test dosyaları: `test_project_deletion.py` (19), `test_project_deletion_gui.py`
+(9), `test_timeline_preview.py` (16), `test_nav_logo.py` (13),
+`test_gui_viewports.py` (79). `test_annotations.py` türetilmiş karar ve legacy
+migration testleriyle 56'ya çıktı.
+
+`windows` platform eklentisiyle (offscreen değil) doğrulananlar: hareket
+penceresinde verdict düğmesi yok ve Kaydet sınıfsız pasif; türetilmiş karar
+`correct` + ready; trim preview sonrası playhead 28→28; silme dialogu boş/yanlış
+metinde pasif, doğru metinde etkin, tam yol gösteriliyor; logo 94x96 açık,
+collapsed height 0, geri geliyor; export/settings/dataset/capture çiziliyor.
+
+### Donanımda doğrulanamayanlar
+
+- **Bu turda ZED 2i ile canlı kayıt alınmadı.** Capture ekranı düzeni bu görevde
+  değişmedi; mock backend ve önceki turların gerçek kayıt dosyaları kullanıldı.
+- **Gerçek büyük proje silinmedi.** Silme yalnız `tmp_path` altında oluşturulan
+  tek kullanımlık fixture'larda çalıştırıldı. Onlarca GB'lık gerçek bir ham
+  arşivde silme süresi, açık handle davranışı ve gerçek disk kazancı
+  ölçülmedi.
+- **Paketlenmiş installer denenmedi.** Logo bir wheel içinde doğrulandı;
+  PyInstaller/MSI gibi bir dağıtım biçimi üretilmedi.
+- `test_participant_codes_are_unique_under_concurrent_allocation` tam suite
+  yükünde ara sıra Windows `.lock` dosyası yarışından düşüyor; tek başına
+  üst üste geçiyor. Bu görevden önce de vardı, bu görevde değişmedi.
 
 ## 7. Mimari sınırlar
 

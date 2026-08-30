@@ -146,6 +146,11 @@ class SegmentStatus(str, Enum):
 
 
 class Correctness(str, Enum):
+    #: .. note::
+    #:    Since the derived-correctness rule this is an **outcome**, not an
+    #:    input. It is computed from a movement's classified error intervals
+    #:    by :attr:`MovementSample.derived_correctness`; nothing asks a human
+    #:    to choose it and no edit API accepts it.
     """Whether a movement sample was performed correctly.
 
     The judgement is **binary** once a human has made it. ``UNLABELLED`` is a
@@ -200,6 +205,10 @@ class SampleReadiness(str, Enum):
     #: Has an interval that is reversed, empty, outside the sample, or whose
     #: error class is not in the project schema.
     INVALID_INTERVAL = "invalid_interval"
+    #: A pre-derived-correctness file whose recorded verdict disagrees with its
+    #: own error intervals. Never resolved silently - see
+    #: :func:`kinecapture.domain.project.evaluate_sample`.
+    LEGACY_CONFLICT = "legacy_conflict"
     #: Deliberately kept out of the dataset by the user.
     EXCLUDED = "excluded"
 

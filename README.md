@@ -26,6 +26,9 @@ gerçek ZED 2i donanımıyla hem de donanımsız sentetik backend ile çalışı
 | Hareket segmentasyonu (oluştur/böl/birleştir/dışla, undo/redo) | Çalışıyor |
 | İki seviyeli etiketleme (hareket + zamansal hata aralığı) | Çalışıyor |
 | Etiketleme sırasında hata **ve hareket** türü oluşturma | Çalışıyor |
+| Doğru/hatalı kararının hata aralıklarından türetilmesi | Çalışıyor |
+| Zaman çizelgesinde sürükleme sırasında kare önizlemesi | Çalışıyor |
+| Yönetici-only kalıcı proje silme (disk alanı boşaltır) | Çalışıyor |
 | Autosave + undo/redo | Çalışıyor |
 | Dataset paneli + kalite bulguları | Çalışıyor |
 | Sürümlü export (manifest / spec / mapping / fingerprint / doğrulama) | Çalışıyor |
@@ -89,9 +92,9 @@ kayıt geçerli bir sürekli-aktivite örneğidir — negatif örnek olmadan
 
 Etiketler **iki seviyelidir**:
 
-1. **Hareket sample'ı** — kayıt içindeki bir tekrar. Hareket türü ve **ikili**
-   doğru/yanlış kararı taşır. Bir kayıt birden çok hareket içerebilir; her biri
-   ayrı bir export örneği olur.
+1. **Hareket sample'ı** — kayıt içindeki bir tekrar. Yalnız **hareket türü**
+   taşır. Bir kayıt birden çok hareket içerebilir; her biri ayrı bir export
+   örneği olur.
 2. **Hata aralığı** — seçili hareketin *içinde*, hatanın göründüğü zaman
    aralığı. Bir aralık tek bir hata sınıfı taşır. Aynı sınıf hareket boyunca
    tekrarlanabilir, farklı sınıflar çakışabilir (aynı anda iki hata),
@@ -99,6 +102,32 @@ Etiketler **iki seviyelidir**:
 
 Bu, ileride eğitilecek modelin yalnızca "hatalı mı?" değil "hata hareketin
 neresinde?" sorusunu da öğrenebilmesi içindir.
+
+#### Doğru/hatalı kararı TÜRETİLİR
+
+Kullanıcı bir harekete ayrıca "doğru" veya "hatalı" demez. Kural tektir:
+
+- **Sınıflandırılmış hata aralığı yoksa** hareket **DOĞRU**'dur.
+- **En az bir geçerli ve sınıflandırılmış hata aralığı varsa** **HATALI**'dır.
+- **Son hata aralığı silinirse** hareket kendiliğinden yeniden DOĞRU olur.
+- **Sınıfsız, sınırları geçersiz veya hareketin dışına taşan** bir hata aralığı
+  hareketi doğru yapmaz; hareket **eksik** sayılır ve export'a girmez.
+
+İki ayrı yer (insanın kararı ve zaman çizelgesindeki kanıt) aynı soruyu
+yanıtladığı sürece birbiriyle çelişebilirdi, ve çelişen bir kayıtta hangi
+yarısına inanılacağını söyleyen bir şey yoktu. Aralıklar gözlemdir; karar
+onların özetiydi — artık doğrudan onlardan okunuyor.
+
+`correctness` alanı dosyada yazılmaya devam eder, fakat **türetilmiş bir
+önbellektir**: hiçbir düzenleme API'si onu aralıklardan bağımsız
+ayarlayamaz ve kaydetmeden önce yeniden hesaplanır.
+
+#### "Hiç hata yok" ile "kimse bakmadı" aynı şey değildir
+
+İkisi de sıfır hata aralığı üretir, bu yüzden ayırmak için ek bir işaret
+gerekir: hareket penceresinin **Kaydet**'i. Kaydetmek "bu hareketin sınıf
+incelemesi bitti" demektir ve `reviewed_at` alanına yazılır. Sınıfı
+kaydedilmemiş hareket, hata aralığı olmasa da **Etiketlenmedi** kalır.
 
 **Hareket fazı kavramı kaldırılmıştır.** Eski kayıtlardaki faz değerleri
 silinmez; `legacy` bloğunda saklanır fakat arayüzde ve yeni export
@@ -201,10 +230,12 @@ Metin alanına yazarken bu kısayollar tetiklenmez.
    tekrar çizerken araya pencere girmez.
 3. Hareketi seçin, gerekirse sadece onu döngüde oynatıp sınırlarını düzeltin.
 4. Hareket bandına **çift tıklayın** (veya `Enter`): açılan küçük pencerede
-   hareket türünü arayın/seçin ve doğru/yanlış kararını verin. Karar için
-   pencereye girmeden `1` / `2` de kullanılabilir.
-5. Hareket yanlışsa `Hata ekle` (`E`) ile HATA şeridinde hatanın göründüğü
+   hareket türünü arayın veya seçin. Pencere yalnızca bunu sorar; doğru/hatalı
+   diye bir seçim yoktur. Kaydet, sınıf incelemesinin bittiğini kaydeder ve
+   hata aralığı yoksa hareketi anında DOĞRU ve export'a hazır yapar.
+5. Hatanın göründüğü yeri göstermek için `Hata ekle` (`E`) ile HATA şeridinde
    aralığı çizin, sonra o aralığa **çift tıklayıp** hata türünü seçin.
+   Sınıflandırılan ilk aralıkla birlikte hareket HATALI olur.
 6. Aynı harekete başka hata aralıkları ekleyin, sonra sonraki harekete geçin.
    `Sonraki eksik`, bu kayıtta etiketi tamamlanmamış bir sonraki harekete —
    kalmadıysa eksik bir sonraki kayda — atlar.
@@ -235,7 +266,7 @@ sayılmaz: hem ekranda hem export kuralında eksik görünür.
 | `L` | Seçili aralığı döngüde oynat |
 | `Enter` | Seçili aralığın etiket penceresini aç |
 | `Delete` | Seçili aralığı sil |
-| `1` / `2` | Doğru / Hatalı |
+| `Esc` | Süren sınır sürüklemesini iptal et |
 | `F4` | Kayıt bilgileri penceresi |
 | `Ctrl+1`/`2`/`3` | RGB / İskelet / RGB + İskelet |
 | `Ctrl+Z`, `Ctrl+Y` | Geri al / yinele |
@@ -277,6 +308,100 @@ olmadığı söylenir. Aynı poz başka bir anın resmiyle eşleştirilirse orta
 çıkan görüntü, tam olarak bir takip hatasına benzer.
 
 ---
+
+### Sınır sürüklerken kare önizlemesi
+
+Bir hareket veya hata aralığının kenarını sürüklerken — ve yeni bir aralığı ilk
+kez çizerken — görüntüleyici **sürüklenen anı** gösterir, tıpkı bir video
+düzenleyicide olduğu gibi. Üç görünüm modu da (RGB, İskelet, RGB + İskelet) aynı
+geçici kareyi kullanır ve hata aralığı önizlemesi ana hareketin sınırlarına, son
+hâlle birebir aynı kuralla kırpılır.
+
+Fare bırakıldığında:
+
+- kalıcı playhead, **sürükleme başlamadan önce bulunduğu kareye** geri döner —
+  farenin bırakıldığı yere değil;
+- oynatma kendiliğinden başlamaz;
+- repository'ye **tek bir** düzenleme yazılır. Eskiden her fare hareketinde bir
+  mutasyon, bir undo adımı ve bir autosave üretiliyordu, yani tek bir
+  sürüklemeyi geri almak için Ctrl+Z'ye onlarca kez basmak gerekiyordu.
+
+`Esc`, odak kaybı veya aralık eşiğini geçmeyen kısa tıklama sürüklemeyi iptal
+eder: hiçbir şey yazılmaz ve playhead eski yerine döner. Kısa tıklama eski
+scrub davranışını korur.
+
+---
+
+## Projeyi kalıcı olarak silme
+
+Disk alanı geri kazanmak için **yalnız Sistem Sahibi** bir projeyi kalıcı
+olarak silebilir. Bu, uygulamadaki tek yıkıcı işlemdir ve değişmezlik
+kurallarının bilinçli, dar kapsamlı tek istisnasıdır.
+
+**Silme gerçekten silmektir:** proje klasöründeki ham RGB-D arşivi, proxy
+videolar, iskelet akışları, etiket sidecar'ları ve oluşturulmuş dataset
+sürümleri fiziksel olarak kaldırılır. Geri dönüşüm kutusuna taşınmaz, gizli bir
+çöp klasöründe bekletilmez.
+
+### Yetki
+
+Yetki kontrolü **düğmede değil, servistedir**. Normal kullanıcı düğmeyi görmez;
+GUI'yi atlayıp servisi doğrudan çağırsa da `AuthorizationError` alır.
+Bir kullanıcının proje **erişimini kaldırmak** ile projeyi **silmek** ayrı
+işlemlerdir ve erişim kaldırma hiçbir dosyaya dokunmaz.
+
+### Onay
+
+Basit bir Evet/Hayır yeterli değildir. Onay penceresi proje adını, proje
+kimliğini ve **tam, kısaltılmamış, kopyalanabilir** yolu gösterir; işlemin geri
+alınamayacağını ve neyin silineceğini yazar. Son düğme, admin **proje adını
+birebir yazana kadar** etkin olmaz. İptal, pencereyi kapatma ve yanlış metin
+hiçbir dosyayı, DB kaydını veya aktif bağlamı değiştirmez.
+
+İşlem başladıktan sonra ikinci tıklama ikinci bir silme başlatmaz ve
+**İptal düğmesi sunulmaz**: özyinelemeli silmenin ortasında "iptal" yarım
+silinmiş bir projeyi tarif ederdi.
+
+### Yol güvenliği
+
+Hedef yalnız DB kaydından alınır; kullanıcı metni, glob veya çözülmemiş göreli
+yol asla özyinelemeli silmeye girmez. Silmeden hemen önce:
+
+- yol `resolve()` ile çözülür ve kayıtla karşılaştırılır;
+- klasördeki `project.json` içindeki `project_id` seçili kayıtla eşleşmelidir;
+- sürücü kökü, kullanıcı ana klasörü, dataset kökü ve uygulama kaynak klasörü
+  reddedilir;
+- symlink/junction hedefleri reddedilir; proje **içindeki** bir bağlantı
+  izlenmez, yalnız bağın kendisi silinir.
+
+Bunlardan biri tutmazsa **hiçbir şey silinmez**.
+
+### Yarıda kalırsa
+
+Dosya sistemi ile SQLite tek bir transaction olamaz. Bu görmezden gelinmez:
+proje önce `datasets/.deleting/<project_id>__<zaman>` altına **atomik olarak
+taşınır** (aynı birim içinde `os.replace`), sonra DB temizlenir, en son
+baytlar silinir. Klasörün içine bırakılan işaret dosyası hangi tarafın
+tamamlandığını söyler.
+
+- **Tam başarı:** klasör yok, DB kayıtları yok, aktif/son proje referansı yok,
+  audit olayı var, `.deleting` klasörü kaldırılmış.
+- **Onay öncesi / iptal / yetki hatası:** hiçbir şey değişmedi.
+- **DB hatası:** proje eski yerine geri taşınır; hiçbir dosya silinmez.
+- **Dosya silme hatası:** **başarı gösterilmez**; kalan yollar tek tek
+  bildirilir ve bir sonraki açılışta kurtarma çalışır.
+
+Uygulama silme sırasında kapanırsa, sonraki girişte `.deleting` altındaki
+işaretler okunur: DB tarafı bitmişse silme tamamlanır, bitmemişse proje eski
+yerine geri alınır. İşareti okunamayan klasöre **dokunulmaz** ve bildirilir —
+belirsizlik her zaman veriyi korumaktan yana çözülür.
+
+### Denetim izi
+
+`audit_log.project_id`, `projects` tablosuna foreign key ile bağlıdır. Proje
+satırı silinirken bu geçmiş **silinmez**: önce her olayın metadata'sına proje
+kimliği ve adı kopyalanır, sonra işaretçi `NULL` yapılır. Kimin ne zaman neyi
+sildiği, dosyalar gittikten sonra da kayıtlıdır.
 
 ## Ham RGB-D arşivi
 
@@ -537,7 +662,9 @@ Her örnek (bir hareket sample'ı) şunları taşır:
 | Alan | Anlam |
 |---|---|
 | `exercise` | Hareket türü kodu |
-| `correctness` | `correct` veya `incorrect` — **ikili** |
+| `correctness` | `correct` veya `incorrect` — **ikili**, hata aralıklarından **türetilmiş** |
+| `correctness_source` | Her zaman `derived_from_error_intervals` |
+| `reviewed_at` | Hareket sınıfı incelemesinin tamamlandığı an |
 | `error_intervals[]` | Zamansal hata aralıkları (0 veya daha fazla) |
 
 Her hata aralığı hem **mutlak** (kayıt içi) hem **göreli** (dizi içi) konum
@@ -708,7 +835,13 @@ Fingerprint aktivite aralıklarına, egzersiz bağlantılarına, kişi ilişkile
 özetine, seçili dataset moduna, dizi içeriği checksum'una ve ham kaynak
 checksum'una duyarlıdır.
 
-### KineSynthV3 uyumluluğu
+### Eski: KineSynthV3 uyumluluğu
+
+> Bu proje artık **modelden bağımsız** bir dataset üretir. KineSynthV3
+> Transformer modeline uyum ne varsayılan hedeftir ne de önceliktir; aşağıdaki
+> eşleştirme yalnız eski otomasyon için korunmaktadır. `kinesynth_compat`
+> preset'i **Eski** olarak işaretlidir ve varsayılan seçim değildir.
+
 
 ZED'in native `BODY_34` formatı KineSynthV3'ün 26 eklemli `rehab24_6_mocap`
 yapısıyla **aynı değildir**. Sürümlü bir adapter tanımlıdır

@@ -14,6 +14,10 @@ from kinecapture.core.errors import KineCaptureError, ValidationError
 from kinecapture.core.ids import new_id, utc_now_iso
 from kinecapture.core.logging import get_logger
 from kinecapture.dataset.index import DatasetIndex
+from kinecapture.dataset.deletion import (
+    ProjectDeletionService,
+    recover_tombstones,
+)
 from kinecapture.dataset.workspace import ProjectWorkspace
 from kinecapture.domain.enums import BackendKind
 from kinecapture.domain.labels import LabelSchema
@@ -50,6 +54,7 @@ class AppState(QObject):
         self._participant: Optional[Participant] = None
         self._session: Optional[Session] = None
         self._capture: Optional[CaptureService] = None
+        self._deletion: Optional[ProjectDeletionService] = None
         self._run_id = new_id("run")
 
     # -------------------------------------------------------------- identity
@@ -228,6 +233,78 @@ class AppState(QObject):
         self.participant_changed.emit(None)
         self.session_changed.emit(None)
         self.dataset_changed.emit()
+
+    # ------------------------------------------------- permanent deletion
+    @property
+    def deletion(self) -> ProjectDeletionService:
+        """The coordinator for permanently deleting a project."""
+        if self._deletion is None:
+            self._deletion = ProjectDeletionService(
+                self.identity, self.config.dataset_root
+            )
+        return self._deletion
+
+    def prepare_project_deletion(self, project_id: str) -> None:
+        """Let go of a project completely, before anything is removed.
+
+        Windows will not rename a directory that something has a file open in,
+        and a stale ``VideoCapture`` is exactly such a something. So the order
+        matters: authorise, refuse while recording, then release the camera
+        service and every reader, and only then let the deletion begin.
+
+        Recording is refused rather than aborted. Stopping a take from
+        underneath the operator to free a folder would trade one kind of data
+        loss for another; they can stop it themselves.
+        """
+        user = self._require_user()
+        self.identity.authorize_project_deletion(user, project_id)
+        if self._capture is not None and self._capture.is_recording:
+            raise ValidationError(
+                "Kayıt sürerken proje silinemez. Önce kaydı durdurun.",
+                code="recording_blocks_delete",
+            )
+
+        active = self._workspace is not None and (
+            self._workspace.project.project_id == project_id
+        )
+        if not active:
+            return
+
+        self._close_automatic_session("proje siliniyor")
+        # Drops the camera backend and, with it, any proxy/video handle held
+        # open on files inside this project.
+        self.release_capture_service()
+        self._workspace = None
+        self._index = None
+        self._participant = None
+        self._session = None
+        self.project_changed.emit(None)
+        self.participant_changed.emit(None)
+        self.session_changed.emit(None)
+
+    def finish_project_deletion(self, project_id: str) -> None:
+        """Forget the deleted project everywhere the user could meet it again."""
+        last = self.config.last_project_path
+        if last is not None and Path(last).name == project_id:
+            self.config.last_project_path = None
+            self.save_preferences()
+        self.dataset_changed.emit()
+
+    def recover_interrupted_deletions(self) -> list[str]:
+        """Resolve any deletion a crash left half-done. Safe to call on start."""
+        try:
+            known = {
+                record.project_id
+                for record in self.identity.repository.list_projects(
+                    self._require_user()
+                )
+            }
+        except Exception:  # pragma: no cover - no user yet
+            known = set()
+        notes = recover_tombstones(self.config.dataset_root, known_project_ids=known)
+        for note in notes:
+            logger.warning("Yarım kalan proje silme: %s", note)
+        return notes
 
     def refresh_dataset(self, *, force: bool = False) -> None:
         if self._index is None:

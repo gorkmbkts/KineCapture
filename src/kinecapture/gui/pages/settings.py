@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QSpinBox,
     QSplitter,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -41,11 +42,13 @@ from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme, available_themes
 from kinecapture.gui.widgets.common import (
     Card,
+    ElidedLabel,
     FieldRow,
     KeyValueList,
     StatusChip,
     make_button,
     make_label,
+    monospace_font,
 )
 
 _RESOLUTIONS = ("HD720", "HD1080", "HD1200", "HD2K", "SVGA", "VGA", "AUTO")
@@ -72,22 +75,53 @@ class SettingsPage(Page):
         super().__init__(state, parent)
         theme = self.theme
 
-        save_button = make_button(
-            "Ayarları kaydet", variant="primary", icon="check", theme=theme
-        )
-        save_button.clicked.connect(self._save)
-        self.header.add_action(save_button)
+        # Six categories, each its own vertical scroll. The two independent
+        # scrolling columns this replaces asked the user to hunt in both of
+        # them for a setting, and at 1120px squeezed each into a strip too
+        # narrow for a label and its control to sit side by side.
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        # Six Turkish category names are wider than the content area at 1120px.
+        # Scroll buttons keep every tab reachable; eliding alone would leave
+        # the last one unreadable and unreachable at the same time.
+        self._tabs.setUsesScrollButtons(True)
+        self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tabs.addTab(scrollable(self._build_general(theme)), "Genel")
+        self._tabs.addTab(scrollable(self._build_capture(theme)), "Yakalama")
+        self._tabs.addTab(scrollable(self._build_mock(theme)), "Sentetik")
+        self._tabs.addTab(scrollable(self._build_schema(theme)), "Sınıflar")
+        self._tabs.addTab(self._build_diagnostics(theme), "Tanılama")
+        self._tabs.addTab(scrollable(self._build_paths(theme)), "Konumlar")
+        self.content.addWidget(self._tabs, 1)
 
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        splitter.addWidget(scrollable(self._build_left(theme)))
-        splitter.addWidget(scrollable(self._build_right(theme)))
-        splitter.setSizes([620, 620])
-        self.content.addWidget(splitter, 1)
+        # Save stays outside the tabs: a settings screen where the Save button
+        # scrolls away is a settings screen people lose work in.
+        self.content.addWidget(self._build_save_bar(theme))
 
         self._load()
+        self._watch_for_changes()
+        self._mark_clean()
+
+    def _build_save_bar(self, theme: Theme) -> QWidget:
+        card = Card(theme=theme, compact=True)
+        row = QHBoxLayout()
+        row.setSpacing(theme.space_sm)
+        self._dirty_chip = StatusChip("Kaydedildi", theme=theme, icon="check")
+        row.addWidget(self._dirty_chip)
+        self._save_status = ElidedLabel("", role="muted")
+        row.addWidget(self._save_status, 1)
+        save = make_button(
+            "Ayarları kaydet", variant="primary", icon="check", theme=theme
+        )
+        save.clicked.connect(self._save)
+        row.addWidget(save)
+        container = QWidget()
+        container.setLayout(row)
+        card.add_widget(container)
+        return card
 
     # --------------------------------------------------------------- layout
-    def _build_left(self, theme: Theme) -> QWidget:
+    def _build_general(self, theme: Theme) -> QWidget:
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -149,6 +183,14 @@ class SettingsPage(Page):
         root_container.setLayout(root_row)
         prefs.add_widget(FieldRow("Dataset kök klasörü", root_container, theme=theme))
         layout.addWidget(prefs)
+        layout.addStretch(1)
+        return wrapper
+
+    def _build_capture(self, theme: Theme) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
 
         capture = Card(
             "Yakalama profili",
@@ -278,6 +320,14 @@ class SettingsPage(Page):
             )
         )
         layout.addWidget(capture)
+        layout.addStretch(1)
+        return wrapper
+
+    def _build_mock(self, theme: Theme) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
 
         mock = Card(
             "Sentetik backend",
@@ -343,9 +393,11 @@ class SettingsPage(Page):
         mock.add_widget(scenario_container)
         layout.addWidget(mock)
         layout.addStretch(1)
+        layout.addStretch(1)
         return wrapper
 
-    def _build_right(self, theme: Theme) -> QWidget:
+    def _build_diagnostics(self, theme: Theme) -> QWidget:
+        """Full width, monospaced, and as tall as the tab allows."""
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -361,7 +413,12 @@ class SettingsPage(Page):
         diagnostics.add_header_widget(self._health_chip)
         self._report_view = QPlainTextEdit()
         self._report_view.setReadOnly(True)
-        self._report_view.setMinimumHeight(300)
+        # A fixed 300px floor made this the tallest thing on a 700px page.
+        # It gets the tab's stretch instead, so it is as big as there is room
+        # for and never larger than that.
+        self._report_view.setMinimumHeight(140)
+        self._report_view.setFont(monospace_font(theme.font_size_sm))
+        self._report_view.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
         diagnostics.add_widget(self._report_view, 1)
 
         row = QHBoxLayout()
@@ -376,6 +433,13 @@ class SettingsPage(Page):
         row_container.setLayout(row)
         diagnostics.add_widget(row_container)
         layout.addWidget(diagnostics, 1)
+        return wrapper
+
+    def _build_schema(self, theme: Theme) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
 
         schema_card = Card(
             "Etiket şeması",
@@ -386,7 +450,11 @@ class SettingsPage(Page):
             theme=theme,
             icon="list",
         )
-        lists = QHBoxLayout()
+        # A splitter rather than a fixed pair of columns: with dozens of
+        # classes each list needs to be scrollable and resizable, and neither
+        # should be able to squeeze the other into a sliver.
+        lists = QSplitter(Qt.Orientation.Horizontal)
+        lists.setChildrenCollapsible(False)
         exercise_column = QVBoxLayout()
         exercise_column.addWidget(make_label("Egzersizler", role="caption"))
         self._exercise_list = QListWidget()
@@ -400,6 +468,7 @@ class SettingsPage(Page):
         exercise_input.addWidget(add_exercise)
         exercise_column.addLayout(exercise_input)
         exercise_container = QWidget()
+        exercise_container.setMinimumWidth(220)
         exercise_container.setLayout(exercise_column)
         lists.addWidget(exercise_container)
 
@@ -416,18 +485,29 @@ class SettingsPage(Page):
         error_input.addWidget(add_error)
         error_column.addLayout(error_input)
         error_container = QWidget()
+        error_container.setMinimumWidth(220)
         error_container.setLayout(error_column)
         lists.addWidget(error_container)
 
-        lists_container = QWidget()
-        lists_container.setLayout(lists)
-        schema_card.add_widget(lists_container, 1)
+        schema_card.add_widget(lists, 1)
         layout.addWidget(schema_card, 1)
+        return wrapper
 
-        paths = Card("Dosya konumları", theme=theme, icon="folder-open")
+    def _build_paths(self, theme: Theme) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
+        paths = Card(
+            "Dosya konumları",
+            subtitle="Uzun yollar kısaltılarak gösterilir; tam yol ipucundadır.",
+            theme=theme,
+            icon="folder-open",
+        )
         self._paths = KeyValueList(theme)
         paths.add_widget(self._paths)
         layout.addWidget(paths)
+        layout.addStretch(1)
         return wrapper
 
     # ----------------------------------------------------------------- data
@@ -522,7 +602,47 @@ class SettingsPage(Page):
         # than letting a stale profile keep driving the camera.
         self.state.release_capture_service()
         self.state.notify("Ayarlar kaydedildi. Yakalama profili sonraki kayıtlara uygulanır.")
+        self._mark_clean("Kaydedildi. Yakalama profili sonraki kayıtlara uygulanır.")
         self._refresh_paths()
+
+    # -------------------------------------------------------- dirty state
+    def _mark_dirty(self) -> None:
+        """Say out loud that there is unsaved work, next to the Save button."""
+        self._dirty_chip.set_status(
+            "Kaydedilmedi", icon="edit", colour=self.theme.warning
+        )
+        self._save_status.setText("Değişiklikler henüz kaydedilmedi.")
+
+    def _mark_clean(self, message: str = "") -> None:
+        self._dirty_chip.set_status(
+            "Kaydedildi", icon="check", colour=self.theme.success
+        )
+        self._save_status.setText(message)
+
+    def _watch_for_changes(self) -> None:
+        """Wire every editable control to the dirty indicator, once.
+
+        Done by walking the widgets rather than by hand at each construction
+        site: a setting added later would otherwise silently not mark the page
+        dirty, and nothing would notice until somebody lost a change.
+        """
+        from PySide6.QtWidgets import (
+            QCheckBox,
+            QComboBox,
+            QDoubleSpinBox,
+            QLineEdit,
+            QSpinBox,
+        )
+
+        for widget in self.findChildren(QCheckBox):
+            widget.toggled.connect(lambda _=False: self._mark_dirty())
+        for widget in self.findChildren(QComboBox):
+            widget.currentIndexChanged.connect(lambda _=0: self._mark_dirty())
+        for kind in (QSpinBox, QDoubleSpinBox):
+            for widget in self.findChildren(kind):
+                widget.valueChanged.connect(lambda _=0: self._mark_dirty())
+        for widget in self.findChildren(QLineEdit):
+            widget.textEdited.connect(lambda _="": self._mark_dirty())
 
     def _theme_selected(self) -> None:
         self.state.set_theme(self._theme_selector.currentData())
@@ -617,6 +737,8 @@ class SettingsPage(Page):
 
     def _refresh_paths(self) -> None:
         workspace = self.state.workspace
+        # ``KeyValueList`` wraps its values, so a long path stays readable and
+        # selectable rather than being silently truncated.
         self._paths.set_items(
             [
                 ("Kullanıcı ayarları", str(USER_STATE_PATH)),

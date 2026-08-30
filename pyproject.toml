@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kinecapture"
-version = "0.8.0"
+version = "0.9.0"
 description = "KineCapture Studio - ZED 2i motion capture, review, labelling and dataset export"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -33,6 +33,11 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# The navigation rail's university logo is a package resource, not a file next
+# to the checkout: an installed application has no repository to look in.
+[tool.setuptools.package-data]
+"kinecapture.gui.assets" = ["*.png"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

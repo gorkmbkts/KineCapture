@@ -768,9 +768,16 @@ class ErrorInterval:
 class MovementSample:
     """One movement repetition inside a take - the unit that becomes a sample.
 
-    A take may contain several of these. Each carries its own exercise and its
-    own binary correctness decision, and may localise zero or more
-    :class:`ErrorInterval` sub-ranges inside its own bounds.
+    A take may contain several of these. Each carries its own exercise and may
+    localise zero or more :class:`ErrorInterval` sub-ranges inside its own
+    bounds.
+
+    **Correctness is derived, never chosen.** A movement with at least one
+    classified error interval is incorrect; one with none is correct. Asking
+    the annotator for a verdict *as well* invited the two to disagree, and a
+    stored verdict that contradicts its own evidence is worse than no verdict:
+    the intervals are the observation, the verdict was only ever a summary of
+    them. See :attr:`derived_correctness`.
 
     Curation lives here, never in ``take.json``: labelling must not rewrite
     capture provenance.
@@ -789,10 +796,20 @@ class MovementSample:
 
     # ---- the label itself -------------------------------------------------
     exercise: str = ""
+    #: The verdict **as it was found on disk**. For anything written since the
+    #: derived rule this equals :attr:`derived_correctness`; for an older file
+    #: it is the human's recorded decision, kept verbatim until they resolve
+    #: any disagreement with the intervals. Never the authority - read
+    #: :attr:`derived_correctness` instead.
     correctness: Correctness = Correctness.UNLABELLED
     error_intervals: list[ErrorInterval] = field(default_factory=list)
     note: str = ""
     annotator: str = ""
+    #: When the annotator last saved this movement's class from the review
+    #: dialog. Empty means the class review has not been completed under the
+    #: derived rule; it is what separates "correct, confirmed" from "nobody has
+    #: looked yet", which the absence of error intervals alone cannot say.
+    reviewed_at: str = ""
 
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
@@ -859,6 +876,72 @@ class MovementSample:
             self.end_frame < other.start_frame or other.end_frame < self.start_frame
         )
 
+    # ----------------------------------------------------- derived verdict
+    @property
+    def localised_error_codes(self) -> tuple[str, ...]:
+        """Error classes actually pinned to a time range here.
+
+        An interval with no class is *not* evidence of an error: the annotator
+        marked a moment and has not yet said what is wrong with it. It makes
+        the movement incomplete rather than incorrect.
+        """
+        return tuple(i.error_code for i in self.error_intervals if i.error_code)
+
+    @property
+    def has_localised_error(self) -> bool:
+        return bool(self.localised_error_codes)
+
+    @property
+    def derived_correctness(self) -> Correctness:
+        """The authoritative verdict, computed from the intervals.
+
+        This is the single definition, and every screen, filter, distribution
+        and export path reads it rather than re-deriving its own.
+        """
+        return (
+            Correctness.INCORRECT if self.has_localised_error else Correctness.CORRECT
+        )
+
+    @property
+    def is_review_complete(self) -> bool:
+        """Whether a human has finished deciding about this movement.
+
+        Two ways to be true. Either the annotator saved the movement dialog
+        under the derived rule (:attr:`reviewed_at`), or an older file already
+        recorded a verdict that *agrees* with its own intervals - in which case
+        the human decision and the evidence say the same thing and there is
+        nothing to reconcile.
+        """
+        if self.reviewed_at:
+            return True
+        return (
+            self.correctness.is_decided
+            and self.correctness is self.derived_correctness
+        )
+
+    @property
+    def legacy_verdict_conflict(self) -> str:
+        """A recorded verdict that its own intervals contradict, or ``""``.
+
+        Returns the stored verdict so the caller can name it. Only ever set for
+        a file written before the derived rule: everything saved since carries
+        the derived value.
+        """
+        if self.reviewed_at or not self.correctness.is_decided:
+            return ""
+        if self.correctness is self.derived_correctness:
+            return ""
+        return self.correctness.value
+
+    def mark_reviewed(self, *, when: str = "") -> None:
+        """Record that the annotator finished this movement's class review.
+
+        Also collapses the stored verdict onto the derived one, so a resolved
+        legacy conflict cannot come back on the next load.
+        """
+        self.reviewed_at = when or utc_now_iso()
+        self.correctness = self.derived_correctness
+
     # --------------------------------------------------------------- labels
     @property
     def is_human_confirmed(self) -> bool:
@@ -905,7 +988,20 @@ class MovementSample:
             "source": self.source.value,
             "status": self.status.value,
             "exercise": self.exercise,
-            "correctness": self.correctness.value,
+            # Reviewed samples always serialise the derived value, so a file
+            # written by this version can never contain a verdict its own
+            # intervals contradict. An unreviewed legacy sample keeps whatever
+            # it arrived with: rewriting it would destroy a human decision the
+            # annotator has not yet been asked about.
+            "correctness": (
+                self.derived_correctness.value
+                if self.reviewed_at
+                else self.correctness.value
+            ),
+            "correctness_source": (
+                "derived_from_error_intervals" if self.reviewed_at else "legacy_stored"
+            ),
+            "reviewed_at": self.reviewed_at,
             "error_intervals": [i.to_dict() for i in self.sorted_intervals()],
             "note": self.note,
             "annotator": self.annotator,
@@ -991,6 +1087,7 @@ class MovementSample:
             error_intervals=intervals,
             note=str(label.get("note", "")),
             annotator=str(label.get("annotator", "")),
+            reviewed_at=str(data.get("reviewed_at") or label.get("reviewed_at") or ""),
             created_at=str(data.get("created_at") or utc_now_iso()),
             updated_at=str(data.get("updated_at") or utc_now_iso()),
             label_schema_version=str(
@@ -1090,37 +1187,54 @@ def evaluate_sample(
         return SampleReadiness.INVALID_INTERVAL, problems
 
     # --- the label itself ---------------------------------------------------
+    # There is no verdict to check any more: correctness is read off the
+    # intervals above. What remains is whether a human has finished looking.
     if not sample.exercise:
         problems.append(
             SampleProblem("no_exercise", "Hareket türü seçilmedi.")
         )
-    if not sample.correctness.is_decided:
-        problems.append(
-            SampleProblem("no_verdict", "Doğru/yanlış kararı verilmedi.")
-        )
-    if problems:
         return SampleReadiness.UNLABELLED, problems
 
-    if sample.correctness is Correctness.CORRECT and sample.error_intervals:
+    conflict = sample.legacy_verdict_conflict
+    if conflict:
+        if conflict == Correctness.INCORRECT.value:
+            problems.append(
+                SampleProblem(
+                    "legacy_incorrect_without_interval",
+                    (
+                        "Bu hareket eski sürümde HATALI işaretlenmiş fakat "
+                        "sınıflandırılmış bir hata aralığı yok. Hatanın "
+                        "göründüğü aralığı ekleyip sınıflandırın veya hareket "
+                        "penceresini yeniden kaydederek doğru kabul edin."
+                    ),
+                )
+            )
+        else:
+            problems.append(
+                SampleProblem(
+                    "legacy_correct_with_intervals",
+                    (
+                        "Bu hareket eski sürümde DOĞRU işaretlenmiş fakat "
+                        f"{len(sample.localised_error_codes)} sınıflandırılmış "
+                        "hata aralığı içeriyor. Yeni kurala göre hatalıdır; "
+                        "aralıkları silin veya hareket penceresini yeniden "
+                        "kaydedin."
+                    ),
+                )
+            )
+        return SampleReadiness.LEGACY_CONFLICT, problems
+
+    if not sample.is_review_complete:
         problems.append(
             SampleProblem(
-                "correct_with_errors",
+                "not_reviewed",
                 (
-                    "Hareket doğru işaretlendi fakat "
-                    f"{len(sample.error_intervals)} hata aralığı içeriyor."
+                    "Hareket sınıfı incelemesi tamamlanmadı. Hareket aralığına "
+                    "çift tıklayıp sınıfı kaydedin."
                 ),
             )
         )
-        return SampleReadiness.CONTRADICTION, problems
-
-    if sample.correctness is Correctness.INCORRECT and not sample.error_intervals:
-        problems.append(
-            SampleProblem(
-                "incorrect_without_interval",
-                "Hatalı hareket için en az bir hata aralığı işaretlenmeli.",
-            )
-        )
-        return SampleReadiness.NEEDS_ERROR_INTERVAL, problems
+        return SampleReadiness.UNLABELLED, problems
 
     return SampleReadiness.READY, problems
 

@@ -106,9 +106,15 @@ class DashboardPage(Page):
         columns.setSpacing(theme.space_md)
         columns.addWidget(self._build_pending(theme), 3)
         columns.addWidget(self._build_status(theme), 2)
+        # The scroll area below scrolls vertically only; a stray horizontal
+        # scrollbar there means something inside is too wide, and hiding it
+        # would only make the overflow invisible instead of absent.
         body_layout.addLayout(columns, 1)
 
         self._scroll = scrollable(self._body)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         self.content.addWidget(self._scroll, 1)
         self._show_empty(True)
 

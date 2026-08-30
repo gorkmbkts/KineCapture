@@ -44,7 +44,6 @@ from kinecapture.core.ids import utc_now_iso
 from kinecapture.core.logging import get_logger
 from kinecapture.dataset.workspace import ProjectWorkspace
 from kinecapture.domain.enums import (
-    Correctness,
     SampleReadiness,
     SegmentSource,
     SegmentStatus,
@@ -120,29 +119,27 @@ class MergeReport:
     """What happened to the labels of two samples that were merged."""
 
     kept_exercise: str = ""
+    #: The derived verdict of the surviving movement, for the report line.
     kept_correctness: str = ""
     dropped_exercise: str = ""
-    dropped_correctness: str = ""
     merged_intervals: int = 0
 
     @property
     def had_conflict(self) -> bool:
-        return bool(self.dropped_exercise or self.dropped_correctness)
+        # Only the exercise class can conflict now. Two movements' verdicts
+        # cannot: the merged movement owns both sets of error intervals and
+        # derives one answer from them.
+        return bool(self.dropped_exercise)
 
     def message(self) -> str:
         if not self.had_conflict:
             return (
                 f"Hareketler birleştirildi; {self.merged_intervals} hata aralığı korundu."
             )
-        details: list[str] = []
-        if self.dropped_exercise:
-            details.append(f"egzersiz '{self.dropped_exercise}'")
-        if self.dropped_correctness:
-            details.append(f"karar '{self.dropped_correctness}'")
         return (
-            "Hareketler birleştirildi. Farklı olan "
-            + " ve ".join(details)
-            + " kaydın geçmişine yazıldı, silinmedi. Geri almak için Ctrl+Z."
+            f"Hareketler birleştirildi. Farklı olan egzersiz "
+            f"'{self.dropped_exercise}' kaydın geçmişine yazıldı, silinmedi. "
+            "Geri almak için Ctrl+Z."
         )
 
 
@@ -703,7 +700,11 @@ class AnnotationRepository:
             end_frame=sample.end_frame,
             source=sample.source,
             exercise=sample.exercise,
-            correctness=sample.correctness,
+            # The verdict is not copied because it is not stored: each half
+            # derives its own from whichever intervals it ends up with. The
+            # *review* state is copied, since the class review that produced
+            # this movement covered both halves of it.
+            reviewed_at=sample.reviewed_at,
             note=sample.note,
             annotator=self.annotator or sample.annotator,
         )
@@ -760,22 +761,21 @@ class AnnotationRepository:
             (first, second) if first.start_frame <= second.start_frame else (second, first)
         )
         report = MergeReport(
-            kept_exercise=keep.exercise, kept_correctness=keep.correctness.value
+            kept_exercise=keep.exercise,
+            kept_correctness=keep.derived_correctness.value,
         )
 
         if drop.exercise and drop.exercise != keep.exercise:
             report.dropped_exercise = drop.exercise
-        if drop.correctness.is_decided and drop.correctness is not keep.correctness:
-            report.dropped_correctness = drop.correctness.value
         if not keep.exercise and drop.exercise:
             # Nothing to conflict with - just adopt it.
             keep.exercise = drop.exercise
             report.kept_exercise = drop.exercise
             report.dropped_exercise = ""
-        if not keep.correctness.is_decided and drop.correctness.is_decided:
-            keep.correctness = drop.correctness
-            report.kept_correctness = drop.correctness.value
-            report.dropped_correctness = ""
+        # Verdicts cannot conflict any more: the merged movement owns the union
+        # of both sets of intervals, and its correctness follows from those.
+        if drop.reviewed_at and not keep.reviewed_at:
+            keep.reviewed_at = drop.reviewed_at
 
         if report.had_conflict:
             history = list(keep.legacy.get("merged_from") or [])
@@ -783,7 +783,7 @@ class AnnotationRepository:
                 {
                     "sample_id": drop.sample_id,
                     "exercise": drop.exercise,
-                    "correctness": drop.correctness.value,
+                    "correctness": drop.derived_correctness.value,
                     "note": drop.note,
                     "merged_at": utc_now_iso(),
                 }
@@ -871,18 +871,28 @@ class AnnotationRepository:
         sample_id: str,
         *,
         exercise: Optional[str] = None,
-        correctness: Optional[Correctness] = None,
         note: Optional[str] = None,
+        reviewed: bool = False,
     ) -> MovementSample:
-        """Apply label changes. Only the arguments that are not ``None`` change."""
+        """Apply label changes. Only the arguments that are not ``None`` change.
+
+        There is deliberately no ``correctness`` parameter. The verdict is
+        derived from this movement's classified error intervals, so an API that
+        accepted one would be an API for making the two disagree.
+
+        ``reviewed=True`` records that the annotator finished the class review -
+        what the movement dialog's Save means. It also collapses any stored
+        legacy verdict onto the derived one, which is how a legacy conflict is
+        resolved deliberately rather than silently.
+        """
         sample = self._require(sample_id)
         self._snapshot()
         if exercise is not None:
             sample.exercise = exercise
-        if correctness is not None:
-            sample.correctness = Correctness.parse(correctness)
         if note is not None:
             sample.note = note
+        if reviewed:
+            sample.mark_reviewed()
         if self.annotator:
             sample.annotator = self.annotator
         sample.updated_at = utc_now_iso()
@@ -899,8 +909,11 @@ class AnnotationRepository:
         source, target = self._require(source_id), self._require(target_id)
         self._snapshot()
         target.exercise = source.exercise
-        target.correctness = source.correctness
         target.note = source.note
+        # Copying a label means the class review applies here too; the verdict
+        # still comes from this movement's own intervals, which are not copied.
+        if source.reviewed_at:
+            target.mark_reviewed()
         if self.annotator:
             target.annotator = self.annotator
         target.updated_at = utc_now_iso()
@@ -908,13 +921,16 @@ class AnnotationRepository:
         return target
 
     def apply_to_all(
-        self,
-        *,
-        exercise: Optional[str] = None,
-        correctness: Optional[Correctness] = None,
+        self, *, exercise: Optional[str] = None, reviewed: bool = False
     ) -> int:
-        """Bulk-label every active movement. Returns how many changed."""
-        if exercise is None and correctness is None:
+        """Bulk-label every active movement. Returns how many changed.
+
+        Only the exercise class travels. Each movement keeps its own verdict
+        because each one derives it from its own error intervals - applying
+        "correct" to a take would otherwise overwrite localised errors that are
+        still sitting right there in the timeline.
+        """
+        if exercise is None and not reviewed:
             return 0
         targets = [sample for sample in self._samples if sample.is_active]
         if not targets:
@@ -923,8 +939,8 @@ class AnnotationRepository:
         for sample in targets:
             if exercise is not None:
                 sample.exercise = exercise
-            if correctness is not None:
-                sample.correctness = Correctness.parse(correctness)
+            if reviewed:
+                sample.mark_reviewed()
             if self.annotator:
                 sample.annotator = self.annotator
             sample.updated_at = utc_now_iso()

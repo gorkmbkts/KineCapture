@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import os
 import re
 import shutil
@@ -13,6 +15,7 @@ from typing import Optional
 from kinecapture.core.errors import KineCaptureError, StorageError, ValidationError
 from kinecapture.core.ids import new_id, utc_now_iso
 from kinecapture.core.jsonio import read_json_mapping
+from kinecapture.core.logging import get_logger
 from kinecapture.dataset.workspace import PROJECT_FILE, ProjectWorkspace
 from kinecapture.domain.project import CaptureProfile
 from kinecapture.identity.database import IdentityDatabase
@@ -25,6 +28,9 @@ _USERNAME = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
 
 class AuthenticationError(KineCaptureError):
     code = "authentication_failed"
+
+
+logger = get_logger(__name__)
 
 
 class AuthorizationError(KineCaptureError):
@@ -559,6 +565,97 @@ class IdentityService:
                 connection, "project_access_removed", now,
                 actor_user_id=owner.user_id, target_user_id=target.user_id,
                 project_id=project.project_id,
+            )
+
+    # ------------------------------------------------- permanent deletion
+    def authorize_project_deletion(self, actor: User, project_id: str) -> ProjectAccess:
+        """The security boundary for destroying a project.
+
+        Deliberately *not* in the Projects page. A normal user who bypasses the
+        GUI and calls the service directly must be refused here, which is the
+        only place a refusal is worth anything. Being able to open a project,
+        or even owning it, is not enough: this is the single system owner's
+        decision, because it is the one action that cannot be undone.
+        """
+        owner = self.require_owner(actor)
+        record = self.repository.get_project(project_id)
+        if record is None:
+            raise ValidationError(
+                "Proje kaydı bulunamadı.", code="project_not_registered"
+            )
+        _ = owner
+        return record
+
+    def forget_project(
+        self, actor: User, project_id: str, *, path: str = ""
+    ) -> None:
+        """Remove a project from the database, keeping the audit trail.
+
+        ``audit_log.project_id`` is a foreign key onto ``projects``, so the row
+        cannot simply go: SQLite would either refuse or (with a cascade nobody
+        asked for) take the history with it. Deleting somebody's security
+        history because they deleted a folder is the wrong trade, so the
+        references are detached instead and the project's identity is copied
+        into each event's metadata first - the history keeps saying what it
+        always said, just without a live pointer.
+        """
+        record = self.authorize_project_deletion(actor, project_id)
+        now = utc_now_iso()
+        with self.database.transaction(immediate=True) as connection:
+            for row in connection.execute(
+                "SELECT audit_id, metadata_json FROM audit_log WHERE project_id=?",
+                (project_id,),
+            ).fetchall():
+                try:
+                    metadata = json.loads(row["metadata_json"] or "{}")
+                except (TypeError, ValueError):  # pragma: no cover - corrupt row
+                    metadata = {}
+                metadata.setdefault("project_id", project_id)
+                metadata.setdefault("project_name", record.name)
+                metadata["project_deleted_at"] = now
+                connection.execute(
+                    "UPDATE audit_log SET project_id=NULL, metadata_json=? "
+                    "WHERE audit_id=?",
+                    (
+                        json.dumps(metadata, ensure_ascii=False, sort_keys=True),
+                        row["audit_id"],
+                    ),
+                )
+            connection.execute(
+                "DELETE FROM project_access WHERE project_id=?", (project_id,)
+            )
+            connection.execute(
+                "DELETE FROM projects WHERE project_id=?", (project_id,)
+            )
+            self.repository.audit(
+                connection,
+                "project_deleted",
+                now,
+                actor_user_id=actor.user_id,
+                metadata={
+                    "project_id": project_id,
+                    "project_name": record.name,
+                    "project_path": path or record.path,
+                },
+            )
+        logger.info("Proje kalıcı olarak silindi: %s (%s)", record.name, project_id)
+
+    def note_deletion_outcome(
+        self, actor: User, project_id: str, *, ok: bool, detail: str = ""
+    ) -> None:
+        """Record how the physical removal actually went.
+
+        Separate from :meth:`forget_project` because the filesystem finishes
+        after the database does, and a half-removed tree is exactly the thing
+        an audit trail should not be silent about.
+        """
+        with self.database.transaction(immediate=True) as connection:
+            self.repository.audit(
+                connection,
+                "project_files_removed" if ok else "project_files_remaining",
+                utc_now_iso(),
+                actor_user_id=actor.user_id,
+                metadata={"project_id": project_id, "detail": detail},
             )
 
     def assigned_project_ids(self, actor: User, user_id: str) -> set[str]:

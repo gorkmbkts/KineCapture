@@ -196,7 +196,7 @@ class DatasetQuery:
         if self.error_codes and not set(self.error_codes) & set(row.error_codes):
             return False
         if self.correctness:
-            values = {s.correctness for s in row.active_samples}
+            values = {s.derived_correctness for s in row.active_samples}
             if not values & set(self.correctness):
                 return False
         if self.readiness:
@@ -464,7 +464,7 @@ class DatasetIndex:
                     summary.ready_samples += 1
                 else:
                     summary.unready_samples += 1
-                correctness[sample.correctness.value] += 1
+                correctness[sample.derived_correctness.value] += 1
                 if sample.exercise:
                     exercises[sample.exercise] += 1
                 summary.error_intervals += len(sample.error_intervals)
@@ -590,6 +590,7 @@ class DatasetIndex:
     def _label_issues(self, rows: Sequence[TakeRow]) -> list[dict[str, Any]]:
         """Label problems, using the same rule the exporter applies."""
         severity_by_readiness = {
+            SampleReadiness.LEGACY_CONFLICT: "warning",
             SampleReadiness.CONTRADICTION: "warning",
             SampleReadiness.INVALID_INTERVAL: "warning",
             SampleReadiness.NEEDS_ERROR_INTERVAL: "info",
@@ -629,7 +630,7 @@ class DatasetIndex:
             for sample in row.active_samples:
                 if not row.readiness(sample).is_ready:
                     continue
-                correctness[sample.correctness.value] += 1
+                correctness[sample.derived_correctness.value] += 1
                 if sample.exercise:
                     per_exercise_participants.setdefault(sample.exercise, set()).add(
                         row.take.participant_id

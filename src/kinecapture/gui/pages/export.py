@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSpinBox,
     QTableWidget,
+    QTabWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -49,17 +50,19 @@ from kinecapture.features.registry import (
     match_preset,
     order_features,
 )
-from kinecapture.gui.pages.base import Page
+from kinecapture.gui.pages.base import Page, scrollable
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
 from kinecapture.gui.widgets.common import (
     Card,
+    ElidedLabel,
     EmptyState,
     FieldRow,
     KeyValueList,
     StatusChip,
     make_button,
     make_label,
+    make_wrapped_label,
 )
 from kinecapture.gui.widgets.feature_picker import (
     FeatureSelectionDialog,
@@ -146,11 +149,28 @@ class ExportPage(Page):
         self.content.addWidget(self._empty)
 
         self._body = QWidget()
-        body = QHBoxLayout(self._body)
+        body = QVBoxLayout(self._body)
         body.setContentsMargins(0, 0, 0, 0)
-        body.setSpacing(theme.space_md)
-        body.addWidget(self._build_options(theme), 2)
-        body.addWidget(self._build_releases(theme), 3)
+        body.setSpacing(theme.space_sm)
+
+        # Five questions, five tabs, one vertical scroll each. The two fixed
+        # columns this replaces put the feature picker and the release table
+        # side by side, which at 1120px squeezed both into unreadable strips
+        # and gave the table its own horizontal scrollbar inside the page's.
+        self._tabs = QTabWidget()
+        self._tabs.setDocumentMode(True)
+        self._tabs.setUsesScrollButtons(True)
+        self._tabs.setElideMode(Qt.TextElideMode.ElideRight)
+        self._tabs.addTab(scrollable(self._build_scope(theme)), "Kapsam")
+        self._tabs.addTab(scrollable(self._build_skeleton(theme)), "İskelet")
+        self._tabs.addTab(scrollable(self._build_features(theme)), "Özellikler")
+        self._tabs.addTab(scrollable(self._build_preview(theme)), "Doğrulama")
+        self._tabs.addTab(self._build_releases(theme), "Sürümler")
+        body.addWidget(self._tabs, 1)
+
+        # The action bar sits outside the tabs. Whatever the user is reading,
+        # the thing they came to do is one glance away and never scrolled off.
+        body.addWidget(self._build_action_bar(theme))
         self.content.addWidget(self._body, 1)
 
         state.project_changed.connect(lambda _: self._reload())
@@ -158,13 +178,19 @@ class ExportPage(Page):
         self._set_empty(True)
 
     # --------------------------------------------------------------- layout
-    def _build_options(self, theme: Theme) -> QWidget:
+    def _build_skeleton(self, theme: Theme) -> QWidget:
+        """Which joint order and coordinate frame the release is written in."""
         wrapper = QWidget()
         layout = QVBoxLayout(wrapper)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(theme.space_md)
 
-        card = Card("Sürüm seçenekleri", theme=theme, icon="settings")
+        card = Card(
+            "İskelet ve koordinat hedefi",
+            subtitle="Varsayılan kanoniktir: kameranın kendi eklem sırası.",
+            theme=theme,
+            icon="skeleton",
+        )
 
         self._skeleton_selector = QComboBox()
         self._skeleton_selector.currentIndexChanged.connect(self._skeleton_changed)
@@ -182,6 +208,45 @@ class ExportPage(Page):
         self._mapping_note = make_label("", role="muted")
         self._mapping_note.setWordWrap(True)
         card.add_widget(self._mapping_note)
+        layout.addWidget(card)
+
+        contract = Card(
+            "Çıktı sözleşmesi",
+            theme=theme,
+            icon="info",
+        )
+        contract.add_widget(
+            make_wrapped_label(
+                "Bu export modelden bağımsızdır. Örnek ve kare kimlikleri, "
+                "kayıt/katılımcı/proje kaynağı, orijinal kare numaraları ve "
+                "kamera zaman damgaları, seçilen kişi, iskelet tanımı, birim "
+                "ve koordinat sistemi, eklem koordinatları, güven ve eksiklik "
+                "maskeleri, hareket sınıfı, hata aralıkları ve hata "
+                "sınıflarıyla bunlardan TÜRETİLEN doğru/hatalı kararı, özellik "
+                "tanımları (shape/dtype/birim), şema sürümleri, seçenekler, "
+                "fingerprint, checksum ve doğrulama sonucu yazılır.\n\n"
+                "Normalizasyon, sabit dizi uzunluğu, doldurma, enterpolasyon, "
+                "veri çoğaltma ve train/test ayrımı burada YAPILMAZ; bunlar "
+                "eğitim hattının kararlarıdır."
+            )
+        )
+        layout.addWidget(contract)
+        layout.addStretch(1)
+        return wrapper
+
+    def _build_scope(self, theme: Theme) -> QWidget:
+        """Which takes and which movements end up in the release."""
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
+
+        card = Card(
+            "Dataset kapsamı",
+            subtitle="Hangi kayıtlar ve hangi hareketler sürüme girer.",
+            theme=theme,
+            icon="dataset",
+        )
 
         # --- which dataset(s) this release contains -------------------
         self._movement_mode = QCheckBox("Hareket örnekleri (mevcut biçim)")
@@ -262,6 +327,26 @@ class ExportPage(Page):
         card.add_widget(FieldRow("Sürüm notu", self._notes, theme=theme))
         layout.addWidget(card)
 
+        readiness = Card("Hazır olma kuralı", theme=theme, icon="check")
+        readiness.add_widget(
+            make_wrapped_label(
+                "Bir hareket, sınıfı kaydedilmişse ve bütün hata aralıkları "
+                "geçerli ve sınıflandırılmışsa export'a girer. Doğru/hatalı "
+                "kararı ayrıca sorulmaz: sınıflandırılmış hata aralığı olan "
+                "hareket HATALI, olmayan DOĞRU sayılır. Ekranda \u201chazır\u201d "
+                "görünen hareket kümesi ile sürüme giren küme birebir aynıdır."
+            )
+        )
+        layout.addWidget(readiness)
+        layout.addStretch(1)
+        return wrapper
+
+    def _build_features(self, theme: Theme) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
+
         features = Card(
             "Veri ve özellik seçimi",
             subtitle=(
@@ -278,8 +363,16 @@ class ExportPage(Page):
         self._feature_note.setWordWrap(True)
         features.add_widget(self._feature_note)
         layout.addWidget(features)
+        layout.addStretch(1)
+        return wrapper
 
-        preview_card = Card("Önizleme", theme=theme, icon="eye")
+    def _build_preview(self, theme: Theme) -> QWidget:
+        wrapper = QWidget()
+        layout = QVBoxLayout(wrapper)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
+
+        preview_card = Card("Doğrulama ve önizleme", theme=theme, icon="eye")
         self._preview_chip = StatusChip("-", theme=theme, icon="info")
         preview_card.add_header_widget(self._preview_chip)
         self._preview = KeyValueList(theme)
@@ -292,23 +385,39 @@ class ExportPage(Page):
         self._progress_label.setWordWrap(True)
         preview_card.add_widget(self._progress_label)
 
-        buttons = QHBoxLayout()
+        layout.addWidget(preview_card)
+        layout.addStretch(1)
+        return wrapper
+
+    def _build_action_bar(self, theme: Theme) -> QWidget:
+        """The one thing the user came here to do, always in the same place."""
+        card = Card(theme=theme, compact=True)
+        row = QHBoxLayout()
+        row.setSpacing(theme.space_sm)
+
         self._build_button = make_button(
             "Sürüm oluştur", variant="primary", icon="export", theme=theme
         )
         self._build_button.clicked.connect(self._start_export)
-        buttons.addWidget(self._build_button)
+        row.addWidget(self._build_button)
+
         self._cancel_button = make_button("İptal", variant="danger", theme=theme)
         self._cancel_button.setEnabled(False)
         self._cancel_button.clicked.connect(self._cancel_export)
-        buttons.addWidget(self._cancel_button)
-        buttons.addStretch(1)
+        row.addWidget(self._cancel_button)
+
+        self._action_chip = StatusChip("-", theme=theme, icon="info")
+        row.addWidget(self._action_chip)
+
+        # Why the button is disabled belongs next to the button, not on a tab
+        # the user would have to go looking for.
+        self._action_reason = ElidedLabel("", role="muted")
+        row.addWidget(self._action_reason, 1)
+
         container = QWidget()
-        container.setLayout(buttons)
-        preview_card.add_widget(container)
-        layout.addWidget(preview_card)
-        layout.addStretch(1)
-        return wrapper
+        container.setLayout(row)
+        card.add_widget(container)
+        return card
 
     def _build_releases(self, theme: Theme) -> QWidget:
         wrapper = QWidget()
@@ -335,8 +444,20 @@ class ExportPage(Page):
             lambda *_: self._release_selected()
         )
         header = self._release_table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
-        header.setStretchLastSection(True)
+        # ResizeToContents let a long fingerprint set the table's minimum width
+        # and hand the page a horizontal scrollbar. The version name gets the
+        # slack instead, the rest are fixed and readable, and anything that no
+        # longer fits is in the detail panel below, which is where somebody
+        # reading a checksum was going to look anyway.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setStretchLastSection(False)
+        for column, width in ((1, 150), (2, 80), (3, 110), (4, 130)):
+            self._release_table.setColumnWidth(column, width)
+        self._release_table.setHorizontalScrollMode(
+            QTableWidget.ScrollMode.ScrollPerPixel
+        )
+        self._release_table.setTextElideMode(Qt.TextElideMode.ElideRight)
         card.add_widget(self._release_table, 1)
 
         row = QHBoxLayout()
@@ -415,7 +536,8 @@ class ExportPage(Page):
         target = self._skeleton_selector.currentData()
         if target == _NATIVE or target is None:
             self._mapping_note.setText(
-                "Ham eklem sırası korunur. KineSynthV3 uyumu için hedef biçim seçin."
+                "Ham eklem sırası ve kamera biçimi korunur. Bu, modelden "
+                "bağımsız kanonik çıktıdır ve önerilen seçenektir."
             )
             self._mapping_note.setStyleSheet("")
             self._refresh_preview()
@@ -590,7 +712,9 @@ class ExportPage(Page):
             self._preview_chip.set_status(
                 "Biçim seçilmedi", icon="warning", colour=self.theme.warning
             )
-            self._build_button.setEnabled(False)
+            self._set_action_state(
+                False, "Kapsam sekmesinde en az bir dataset biçimi seçin."
+            )
             return
         builder = ReleaseBuilder(workspace, index, self._current_options())
         rows = builder.select_rows()
@@ -681,7 +805,30 @@ class ExportPage(Page):
             self._preview_chip.set_status(
                 f"{total_examples} örnek", icon="check", colour=self.theme.success
             )
-        self._build_button.setEnabled(total_examples > 0 and self._thread is None)
+        if self._thread is not None:
+            self._set_action_state(False, "Dışa aktarma sürüyor.")
+        elif total_examples == 0:
+            self._set_action_state(
+                False,
+                "Sürüme girecek örnek yok. Hareketlerin sınıfı kaydedilmiş ve "
+                "hata aralıkları sınıflandırılmış olmalı.",
+            )
+        else:
+            self._set_action_state(
+                True, f"{total_examples} örnek hazır.", ok=True
+            )
+
+    def _set_action_state(self, enabled: bool, reason: str, *, ok: bool = False) -> None:
+        """Enable the export button, and say next to it why if it is off."""
+        self._build_button.setEnabled(enabled)
+        self._action_reason.setText(reason)
+        theme = self.theme
+        if ok:
+            self._action_chip.set_status("Hazır", icon="check", colour=theme.success)
+        else:
+            self._action_chip.set_status(
+                "Beklemede", icon="warning", colour=theme.warning
+            )
 
     def _refresh_releases(self) -> None:
         workspace = self.state.workspace

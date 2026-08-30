@@ -175,7 +175,7 @@ def build_targets(
         else None
     )
     for sample in samples:
-        if not sample.is_active or not sample.correctness.is_decided:
+        if not sample.is_active or not sample.is_review_complete:
             continue
         low = max(0, sample.start_frame)
         high = min(sample.end_frame, length - 1)
@@ -186,7 +186,7 @@ def build_targets(
         # and "not asked" stay distinguishable.
         error_mask[low : high + 1] = True
         correctness[low : high + 1] = CORRECTNESS_CODES.get(
-            sample.correctness.value, CORRECTNESS_NOT_APPLICABLE
+            sample.derived_correctness.value, CORRECTNESS_NOT_APPLICABLE
         )
         if multi_hot is None:
             continue

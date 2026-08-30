@@ -12,6 +12,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
+from PySide6.QtGui import QShortcut  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from kinecapture.capture.service import CaptureService  # noqa: E402
@@ -77,7 +78,6 @@ def label_movement(
     sample_id,
     *,
     exercise="",
-    correctness=None,
     note="",
     new_class="",
     accept=True,
@@ -86,7 +86,10 @@ def label_movement(
 
     ``ReviewPage._run_dialog`` is the single place the page blocks on a modal,
     so replacing it here exercises the real dialog widget - its picker, its
-    verdict buttons, its draft semantics - without a human to click Save.
+    draft semantics, its Save gating - without a human to click Save.
+
+    There is no verdict to pass: the dialog does not ask for one, and the
+    movement's correctness comes from its error intervals.
     """
 
     def run(dialog):
@@ -95,8 +98,6 @@ def label_movement(
             dialog.picker._activate_current()
         elif exercise:
             dialog.picker.class_chosen.emit(exercise)
-        if correctness is not None:
-            dialog._set_verdict(correctness)
         if note:
             dialog._note.setPlainText(note)
         return accept
@@ -250,14 +251,16 @@ def test_labelling_a_movement_through_its_dialog(review, qapp) -> None:
     _window, page, _workspace, _take = review
     sample = make_sample(page, 2, 40)
 
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.CORRECT, note="ilk tekrar")
+    label_movement(page, sample.sample_id, exercise="squat", note="ilk tekrar")
     qapp.processEvents()
 
     updated = page._current_sample()
     assert updated.exercise == "squat"
-    assert updated.correctness is Correctness.CORRECT
     assert updated.note == "ilk tekrar"
+    # Saving the class *is* the review. With no error interval marked the
+    # movement is correct and export-ready at once, with no second question.
+    assert updated.reviewed_at
+    assert updated.derived_correctness is Correctness.CORRECT
     assert page._repo.readiness(updated).is_ready
 
 
@@ -265,34 +268,55 @@ def test_cancelling_the_movement_dialog_changes_nothing(review, qapp) -> None:
     """Cancel means cancel: the draft is discarded, not half-applied."""
     _window, page, _workspace, _take = review
     sample = make_sample(page, 2, 40)
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.CORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     before = page._current_sample()
 
-    label_movement(page, sample.sample_id, exercise="", correctness=None,
+    label_movement(page, sample.sample_id, exercise="",
                    note="bu not kaydedilmemeli", accept=False)
     qapp.processEvents()
 
     after = page._current_sample()
     assert after.exercise == before.exercise
-    assert after.correctness is before.correctness
     assert after.note == before.note
+    assert after.reviewed_at == before.reviewed_at
 
 
-def test_a_half_finished_movement_is_not_ready(review, qapp) -> None:
-    """Saving with a field missing records that fact rather than hiding it."""
+def test_a_movement_without_a_class_cannot_be_saved(review, qapp) -> None:
+    """The dialog refuses rather than recording a review that decided nothing."""
     _window, page, _workspace, _take = review
     sample = make_sample(page, 2, 40)
 
-    label_movement(page, sample.sample_id, exercise="squat", correctness=None)
+    captured: list[object] = []
+
+    def run(dialog):
+        captured.append(dialog)
+        assert not dialog._save_button.isEnabled()
+        assert "hareket türü seçin" in dialog._status.text()
+        return False
+
+    page._run_dialog = run
+    try:
+        page._open_movement_dialog(sample.sample_id)
+    finally:
+        del page._run_dialog
+
+    assert captured, "the dialog must have opened"
     qapp.processEvents()
     assert page._repo.readiness(page._current_sample()) is SampleReadiness.UNLABELLED
+    assert "1/1" not in page._progress_chip._text.text()
 
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.INCORRECT)
+
+def test_an_unclassified_interval_holds_the_movement_back(review, qapp) -> None:
+    """The one way a reviewed movement can still be unready."""
+    _window, page, _workspace, _take = review
+    sample = make_sample(page, 2, 40)
+    label_movement(page, sample.sample_id, exercise="squat")
+    assert page._repo.readiness(page._current_sample()).is_ready
+
+    page._create_interval_range(10, 20)
     qapp.processEvents()
     assert page._repo.readiness(page._current_sample()) is (
-        SampleReadiness.NEEDS_ERROR_INTERVAL
+        SampleReadiness.INVALID_INTERVAL
     )
     assert "1/1" not in page._progress_chip._text.text()
 
@@ -302,8 +326,7 @@ def test_creating_a_movement_class_from_the_dialog(review, qapp) -> None:
     _window, page, workspace, _take = review
     sample = make_sample(page, 2, 40)
 
-    label_movement(page, sample.sample_id, new_class="Bulgar Split Squat",
-                   correctness=Correctness.CORRECT)
+    label_movement(page, sample.sample_id, new_class="Bulgar Split Squat")
     qapp.processEvents()
 
     updated = page._current_sample()
@@ -317,14 +340,12 @@ def test_a_near_duplicate_movement_class_reuses_the_existing_one(
 ) -> None:
     _window, page, workspace, _take = review
     first = make_sample(page, 2, 20)
-    label_movement(page, first.sample_id, new_class="Bulgar Split Squat",
-                   correctness=Correctness.CORRECT)
+    label_movement(page, first.sample_id, new_class="Bulgar Split Squat")
     code = page._current_sample().exercise
 
     second_sample = page._repo.create_sample(30, 50)
     label_movement(page, second_sample.sample_id,
-                   new_class="  bulgar   SPLIT squat ",
-                   correctness=Correctness.CORRECT)
+                   new_class="  bulgar   SPLIT squat ")
     qapp.processEvents()
 
     codes = {s.exercise for s in page._repo.samples}
@@ -347,14 +368,36 @@ def test_a_class_created_in_a_cancelled_dialog_still_exists(review, qapp) -> Non
     assert page._current_sample().exercise == ""
 
 
-def test_verdict_shortcut_stays_on_the_keyboard(review, qapp) -> None:
-    """1 and 2 are the fastest path and must not require the dialog."""
+def test_the_verdict_is_not_something_the_user_can_type(review, qapp) -> None:
+    """No buttons, no shortcuts, no method - the intervals decide."""
     _window, page, _workspace, _take = review
-    make_sample(page, 2, 40)
-    page._set_verdict(Correctness.CORRECT)
-    assert page._current_sample().correctness is Correctness.CORRECT
-    page._set_verdict(Correctness.INCORRECT)
-    assert page._current_sample().correctness is Correctness.INCORRECT
+    assert not hasattr(page, "_set_verdict")
+    assert not hasattr(page, "_verdict_buttons")
+
+    shortcuts = {
+        shortcut.key().toString()
+        for shortcut in page.findChildren(QShortcut)
+    }
+    assert "1" not in shortcuts and "2" not in shortcuts
+
+    sample = make_sample(page, 2, 40)
+    captured: list[object] = []
+
+    def run(dialog):
+        captured.append(dialog)
+        dialog.picker.class_chosen.emit("squat")
+        return True
+
+    page._run_dialog = run
+    try:
+        page._open_movement_dialog(sample.sample_id)
+    finally:
+        del page._run_dialog
+
+    dialog = captured[0]
+    assert not hasattr(dialog, "_set_verdict")
+    assert not hasattr(dialog, "correctness")
+    assert not hasattr(dialog, "_correct_button")
 
 
 def test_readiness_is_shown_and_matches_the_repository(review, qapp) -> None:
@@ -363,27 +406,31 @@ def test_readiness_is_shown_and_matches_the_repository(review, qapp) -> None:
     assert page._repo.readiness(page._current_sample()) is SampleReadiness.UNLABELLED
     assert "Etiketlenmedi" in page._status_label.text()
 
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.CORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     qapp.processEvents()
     assert page._repo.readiness(page._current_sample()).is_ready
     assert "1/1 hazır" in page._progress_chip._text.text()
     assert "Hazır" in page._status_label.text()
 
 
-def test_marking_incorrect_points_at_the_next_step(review, qapp) -> None:
+def test_saving_the_class_says_what_the_verdict_became(review, qapp) -> None:
+    """The user is told the consequence rather than asked a second question."""
     _window, page, _workspace, _take = review
     messages: list[str] = []
     page.state.notify = lambda text, timeout=4000: messages.append(text)
 
     sample = make_sample(page)
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.INCORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     qapp.processEvents()
-    assert page._repo.readiness(page._current_sample()) is (
-        SampleReadiness.NEEDS_ERROR_INTERVAL
-    )
-    assert any("hata" in text.lower() for text in messages)
+    assert page._repo.readiness(page._current_sample()).is_ready
+    assert any("DOĞRU" in text for text in messages)
+
+    messages.clear()
+    page._create_interval_range(6, 14)
+    label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
+    label_movement(page, sample.sample_id, exercise="squat")
+    qapp.processEvents()
+    assert any("HATALI" in text for text in messages)
 
 
 # ------------------------------------------------------ error localisation
@@ -484,8 +531,7 @@ def test_an_unclassified_interval_keeps_the_movement_unready(review, qapp) -> No
     """A half-finished interval must not be silently counted as done."""
     _window, page, _workspace, _take = review
     sample = make_sample(page, 2, 40)
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.INCORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     page._create_interval_range(10, 20)
     qapp.processEvents()
 
@@ -507,8 +553,7 @@ def test_deleting_from_the_error_dialog(review, qapp) -> None:
 def test_completing_the_flow_makes_the_movement_ready(review, qapp) -> None:
     _window, page, _workspace, _take = review
     sample = make_sample(page, 2, 40)
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.INCORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     page._create_interval_range(10, 20)
     label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     qapp.processEvents()
@@ -535,17 +580,20 @@ def test_overlapping_intervals_stay_separate(review, qapp) -> None:
 def test_deleting_an_interval_updates_readiness(review, qapp) -> None:
     _window, page, _workspace, _take = review
     sample = make_sample(page, 2, 40)
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.INCORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     page._create_interval_range(10, 20)
     label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     assert page._repo.readiness(page._current_sample()).is_ready
 
+    assert page._current_sample().derived_correctness is Correctness.INCORRECT
+
     page._delete_interval()
     qapp.processEvents()
-    assert page._repo.readiness(page._current_sample()) is (
-        SampleReadiness.NEEDS_ERROR_INTERVAL
-    )
+    # Removing the evidence removes the verdict with it, and the movement is
+    # ready again - correct, on its own evidence.
+    updated = page._current_sample()
+    assert updated.derived_correctness is Correctness.CORRECT
+    assert page._repo.readiness(updated).is_ready
 
 
 def test_undo_after_creating_a_class_keeps_the_class(review, qapp) -> None:
@@ -570,8 +618,7 @@ def test_undo_after_creating_a_class_keeps_the_class(review, qapp) -> None:
 def test_edits_autosave_and_reload(review, qapp) -> None:
     _window, page, workspace, take = review
     sample = make_sample(page, 2, 40)
-    label_movement(page, sample.sample_id, exercise="squat",
-                   correctness=Correctness.INCORRECT)
+    label_movement(page, sample.sample_id, exercise="squat")
     page._create_interval_range(10, 20)
     label_error(page, page._selected_interval_id, new_class="Diz içe çöküyor")
     page._save_now()
@@ -579,7 +626,10 @@ def test_edits_autosave_and_reload(review, qapp) -> None:
     reloaded = workspace.load_samples(take)
     assert len(reloaded) == 1
     assert reloaded[0].exercise == "squat"
-    assert reloaded[0].correctness is Correctness.INCORRECT
+    assert reloaded[0].derived_correctness is Correctness.INCORRECT
+    assert reloaded[0].correctness is Correctness.INCORRECT, (
+        "the serialised cache must agree with the derived value"
+    )
     assert len(reloaded[0].error_intervals) == 1
     assert reloaded[0].error_intervals[0].error_code == "diz-ice-cokuyor"
 

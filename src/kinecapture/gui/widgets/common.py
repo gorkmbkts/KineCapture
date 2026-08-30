@@ -573,6 +573,24 @@ class SectionHeader(QWidget):
         restyle(self)
 
 
+def make_wrapped_label(
+    text: str = "", *, role: str = "muted", parent: Optional[QWidget] = None
+) -> QLabel:
+    """A paragraph that wraps and never widens its parent.
+
+    ``QLabel`` with ``setWordWrap`` still reports a one-line minimum width, so
+    a long explanation quietly becomes the page's minimum width. An explicitly
+    ignored horizontal policy lets it wrap as narrow as the layout needs.
+    """
+    label = QLabel(text, parent)
+    if role:
+        label.setProperty("role", role)
+    label.setWordWrap(True)
+    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Minimum)
+    label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+    return label
+
+
 def monospace_font(size: int) -> QFont:
     """Tabular font for numbers that must not jitter as they update."""
     font = QFont("Consolas")
@@ -595,6 +613,7 @@ __all__ = [
     "horizontal_rule",
     "make_button",
     "make_label",
+    "make_wrapped_label",
     "monospace_font",
     "restyle",
 ]

@@ -20,6 +20,7 @@ from kinecapture.domain.enums import (
     SegmentSource,
     SegmentStatus,
 )
+from kinecapture.domain.project import is_export_ready
 from kinecapture.playback.take_reader import load_take
 from tests.conftest import paced_backend, record_take
 
@@ -50,9 +51,14 @@ def repository(recorded) -> AnnotationRepository:
 
 
 def label(repository, sample, correctness=Correctness.CORRECT):
-    repository.label_sample(
-        sample.sample_id, exercise="squat", correctness=correctness
-    )
+    """Complete the class review of a sample.
+
+    ``correctness`` is accepted only so the call sites keep reading the way
+    they did; it is not passed on, because the verdict is derived from the
+    error intervals a test adds afterwards. Saving the movement class is the
+    whole of the review now.
+    """
+    repository.label_sample(sample.sample_id, exercise="squat", reviewed=True)
     return repository.find(sample.sample_id)
 
 
@@ -190,24 +196,100 @@ def test_samples_from_markers_are_tagged_as_such(repository) -> None:
 # ------------------------------------------------------- labels (level 1)
 
 
-def test_readiness_requires_exercise_and_verdict(repository) -> None:
+def test_readiness_needs_a_class_and_a_completed_review(repository) -> None:
+    """A class alone is not a finished review, and neither is silence.
+
+    "No error intervals" and "nobody has looked yet" produce the same
+    intervals, so something has to distinguish them: saving the movement
+    dialog, which is what ``reviewed=True`` records.
+    """
     sample = repository.create_sample(0, 20)
     assert repository.readiness(sample) is SampleReadiness.UNLABELLED
 
     repository.label_sample(sample.sample_id, exercise="squat")
     assert repository.readiness(repository.find(sample.sample_id)) is (
         SampleReadiness.UNLABELLED
-    )
+    ), "an exercise on its own must not count as reviewed"
 
-    repository.label_sample(sample.sample_id, correctness=Correctness.CORRECT)
-    assert repository.readiness(repository.find(sample.sample_id)).is_ready
+    repository.label_sample(sample.sample_id, reviewed=True)
+    updated = repository.find(sample.sample_id)
+    assert repository.readiness(updated).is_ready
+    assert updated.derived_correctness is Correctness.CORRECT
 
 
-def test_correctness_is_binary(repository) -> None:
-    """There is no third movement class the user can pick."""
+def test_the_verdict_is_derived_and_cannot_be_set(repository) -> None:
+    """There is no API for disagreeing with your own error intervals."""
+    import inspect
+
+    signature = inspect.signature(repository.label_sample)
+    assert "correctness" not in signature.parameters
+    assert "correctness" not in inspect.signature(repository.apply_to_all).parameters
+
     assert [c.value for c in Correctness if c.is_decided] == ["correct", "incorrect"]
     sample = label(repository, repository.create_sample(0, 20))
-    assert sample.correctness.is_decided
+    assert sample.derived_correctness is Correctness.CORRECT
+
+    repository.create_error_interval(sample.sample_id, 2, 8, error_code="diz-ice-cokuyor")
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    )
+
+
+def test_the_verdict_follows_every_interval_edit(repository) -> None:
+    """Add, classify, reclassify, delete - the answer tracks all of it."""
+    sample = label(repository, repository.create_sample(0, 30))
+    assert repository.find(sample.sample_id).derived_correctness is Correctness.CORRECT
+
+    interval = repository.create_error_interval(sample.sample_id, 5, 15)
+    # An interval with no class is not evidence of an error yet.
+    assert repository.find(sample.sample_id).derived_correctness is Correctness.CORRECT
+    assert repository.readiness(repository.find(sample.sample_id)) is (
+        SampleReadiness.INVALID_INTERVAL
+    )
+
+    repository.set_error_interval_class(
+        sample.sample_id, interval.interval_id, "diz-ice-cokuyor"
+    )
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    )
+    assert repository.readiness(repository.find(sample.sample_id)).is_ready
+
+    repository.set_error_interval_class(
+        sample.sample_id, interval.interval_id, "sirt-yuvarlaniyor"
+    )
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    )
+
+    repository.delete_error_interval(sample.sample_id, interval.interval_id)
+    restored = repository.find(sample.sample_id)
+    assert restored.derived_correctness is Correctness.CORRECT
+    assert repository.readiness(restored).is_ready
+
+
+def test_the_verdict_survives_undo_redo_and_a_reload(repository, recorded) -> None:
+    workspace, take, loaded = recorded
+    sample = label(repository, repository.create_sample(0, 30))
+    repository.create_error_interval(sample.sample_id, 5, 15, error_code="diz-ice-cokuyor")
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    )
+
+    repository.undo()
+    assert repository.find(sample.sample_id).derived_correctness is Correctness.CORRECT
+    repository.redo()
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    )
+
+    repository.save()
+    reloaded = workspace.load_samples(take)[0]
+    assert reloaded.derived_correctness is Correctness.INCORRECT
+    assert reloaded.correctness is Correctness.INCORRECT, (
+        "the serialised cache must equal the derived value"
+    )
+    assert reloaded.reviewed_at
 
 
 def test_copy_label_does_not_copy_error_intervals(repository) -> None:
@@ -222,19 +304,18 @@ def test_copy_label_does_not_copy_error_intervals(repository) -> None:
     repository.copy_label_from(source.sample_id, target.sample_id)
     copied = repository.find(target.sample_id)
     assert copied.exercise == "squat"
-    assert copied.correctness is Correctness.INCORRECT
     assert copied.error_intervals == []
-    # ... which correctly leaves it not-yet-ready.
-    assert repository.readiness(copied) is SampleReadiness.NEEDS_ERROR_INTERVAL
+    # The class review travels; the verdict does not, because the target has
+    # no error intervals of its own and so is correct on its own evidence.
+    assert copied.derived_correctness is Correctness.CORRECT
+    assert repository.readiness(copied).is_ready
 
 
 def test_apply_to_all_skips_excluded(repository) -> None:
     first = repository.create_sample(0, 10)
     second = repository.create_sample(12, 22)
     repository.set_sample_status(second.sample_id, SegmentStatus.EXCLUDED)
-    changed = repository.apply_to_all(
-        exercise="squat", correctness=Correctness.CORRECT
-    )
+    changed = repository.apply_to_all(exercise="squat", reviewed=True)
     assert changed == 1
     assert repository.find(first.sample_id).exercise == "squat"
     assert repository.find(second.sample_id).exercise == ""
@@ -243,14 +324,19 @@ def test_apply_to_all_skips_excluded(repository) -> None:
 # ------------------------------------------------- error intervals (level 2)
 
 
-def test_single_error_interval_makes_an_incorrect_sample_ready(repository) -> None:
-    sample = label(repository, repository.create_sample(0, 30), Correctness.INCORRECT)
-    assert repository.readiness(sample) is SampleReadiness.NEEDS_ERROR_INTERVAL
+def test_a_classified_interval_makes_the_sample_incorrect_and_ready(
+    repository,
+) -> None:
+    sample = label(repository, repository.create_sample(0, 30))
+    assert repository.readiness(sample).is_ready
+    assert sample.derived_correctness is Correctness.CORRECT
 
     repository.create_error_interval(
         sample.sample_id, 5, 15, error_code="diz-ice-cokuyor"
     )
-    assert repository.readiness(repository.find(sample.sample_id)).is_ready
+    updated = repository.find(sample.sample_id)
+    assert repository.readiness(updated).is_ready
+    assert updated.derived_correctness is Correctness.INCORRECT
 
 
 def test_multiple_repeated_and_overlapping_intervals(repository) -> None:
@@ -359,36 +445,57 @@ def test_interval_survives_a_save_reload(recorded, repository) -> None:
 # --------------------------------------------- consistency between levels
 
 
-def test_correct_sample_with_error_intervals_is_a_contradiction(repository) -> None:
-    sample = label(repository, repository.create_sample(0, 30), Correctness.CORRECT)
+def test_a_correct_sample_that_gains_an_interval_simply_becomes_incorrect(
+    repository,
+) -> None:
+    """What used to be a contradiction is now just the answer changing.
+
+    The old model let a human say "correct" while the timeline said otherwise,
+    and had to report the disagreement. There is no disagreement to have any
+    more: the intervals are the verdict.
+    """
+    sample = label(repository, repository.create_sample(0, 30))
+    assert sample.derived_correctness is Correctness.CORRECT
+
     repository.create_error_interval(
-        sample.sample_id, 5, 15, error_code="diz-ice-cokuyor"
+        sample.sample_id, 4, 12, error_code="diz-ice-cokuyor"
     )
-    readiness, problems = (
-        repository.readiness(repository.find(sample.sample_id)),
-        repository.problems(repository.find(sample.sample_id)),
+    updated = repository.find(sample.sample_id)
+    assert updated.derived_correctness is Correctness.INCORRECT
+    assert repository.readiness(updated).is_ready
+    assert repository.problems(updated) == []
+def test_deleting_the_last_interval_returns_the_sample_to_correct(
+    repository,
+) -> None:
+    """The reverse direction, which is where a stored verdict used to go stale."""
+    sample = label(repository, repository.create_sample(0, 30))
+    first = repository.create_error_interval(
+        sample.sample_id, 4, 10, error_code="diz-ice-cokuyor"
     )
-    assert readiness is SampleReadiness.CONTRADICTION
-    assert any(p.code == "correct_with_errors" for p in problems)
+    second = repository.create_error_interval(
+        sample.sample_id, 14, 20, error_code="sirt-yuvarlaniyor"
+    )
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    )
 
+    repository.delete_error_interval(sample.sample_id, first.interval_id)
+    assert repository.find(sample.sample_id).derived_correctness is (
+        Correctness.INCORRECT
+    ), "one interval left is still an error"
 
-def test_incorrect_without_interval_is_workable_but_not_ready(repository) -> None:
-    """The user may keep working on it; it just is not finished."""
-    sample = label(repository, repository.create_sample(0, 30), Correctness.INCORRECT)
-    readiness = repository.readiness(sample)
-    assert readiness is SampleReadiness.NEEDS_ERROR_INTERVAL
-    assert not readiness.is_ready
-    assert repository.ready_count == 0
-
-
+    repository.delete_error_interval(sample.sample_id, second.interval_id)
+    final = repository.find(sample.sample_id)
+    assert final.derived_correctness is Correctness.CORRECT
+    assert repository.readiness(final).is_ready
 def test_ready_count_matches_the_export_rule(repository) -> None:
     """The screen's "labelled" and the exporter's "eligible" are one rule."""
     from kinecapture.domain.project import is_export_ready
 
     good = label(repository, repository.create_sample(0, 10))
-    pending = label(
-        repository, repository.create_sample(12, 22), Correctness.INCORRECT
-    )
+    # Unready for the reason that still exists: an interval nobody classified.
+    pending = label(repository, repository.create_sample(12, 22))
+    repository.create_error_interval(pending.sample_id, 14, 18)
     codes = repository.known_error_codes
 
     assert is_export_ready(repository.find(good.sample_id), known_error_codes=codes)
@@ -476,7 +583,10 @@ def test_split_distributes_intervals_and_divides_the_straddler(repository) -> No
     )
     # A boundary correction is not a statement that the labels were wrong.
     assert tail.exercise == "squat"
-    assert tail.correctness is Correctness.INCORRECT
+    assert tail.reviewed_at, "the class review covered both halves"
+    # Each half now derives its own verdict from the intervals it kept.
+    assert tail.derived_correctness is Correctness.INCORRECT
+    assert head.derived_correctness is Correctness.INCORRECT
 
 
 def test_split_outside_range_is_refused(repository) -> None:
@@ -487,24 +597,25 @@ def test_split_outside_range_is_refused(repository) -> None:
 
 
 def test_merge_keeps_intervals_and_records_conflicting_labels(repository) -> None:
-    first = label(repository, repository.create_sample(0, 15), Correctness.INCORRECT)
+    first = label(repository, repository.create_sample(0, 15))
     repository.create_error_interval(
         first.sample_id, 3, 9, error_code="diz-ice-cokuyor"
     )
     second = repository.create_sample(18, 33)
-    repository.label_sample(
-        second.sample_id, exercise="lunge", correctness=Correctness.CORRECT
-    )
+    repository.label_sample(second.sample_id, exercise="lunge", reviewed=True)
 
     report = repository.merge_samples(first.sample_id, second.sample_id)
+    # Only the exercise can conflict now: the merged movement owns both sets of
+    # intervals and derives one verdict from them, so there are never two
+    # verdicts to choose between.
     assert report.had_conflict
     assert report.dropped_exercise == "lunge"
-    assert report.dropped_correctness == "correct"
     assert "silinmedi" in report.message()
 
     merged = repository.find(first.sample_id)
     assert (merged.start_frame, merged.end_frame) == (0, 33)
     assert len(merged.error_intervals) == 1
+    assert merged.derived_correctness is Correctness.INCORRECT
     # The losing label is preserved rather than dropped on the floor.
     history = merged.legacy["merged_from"]
     assert history[0]["exercise"] == "lunge"
@@ -650,3 +761,181 @@ def test_labelling_never_touches_take_metadata(recorded, repository) -> None:
     )
     repository.save()
     assert workspace.take_paths(take).metadata.read_bytes() == before
+
+
+# ------------------------------------------- legacy verdicts on disk
+
+
+def _write_legacy_sidecar(workspace, take, samples):
+    """Write a 2.0-style sidecar with explicit stored verdicts."""
+    from kinecapture.core.jsonio import write_json
+
+    # The vocabulary has to contain whatever the legacy file references, or
+    # every sample would be rejected for an unknown class instead of showing
+    # the verdict conflict under test.
+    schema = workspace.label_schema
+    if not schema.match_error_type("Diz içe çöküyor"):
+        schema.add_error_type("Diz içe çöküyor")
+        workspace.save_label_schema(schema)
+
+    paths = workspace.take_paths(take)
+    paths.annotations_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        paths.segments,
+        {
+            "schema_version": "2.0.0",
+            "take_id": take.take_id,
+            "samples": samples,
+        },
+        overwrite=True,
+    )
+
+
+def _legacy_sample(sample_id, correctness, intervals=()):
+    return {
+        "sample_id": sample_id,
+        "take_id": "t",
+        "index": 1,
+        "start_frame": 0,
+        "end_frame": 20,
+        "exercise": "squat",
+        "correctness": correctness,
+        "error_intervals": [
+            {
+                "interval_id": f"err_{position}",
+                "start_frame": 2 + position * 5,
+                "end_frame": 6 + position * 5,
+                "error_code": code,
+            }
+            for position, code in enumerate(intervals)
+        ],
+    }
+
+
+def test_a_legacy_file_is_not_rewritten_just_by_opening_it(recorded) -> None:
+    """Reading somebody's old decisions must not silently restate them."""
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace, take, [_legacy_sample("mov_a", "incorrect")]
+    )
+    paths = workspace.take_paths(take)
+    before = paths.segments.read_bytes()
+
+    AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+
+    assert paths.segments.read_bytes() == before
+
+
+def test_a_legacy_incorrect_without_an_interval_is_shown_not_flipped(
+    recorded,
+) -> None:
+    """The new rule would say "correct"; a recorded human decision said not."""
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace, take, [_legacy_sample("mov_a", "incorrect")]
+    )
+    repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+    sample = repo.samples[0]
+
+    assert repo.readiness(sample) is SampleReadiness.LEGACY_CONFLICT
+    assert not is_export_ready(sample)
+    assert sample.correctness is Correctness.INCORRECT, "kept verbatim"
+    assert sample.derived_correctness is Correctness.CORRECT
+    problems = repo.problems(sample)
+    assert problems and "HATALI" in problems[0].message
+
+    # Saving must not quietly resolve it either.
+    repo.save()
+    reloaded = workspace.load_samples(take)[0]
+    assert reloaded.correctness is Correctness.INCORRECT
+    assert reloaded.legacy_verdict_conflict == "incorrect"
+
+
+def test_a_legacy_correct_with_intervals_is_also_shown(recorded) -> None:
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace,
+        take,
+        [_legacy_sample("mov_a", "correct", intervals=["diz-ice-cokuyor"])],
+    )
+    repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+    sample = repo.samples[0]
+
+    assert repo.readiness(sample) is SampleReadiness.LEGACY_CONFLICT
+    problems = repo.problems(sample)
+    assert problems and "DOĞRU" in problems[0].message
+
+
+def test_the_user_resolves_a_legacy_conflict_by_re_saving_the_class(
+    recorded,
+) -> None:
+    """One deliberate action, and it stays resolved across a reload."""
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace, take, [_legacy_sample("mov_a", "incorrect")]
+    )
+    repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+    sample = repo.samples[0]
+    assert repo.readiness(sample) is SampleReadiness.LEGACY_CONFLICT
+
+    repo.label_sample(sample.sample_id, exercise="squat", reviewed=True)
+    repo.save()
+
+    reloaded = workspace.load_samples(take)[0]
+    assert reloaded.reviewed_at
+    assert reloaded.correctness is Correctness.CORRECT
+    assert reloaded.legacy_verdict_conflict == ""
+    assert is_export_ready(reloaded)
+
+
+def test_the_other_way_to_resolve_it_is_to_localise_the_error(recorded) -> None:
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace, take, [_legacy_sample("mov_a", "incorrect")]
+    )
+    repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+    sample = repo.samples[0]
+
+    repo.create_error_interval(
+        sample.sample_id, 4, 10, error_code="diz-ice-cokuyor"
+    )
+    updated = repo.find(sample.sample_id)
+
+    # The recorded verdict and the evidence now agree, so there is nothing
+    # left to reconcile and no further action is demanded of the user.
+    assert updated.derived_correctness is Correctness.INCORRECT
+    assert updated.legacy_verdict_conflict == ""
+    assert repo.readiness(updated).is_ready
+
+
+def test_a_legacy_file_that_already_agrees_needs_no_action(recorded) -> None:
+    """Auto-migration, but only where the human and the evidence match."""
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace,
+        take,
+        [
+            _legacy_sample("mov_a", "correct"),
+            _legacy_sample("mov_b", "incorrect", intervals=["diz-ice-cokuyor"]),
+        ],
+    )
+    repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+
+    for sample in repo.samples:
+        assert repo.readiness(sample).is_ready, sample.sample_id
+        assert sample.derived_correctness is sample.correctness
+
+
+def test_a_legacy_sample_labelled_but_undecided_still_needs_review(
+    recorded,
+) -> None:
+    """An exercise on its own was never a decision about the repetition."""
+    workspace, take, loaded = recorded
+    _write_legacy_sidecar(
+        workspace, take, [_legacy_sample("mov_a", "unlabelled")]
+    )
+    repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
+    sample = repo.samples[0]
+
+    assert repo.readiness(sample) is SampleReadiness.UNLABELLED
+    assert not is_export_ready(sample)

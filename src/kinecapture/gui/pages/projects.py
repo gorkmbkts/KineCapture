@@ -19,16 +19,25 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QSpinBox,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
 
 from kinecapture.core.errors import KineCaptureError
 from kinecapture.domain.project import CaptureProtocol, ProtocolTask
-from kinecapture.gui.pages.base import Page
+from kinecapture.gui.pages.base import Page, scrollable
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
-from kinecapture.gui.widgets.common import Card, FieldRow, KeyValueList, make_button, make_label
+from kinecapture.gui.widgets.common import (
+    Card,
+    FieldRow,
+    KeyValueList,
+    make_button,
+    make_label,
+)
+from kinecapture.gui.widgets.delete_project_dialog import DeleteProjectDialog
+from kinecapture.gui.widgets.flow_layout import flow_row
 
 
 class NewProjectDialog(QDialog):
@@ -242,11 +251,21 @@ class ProjectsPage(Page):
         self._root_button.clicked.connect(self._change_root)
         self.header.add_action(self._root_button)
 
-        columns = QHBoxLayout()
-        columns.setSpacing(theme.space_md)
-        columns.addWidget(self._build_list(theme), 2)
-        columns.addWidget(self._build_details(theme), 3)
-        self.content.addLayout(columns, 1)
+        # The project list and its details were a fixed 2:3 pair whose combined
+        # minimum was 1707px - wider than any screen this application supports.
+        # A splitter lets each side give way, and the details column scrolls.
+        columns = QSplitter(Qt.Orientation.Horizontal)
+        columns.setChildrenCollapsible(False)
+        columns.addWidget(self._build_list(theme))
+        details = scrollable(self._build_details(theme))
+        details.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        columns.addWidget(details)
+        columns.setStretchFactor(0, 2)
+        columns.setStretchFactor(1, 3)
+        columns.setSizes([380, 620])
+        self.content.addWidget(columns, 1)
         state.project_changed.connect(lambda _: self._reload())
 
     def _build_list(self, theme: Theme) -> QWidget:
@@ -256,9 +275,30 @@ class ProjectsPage(Page):
         self._list.currentItemChanged.connect(lambda *_: self._refresh_details())
         self._list.itemDoubleClicked.connect(lambda _: self._open_selected())
         card.add_widget(self._list, 1)
+        actions = QHBoxLayout()
+        actions.setSpacing(theme.space_xs)
         open_button = make_button("Projeyi Aç", variant="primary", theme=theme)
         open_button.clicked.connect(self._open_selected)
-        card.add_widget(open_button)
+        actions.addWidget(open_button, 1)
+
+        # Owner-only, and visibly destructive. Hiding it from everybody else is
+        # a courtesy; the refusal that matters is in the identity service.
+        self._delete_button = make_button(
+            "Projeyi sil",
+            variant="danger",
+            icon="trash",
+            theme=theme,
+            tooltip=(
+                "Seçili projeyi ve içindeki bütün kayıtları kalıcı olarak "
+                "siler. Geri alınamaz."
+            ),
+        )
+        self._delete_button.clicked.connect(self._delete_selected)
+        actions.addWidget(self._delete_button)
+
+        holder = QWidget()
+        holder.setLayout(actions)
+        card.add_widget(holder)
         return card
 
     def _build_details(self, theme: Theme) -> QWidget:
@@ -282,7 +322,7 @@ class ProjectsPage(Page):
         self._tasks = QListWidget()
         self._tasks.itemDoubleClicked.connect(lambda _: self._edit_target())
         plans.add_widget(self._tasks, 1)
-        row = QHBoxLayout()
+        plan_buttons = []
         for label, handler in (
             ("Kayıt Planı Ekle", self._add_plan),
             ("Planı Düzenle", self._edit_plan),
@@ -290,11 +330,8 @@ class ProjectsPage(Page):
         ):
             button = make_button(label, theme=theme)
             button.clicked.connect(handler)
-            row.addWidget(button)
-        row.addStretch(1)
-        container = QWidget()
-        container.setLayout(row)
-        plans.add_widget(container)
+            plan_buttons.append(button)
+        plans.add_widget(flow_row(plan_buttons, spacing=theme.space_xs))
         self._plan_card = plans
         layout.addWidget(plans, 1)
         return wrapper
@@ -304,7 +341,113 @@ class ProjectsPage(Page):
         owner = bool(user and user.is_owner)
         self._import_button.setVisible(owner)
         self._root_button.setVisible(owner)
+        self._delete_button.setVisible(owner)
         self._reload()
+
+    # ------------------------------------------------- permanent deletion
+    def _selected_record(self):  # type: ignore[no-untyped-def]
+        item = self._list.currentItem()
+        if item is None:
+            return None
+        project_id = item.data(Qt.ItemDataRole.UserRole + 1)
+        return next(
+            (
+                record
+                for record in self.state.list_accessible_projects()
+                if record.project_id == project_id
+            ),
+            None,
+        )
+
+    def _delete_selected(self) -> None:
+        """Permanently delete the selected project, after a typed confirmation."""
+        record = self._selected_record()
+        if record is None:
+            self.state.notify("Önce silinecek projeyi seçin.", 4000)
+            return
+
+        # Authorise and inspect the target *before* showing a window that
+        # promises to delete it. A refusal here changes nothing at all.
+        try:
+            report = self.state.deletion.preflight(self.state.current_user, record.project_id)
+        except KineCaptureError as exc:
+            self.state.report_error(exc)
+            return
+        if not report.ok:
+            QMessageBox.warning(
+                self, "Proje silinemez", report.reason
+            )
+            return
+
+        workspace = self.state.workspace
+        is_active = workspace is not None and (
+            workspace.project.project_id == record.project_id
+        )
+
+        def work(progress):  # type: ignore[no-untyped-def]
+            # Runs on the worker thread. The context teardown has already
+            # happened on the GUI thread, so nothing here touches widgets.
+            return self.state.deletion.delete(
+                self.state.current_user, record.project_id, progress=progress
+            )
+
+        dialog = DeleteProjectDialog(
+            self.theme,
+            project_name=record.name,
+            project_id=record.project_id,
+            project_path=Path(record.path),
+            work=work,
+            is_active=is_active,
+            parent=self,
+        )
+
+        # Releasing the camera service and every reader has to happen before
+        # the rename, and on this thread: Windows will not move a directory
+        # that something still has a file open inside.
+        original_start = dialog.start
+
+        def guarded_start() -> None:
+            if dialog.started:
+                return
+            try:
+                self.state.prepare_project_deletion(record.project_id)
+            except KineCaptureError as exc:
+                dialog.reject()
+                self.state.report_error(exc)
+                return
+            original_start()
+
+        dialog.delete_button.clicked.disconnect()
+        dialog.delete_button.clicked.connect(guarded_start)
+
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if not accepted:
+            if dialog.error is not None:
+                self.state.report_error(dialog.error) if isinstance(
+                    dialog.error, KineCaptureError
+                ) else QMessageBox.critical(
+                    self, "Proje silinemedi", str(dialog.error)
+                )
+            self._reload()
+            return
+
+        result = dialog.outcome
+        self.state.finish_project_deletion(record.project_id)
+        self._reload()
+        if result is None:
+            return
+        if result.complete:
+            self.state.notify(result.summary(), 8000)
+        else:
+            QMessageBox.warning(
+                self,
+                "Proje tamamen silinemedi",
+                result.summary()
+                + "\n\nKalan yollar:\n"
+                + "\n".join(result.remaining[:8])
+                + "\n\nDosyaları kullanan programları kapatıp uygulamayı "
+                "yeniden başlatın; kalan içerik açılışta temizlenmeye çalışılır.",
+            )
 
     def _reload(self) -> None:
         self._list.clear()

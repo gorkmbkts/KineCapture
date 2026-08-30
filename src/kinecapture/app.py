@@ -164,7 +164,7 @@ def run_self_test(config: AppConfig) -> int:
     from kinecapture.dataset.index import DatasetIndex
     from kinecapture.dataset.workspace import ProjectWorkspace
     from kinecapture.domain.activity import ActivityState
-    from kinecapture.domain.enums import Correctness, TakeQuality
+    from kinecapture.domain.enums import TakeQuality
     from kinecapture.export.release import ExportOptions, ReleaseBuilder
     from kinecapture.playback.take_reader import load_take
     from kinecapture.recording.rgbd_archive import RgbdArchiveReader
@@ -220,11 +220,11 @@ def run_self_test(config: AppConfig) -> int:
         midpoint = loaded.frame_count // 2
         good = repository.create_sample(1, midpoint - 2)
         repository.label_sample(
-            good.sample_id, exercise="squat", correctness=Correctness.CORRECT
+            good.sample_id, exercise="squat", reviewed=True
         )
         bad = repository.create_sample(midpoint, max(midpoint + 3, loaded.frame_count - 2))
         repository.label_sample(
-            bad.sample_id, exercise="squat", correctness=Correctness.INCORRECT
+            bad.sample_id, exercise="squat", reviewed=True
         )
         repository.create_error_interval(
             bad.sample_id,

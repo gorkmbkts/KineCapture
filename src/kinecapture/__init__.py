@@ -19,7 +19,7 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.8.0"
+APP_VERSION: str = "0.9.0"
 
 #: Schema version for ``project.json``.
 PROJECT_SCHEMA_VERSION: str = "1.1.0"
@@ -40,7 +40,14 @@ SKELETON_STREAM_SCHEMA_VERSION: str = "1.1.0"
 #: Schema version for the label sidecar (``annotations/segments.json``).
 #: 2.x introduces the two-level MovementSample / ErrorInterval hierarchy;
 #: 1.x documents are read through a lossless compatibility path.
-ANNOTATION_SCHEMA_VERSION: str = "2.0.0"
+#:
+#: 2.1 makes ``correctness`` **derived** from the error intervals and adds
+#: ``reviewed_at`` and ``correctness_source``. Minor rather than major: a 2.0
+#: reader opening a 2.1 file still finds a valid binary ``correctness`` in the
+#: field it already knows, and a 2.1 reader opening a 2.0 file keeps the
+#: recorded verdict verbatim and surfaces any disagreement with the intervals
+#: instead of silently resolving it.
+ANNOTATION_SCHEMA_VERSION: str = "2.1.0"
 
 #: Schema version of the built-in label schema document.
 LABEL_SCHEMA_VERSION: str = "2.0.0"
@@ -49,7 +56,11 @@ LABEL_SCHEMA_VERSION: str = "2.0.0"
 #: 2.x adds the selectable feature layer: the canonical raw arrays are
 #: unchanged, but a release may now carry additional named arrays described by
 #: ``feature_spec.json``.
-RELEASE_SCHEMA_VERSION: str = "2.0.0"
+#:
+#: 2.1 states in the manifest that ``correctness`` is derived from the error
+#: intervals and records ``reviewed_at``. Additive: every 2.0 field keeps its
+#: name, type and meaning.
+RELEASE_SCHEMA_VERSION: str = "2.1.0"
 
 #: Schema version of ``feature_spec.json`` inside a release.
 FEATURE_SPEC_SCHEMA_VERSION: str = "1.0.0"

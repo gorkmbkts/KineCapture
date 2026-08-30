@@ -48,14 +48,10 @@ def project(workspace, session):
     repo = AnnotationRepository(workspace, take, frame_count=n, annotator="pytest")
 
     first = repo.create_sample(2, n // 3)
-    repo.label_sample(
-        first.sample_id, exercise="squat", correctness=Correctness.CORRECT
-    )
+    repo.label_sample(first.sample_id, exercise="squat", reviewed=True)
 
     second = repo.create_sample(n // 3 + 4, 2 * n // 3)
-    repo.label_sample(
-        second.sample_id, exercise="squat", correctness=Correctness.INCORRECT
-    )
+    repo.label_sample(second.sample_id, exercise="squat", reviewed=True)
     base = second.start_frame
     repo.create_error_interval(second.sample_id, base + 3, base + 14, error_code=CLASS_A)
     # Overlaps the first, expressing two errors at the same moment.
@@ -66,9 +62,7 @@ def project(workspace, session):
     )
 
     third = repo.create_sample(2 * n // 3 + 4, n - 3)
-    repo.label_sample(
-        third.sample_id, exercise="squat", correctness=Correctness.CORRECT
-    )
+    repo.label_sample(third.sample_id, exercise="squat", reviewed=True)
     repo.save()
     return workspace, take
 
@@ -398,10 +392,10 @@ def test_unready_samples_are_excluded_by_default(workspace, session) -> None:
     loaded = load_take(workspace, take, with_video=False)
     repo = AnnotationRepository(workspace, take, frame_count=loaded.frame_count)
     pending = repo.create_sample(2, 20)
-    # Incorrect but never localised: workable, not finished.
-    repo.label_sample(
-        pending.sample_id, exercise="squat", correctness=Correctness.INCORRECT
-    )
+    # Reviewed, but carrying an error interval nobody classified: workable,
+    # not finished. This is the one way a reviewed movement stays unready.
+    repo.label_sample(pending.sample_id, exercise="squat", reviewed=True)
+    repo.create_error_interval(pending.sample_id, 5, 12)
     repo.save()
     assert repo.ready_count == 0
 

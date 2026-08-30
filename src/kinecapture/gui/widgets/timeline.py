@@ -108,7 +108,13 @@ class TimelineMode(str, Enum):
 
 @dataclass
 class _Drag:
-    """State of an in-progress mouse interaction."""
+    """State of an in-progress mouse interaction.
+
+    ``tentative_*`` is the edit as it currently stands *on screen only*. The
+    repository learns about it once, on release. Writing on every mouse move
+    used to produce one undo snapshot and one autosave per pixel, so undoing a
+    single drag meant pressing Ctrl+Z forty times.
+    """
 
     kind: str  # playhead | move | resize-start | resize-end | create | pan
     lane: str = "movement"  # movement | error
@@ -119,6 +125,18 @@ class _Drag:
     original_end: int = 0
     pan_origin: float = 0.0
     view_origin: float = 0.0
+    tentative_start: int = -1
+    tentative_end: int = -1
+    #: The endpoint the mouse is actually moving - the frame worth previewing.
+    preview_frame: int = -1
+
+    @property
+    def edits_bounds(self) -> bool:
+        return self.kind in ("move", "resize-start", "resize-end", "create")
+
+    @property
+    def has_tentative(self) -> bool:
+        return self.tentative_start >= 0 and self.tentative_end >= self.tentative_start
 
 
 def error_class_colour(code: str) -> str:
@@ -150,6 +168,21 @@ class TimelineWidget(QWidget):
     interval_double_clicked = Signal(str)
 
     loop_range_changed = Signal(object)
+
+    # --- the trim-preview contract ---------------------------------------
+    #: A bounds-editing drag began. The viewer should pause and remember where
+    #: the playhead was.
+    edit_started = Signal()
+    #: The frame currently under the dragged endpoint. Deliberately *not*
+    #: ``position_changed``: this is a temporary look at a frame, not a move of
+    #: the playhead, and treating the two the same is what made the playhead
+    #: end up wherever the user happened to release the mouse.
+    preview_position_changed = Signal(int)
+    #: The drag ended without an edit (Escape, focus loss, too short).
+    edit_cancelled = Signal()
+    #: One logical edit finished. Emitted after the single bounds/create
+    #: signal, so a listener can restore the playhead once everything settled.
+    edit_finished = Signal()
 
     def __init__(self, theme: Theme, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -475,11 +508,21 @@ class TimelineWidget(QWidget):
                 grab_offset=frame - sample.start_frame,
                 original_start=sample.start_frame,
                 original_end=sample.end_frame,
+                tentative_start=sample.start_frame,
+                tentative_end=sample.end_frame,
             )
+            self.edit_started.emit()
             self.update()
             return True
         if lanes["movements"].contains(point):
-            self._drag = _Drag(kind="create", lane="movement", anchor_frame=frame)
+            self._drag = _Drag(
+                kind="create",
+                lane="movement",
+                anchor_frame=frame,
+                tentative_start=frame,
+                tentative_end=frame,
+            )
+            self.edit_started.emit()
             self.update()
             return True
         return False
@@ -498,14 +541,24 @@ class TimelineWidget(QWidget):
                 grab_offset=frame - interval.start_frame,
                 original_start=interval.start_frame,
                 original_end=interval.end_frame,
+                tentative_start=interval.start_frame,
+                tentative_end=interval.end_frame,
             )
+            self.edit_started.emit()
             self.update()
             return True
         if lanes["errors"].contains(point) and sample is not None:
             # Anchoring is clamped to the parent, so a drag that starts outside
             # the movement still produces a valid interval inside it.
             anchor = int(np.clip(frame, sample.start_frame, sample.end_frame))
-            self._drag = _Drag(kind="create", lane="error", anchor_frame=anchor)
+            self._drag = _Drag(
+                kind="create",
+                lane="error",
+                anchor_frame=anchor,
+                tentative_start=anchor,
+                tentative_end=anchor,
+            )
+            self.edit_started.emit()
             self.update()
             return True
         # Clicking a movement while in error mode selects it, so the user can
@@ -543,34 +596,61 @@ class TimelineWidget(QWidget):
             self.set_position(frame)
             self.position_changed.emit(self._position)
         elif drag.kind == "create":
-            self.update()
+            # The anchor stays put; the endpoint under the mouse is the one
+            # worth looking at, and it obeys the same clamp as the commit will.
+            limits = self._bounds_limits(drag.lane)
+            if limits is not None:
+                frame = int(np.clip(frame, limits[0], limits[1]))
+            drag.preview_frame = frame
+            drag.tentative_start, drag.tentative_end = sorted(
+                (drag.anchor_frame, frame)
+            )
+            self.preview_position_changed.emit(frame)
         else:
             self._drag_existing(drag, frame)
         self.update()
 
+    def _bounds_limits(self, lane: str) -> Optional[tuple[int, int]]:
+        """How far a band in ``lane`` may be dragged. ``None`` if it may not."""
+        if lane == "movement":
+            return 0, max(0, self._frame_count - 1)
+        sample = self.selected_sample()
+        if sample is None:
+            return None
+        # An error interval is clamped to its parent movement here, in the
+        # preview, exactly as it is on commit - so what the user sees while
+        # dragging is what they get when they let go.
+        return sample.start_frame, sample.end_frame
+
     def _drag_existing(self, drag: _Drag, frame: int) -> None:
-        if drag.lane == "movement":
-            limit_low, limit_high = 0, max(0, self._frame_count - 1)
-            signal = self.sample_bounds_changed
-        else:
-            sample = self.selected_sample()
-            if sample is None:
-                return
-            limit_low, limit_high = sample.start_frame, sample.end_frame
-            signal = self.interval_bounds_changed
+        """Update the tentative bounds. Nothing is written until release."""
+        limits = self._bounds_limits(drag.lane)
+        if limits is None:
+            return
+        limit_low, limit_high = limits
 
         if drag.kind == "move":
             span = drag.original_end - drag.original_start
             start = int(
                 np.clip(frame - drag.grab_offset, limit_low, limit_high - span)
             )
-            signal.emit(drag.target_id, start, start + span)
+            drag.tentative_start, drag.tentative_end = start, start + span
+            # Moving a whole band has two moving edges; the leading one is what
+            # the user is watching.
+            drag.preview_frame = (
+                start if start <= drag.original_start else start + span
+            )
         elif drag.kind == "resize-start":
             start = int(np.clip(frame, limit_low, drag.original_end - 1))
-            signal.emit(drag.target_id, start, drag.original_end)
+            drag.tentative_start, drag.tentative_end = start, drag.original_end
+            drag.preview_frame = start
         elif drag.kind == "resize-end":
             end = int(np.clip(frame, drag.original_start + 1, limit_high))
-            signal.emit(drag.target_id, drag.original_start, end)
+            drag.tentative_start, drag.tentative_end = drag.original_start, end
+            drag.preview_frame = end
+        else:  # pragma: no cover - only the three kinds reach here
+            return
+        self.preview_position_changed.emit(drag.preview_frame)
 
     def _update_hover(self, point: QPointF, frame: int, event: QMouseEvent) -> None:
         hit = (
@@ -603,29 +683,77 @@ class TimelineWidget(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        """End the drag, committing exactly one edit if there is one to make."""
         drag, self._drag = self._drag, None
         self.setCursor(Qt.CursorShape.ArrowCursor)
         if drag is None:
             return
+
         if drag.kind == "create":
             frame = self._x_to_frame(QPointF(event.position()).x())
-            if drag.lane == "error":
-                sample = self.selected_sample()
-                if sample is not None:
-                    frame = int(
-                        np.clip(frame, sample.start_frame, sample.end_frame)
-                    )
+            limits = self._bounds_limits(drag.lane)
+            if limits is not None:
+                frame = int(np.clip(frame, limits[0], limits[1]))
             start, end = sorted((drag.anchor_frame, frame))
             if end - start >= _MIN_DRAG_FRAMES:
                 if drag.lane == "error":
                     self.interval_create_requested.emit(start, end)
                 else:
                     self.sample_create_requested.emit(start, end)
+                self.edit_finished.emit()
             else:
-                # Too short to be a range: treat it as a scrub instead.
+                # Too short to be a range: this was a click, so keep the old
+                # scrub behaviour and move the playhead for real.
+                self.edit_cancelled.emit()
                 self.set_position(frame)
                 self.position_changed.emit(self._position)
+        elif drag.edits_bounds and drag.has_tentative:
+            signal = (
+                self.sample_bounds_changed
+                if drag.lane == "movement"
+                else self.interval_bounds_changed
+            )
+            if (drag.tentative_start, drag.tentative_end) != (
+                drag.original_start,
+                drag.original_end,
+            ):
+                signal.emit(
+                    drag.target_id, drag.tentative_start, drag.tentative_end
+                )
+                self.edit_finished.emit()
+            else:
+                self.edit_cancelled.emit()
+        elif drag.edits_bounds:
+            self.edit_cancelled.emit()
         self.update()
+
+    def cancel_drag(self) -> None:
+        """Abandon an in-progress edit, changing nothing.
+
+        The tentative bounds only ever existed on screen, so there is nothing
+        to roll back: dropping them restores the stored ones, and the listener
+        puts the playhead back where it was.
+        """
+        drag, self._drag = self._drag, None
+        if drag is None:
+            return
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        if drag.edits_bounds:
+            self.edit_cancelled.emit()
+        self.update()
+
+    def keyPressEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        if event.key() == Qt.Key.Key_Escape and self._drag is not None:
+            self.cancel_drag()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:  # type: ignore[no-untyped-def]
+        # Losing focus mid-drag (an alert, another window) must not leave a
+        # half-finished edit that commits on the next stray click.
+        self.cancel_drag()
+        super().focusOutEvent(event)
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         """Double click opens the label window for whatever was clicked.
@@ -812,6 +940,23 @@ class TimelineWidget(QWidget):
                 )
             )
 
+    def _drawn_bounds(self, identifier: str, start: int, end: int) -> tuple[int, int]:
+        """The bounds to draw for a band: tentative while it is being dragged.
+
+        This is what makes the edit feel direct. The repository still holds the
+        old numbers - it will not hear about the new ones until the mouse comes
+        up - so without this the band would sit still while the cursor moved.
+        """
+        drag = self._drag
+        if (
+            drag is not None
+            and drag.edits_bounds
+            and drag.has_tentative
+            and drag.target_id == identifier
+        ):
+            return drag.tentative_start, drag.tentative_end
+        return start, end
+
     def _paint_samples(self, painter: QPainter, lane: QRectF) -> None:
         theme = self._theme
         painter.fillRect(self._plot_rect(lane), QColor(theme.bg_base))
@@ -825,7 +970,10 @@ class TimelineWidget(QWidget):
         )
 
         for sample in self._samples:
-            rect = self._range_rect(sample.start_frame, sample.end_frame, lane)
+            low, high = self._drawn_bounds(
+                sample.sample_id, sample.start_frame, sample.end_frame
+            )
+            rect = self._range_rect(low, high, lane)
             if rect.right() < 0 or rect.left() > self.width():
                 continue
             selected = sample.sample_id == self._selected_sample_id
@@ -949,7 +1097,10 @@ class TimelineWidget(QWidget):
         self, painter: QPainter, interval: ErrorInterval, lane: QRectF, active: bool
     ) -> None:
         theme = self._theme
-        rect = self._range_rect(interval.start_frame, interval.end_frame, lane, inset=1.5)
+        low, high = self._drawn_bounds(
+            interval.interval_id, interval.start_frame, interval.end_frame
+        )
+        rect = self._range_rect(low, high, lane, inset=1.5)
         if rect.right() < 0 or rect.left() > self.width():
             return
         selected = interval.interval_id == self._selected_interval_id
@@ -1030,14 +1181,23 @@ class TimelineWidget(QWidget):
         )
 
     def _sample_colour(self, sample: MovementSample) -> str:
+        """Green when correct, amber when an error is localised, blue until reviewed.
+
+        Colour follows the *derived* verdict, so a band turns amber the moment
+        an error interval inside it gets a class - the picture and the label
+        cannot drift apart. Colour is never the only cue: the band is captioned
+        with its index and class as well.
+        """
         theme = self._theme
         if not sample.is_active:
             return theme.text_muted
+        if not sample.is_review_complete:
+            return theme.accent
         return {
             Correctness.CORRECT: theme.success,
             Correctness.INCORRECT: theme.warning,
             Correctness.UNLABELLED: theme.accent,
-        }[sample.correctness]
+        }[sample.derived_correctness]
 
 
 def _nice_step(raw_seconds: float) -> float:

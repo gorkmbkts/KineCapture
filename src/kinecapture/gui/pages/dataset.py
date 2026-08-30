@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QGridLayout,
     QHBoxLayout,
+    QSplitter,
     QHeaderView,
     QTableWidget,
     QTableWidgetItem,
@@ -24,10 +25,11 @@ from kinecapture.domain.enums import (
     TakeState,
 )
 from kinecapture.domain.labels import LabelSchema
-from kinecapture.gui.pages.base import Page
+from kinecapture.gui.pages.base import Page, scrollable
 from kinecapture.gui.pages.dashboard import format_duration
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
+from kinecapture.gui.widgets.flow_layout import flow_row
 from kinecapture.gui.widgets.common import (
     Card,
     EmptyState,
@@ -53,6 +55,7 @@ _READINESS_LABELS = {
     SampleReadiness.NEEDS_ERROR_INTERVAL: "Hata aralığı bekliyor",
     SampleReadiness.CONTRADICTION: "Çelişki",
     SampleReadiness.INVALID_INTERVAL: "Geçersiz aralık",
+    SampleReadiness.LEGACY_CONFLICT: "Eski karar çelişkisi",
     SampleReadiness.EXCLUDED: "Dışlandı",
 }
 
@@ -61,6 +64,7 @@ def _readiness_detail(counts: dict[str, int]) -> str:
     """Why the unready samples are unready, most common reason first."""
     parts = []
     for state in (
+        SampleReadiness.LEGACY_CONFLICT,
         SampleReadiness.NEEDS_ERROR_INTERVAL,
         SampleReadiness.UNLABELLED,
         SampleReadiness.CONTRADICTION,
@@ -109,7 +113,10 @@ class DistributionBar(QWidget):
             layout.setSpacing(theme.space_sm)
 
             name = make_label(key, role="muted")
-            name.setMinimumWidth(130)
+            # Wide enough to read a class name, not so wide that a long
+            # Turkish label sets the distribution card's minimum width.
+            name.setMinimumWidth(96)
+            name.setMaximumWidth(200)
             layout.addWidget(name)
 
             share = count / total
@@ -119,7 +126,7 @@ class DistributionBar(QWidget):
             bar.setStyleSheet(
                 f"background-color: {colour}; border-radius: 5px;"
             )
-            bar.setMinimumWidth(max(4, int(share * 240)))
+            bar.setMinimumWidth(max(4, min(160, int(share * 240))))
             bar.setMaximumWidth(max(4, int(share * 240)))
             layout.addWidget(bar)
 
@@ -172,12 +179,26 @@ class DatasetPage(Page):
         body.addWidget(self._build_filters(theme))
         body.addWidget(self._build_metrics(theme))
 
-        columns = QHBoxLayout()
-        columns.setSpacing(theme.space_md)
-        columns.addWidget(self._build_table(theme), 3)
-        columns.addWidget(self._build_analysis(theme), 2)
-        body.addLayout(columns, 1)
-        self.content.addWidget(self._body, 1)
+        # A splitter, not a fixed pair: the table and the analysis column are
+        # both useful at full width and neither has to keep the other's
+        # minimum. Fixed side-by-side made the page 1643px wide at minimum,
+        # which is a horizontal scrollbar on every supported screen.
+        columns = QSplitter(Qt.Orientation.Horizontal)
+        columns.setChildrenCollapsible(False)
+        columns.addWidget(self._build_table(theme))
+        columns.addWidget(self._build_analysis(theme))
+        columns.setStretchFactor(0, 3)
+        columns.setStretchFactor(1, 2)
+        columns.setSizes([700, 420])
+        body.addWidget(columns, 1)
+        # Filters, twelve metric tiles, a table and an analysis column do not
+        # fit in 606px however they are arranged. A browsing page may scroll
+        # vertically - what it may not do is clip the bottom card away.
+        self._scroll = scrollable(self._body)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.content.addWidget(self._scroll, 1)
 
         state.project_changed.connect(lambda _: self._reload(force=True))
         state.dataset_changed.connect(self._reload)
@@ -185,20 +206,32 @@ class DatasetPage(Page):
 
     # --------------------------------------------------------------- layout
     def _build_filters(self, theme: Theme) -> QWidget:
+        """Eight filters that wrap onto a second line instead of clipping.
+
+        In a fixed row they set a 1495px minimum width all on their own, which
+        put a horizontal scrollbar under every screen this app supports - and
+        the filter most likely to be scrolled off was the last one added.
+        """
         card = Card("Filtreler", theme=theme, icon="search")
-        row = QHBoxLayout()
-        row.setSpacing(theme.space_sm)
+        cells: list[QWidget] = []
 
         def add(label: str) -> QComboBox:
             column = QVBoxLayout()
+            column.setContentsMargins(0, 0, 0, 0)
             column.setSpacing(2)
             column.addWidget(make_label(label, role="caption"))
             selector = QComboBox()
+            selector.setMinimumWidth(120)
+            selector.setMaximumWidth(190)
+            selector.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            selector.setMinimumContentsLength(10)
             selector.currentIndexChanged.connect(self._apply_filters)
             column.addWidget(selector)
             container = QWidget()
             container.setLayout(column)
-            row.addWidget(container)
+            cells.append(container)
             return selector
 
         self._participant_filter = add("Katılımcı")
@@ -212,21 +245,16 @@ class DatasetPage(Page):
 
         clear = make_button("Temizle", icon="close", theme=theme)
         clear.clicked.connect(self._clear_filters)
-        row.addWidget(clear)
-        row.addStretch(1)
+        cells.append(clear)
 
         self._filter_chip = StatusChip("Tümü", theme=theme, icon="list")
-        row.addWidget(self._filter_chip)
+        cells.append(self._filter_chip)
 
-        container = QWidget()
-        container.setLayout(row)
-        card.add_widget(container)
+        card.add_widget(flow_row(cells, spacing=theme.space_sm))
         return card
 
     def _build_metrics(self, theme: Theme) -> QWidget:
         card = Card(theme=theme)
-        grid = QGridLayout()
-        grid.setSpacing(theme.space_sm)
         self._tiles: dict[str, MetricTile] = {}
         specs = [
             ("takes", "Kayıt", "capture"),
@@ -245,13 +273,17 @@ class DatasetPage(Page):
             ("unlabelled_time", "Etiketsiz süre", "review"),
             ("subject", "Ort. kişi kapsamı", "participant"),
         ]
-        for position, (key, caption, icon) in enumerate(specs):
+        tiles = []
+        for key, caption, icon in specs:
             tile = MetricTile(caption, "0", theme=theme, icon=icon)
+            # Capped so a long caption like "Ort. takip kapsamı" cannot make
+            # four tiles across into a 1336px minimum for the whole page.
+            tile.setMinimumWidth(150)
+            tile.setMaximumWidth(210)
             self._tiles[key] = tile
-            grid.addWidget(tile, position // 4, position % 4)
-        container = QWidget()
-        container.setLayout(grid)
-        card.add_widget(container)
+            tiles.append(tile)
+        # Wraps to as many rows as the window needs rather than a fixed grid.
+        card.add_widget(flow_row(tiles, spacing=theme.space_sm))
         return card
 
     def _build_table(self, theme: Theme) -> QWidget:
@@ -275,7 +307,18 @@ class DatasetPage(Page):
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         header = self._table.horizontalHeader()
-        header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # ResizeToContents lets the widest cell in nine columns dictate the
+        # page's minimum width; a long participant code or a timestamp then
+        # makes the whole screen scroll sideways. The columns are sized once
+        # and remain draggable.
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setStretchLastSection(True)
+        for column, width in enumerate((90, 150, 70, 130, 90, 90, 80, 90, 110)):
+            self._table.setColumnWidth(column, width)
+        self._table.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self._table.setHorizontalScrollMode(
+            QTableWidget.ScrollMode.ScrollPerPixel
+        )
         header.setStretchLastSection(True)
         self._table.itemDoubleClicked.connect(self._open_selected)
         card.add_widget(self._table, 1)
@@ -298,7 +341,12 @@ class DatasetPage(Page):
         exercise_card.add_widget(self._exercise_bars)
         layout.addWidget(exercise_card)
 
-        correctness_card = Card("Değerlendirme dağılımı", theme=theme, icon="target")
+        correctness_card = Card(
+            "Değerlendirme dağılımı",
+            subtitle="Hata aralıklarından türetilir.",
+            theme=theme,
+            icon="target",
+        )
         self._correctness_bars = DistributionBar(theme)
         correctness_card.add_widget(self._correctness_bars)
         layout.addWidget(correctness_card)
@@ -325,7 +373,9 @@ class DatasetPage(Page):
         self._qa_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._qa_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         qa_header = self._qa_table.horizontalHeader()
-        qa_header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        qa_header.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        self._qa_table.setColumnWidth(0, 110)
+        self._qa_table.setTextElideMode(Qt.TextElideMode.ElideRight)
         qa_header.setStretchLastSection(True)
         self._qa_table.itemDoubleClicked.connect(self._open_qa_take)
         qa_card.add_widget(self._qa_table, 1)
@@ -335,7 +385,7 @@ class DatasetPage(Page):
     # ----------------------------------------------------------------- data
     def _set_empty(self, empty: bool) -> None:
         self._empty.setVisible(empty)
-        self._body.setVisible(not empty)
+        self._scroll.setVisible(not empty)
 
     def on_activated(self) -> None:
         self._reload()

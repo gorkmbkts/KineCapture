@@ -9,7 +9,8 @@ Label contract
 Each example carries:
 
 * ``exercise`` - the movement class;
-* ``correctness`` - a **binary** verdict, ``correct`` or ``incorrect``;
+* ``correctness`` - a **binary** verdict, ``correct`` or ``incorrect``,
+  **derived** from the error intervals rather than stored beside them;
 * ``error_intervals`` - zero or more ``(error class, start, end)`` spans inside
   the example, given both in take-absolute positions and in positions relative
   to the exported array, so a consumer never has to guess or recompute.
@@ -907,10 +908,10 @@ class ReleaseBuilder:
                     "start_position": sample.start_frame,
                     "end_position": sample.end_frame,
                     "exercise": sample.exercise,
-                    "correctness": sample.correctness.value,
+                    "correctness": sample.derived_correctness.value,
                 }
                 for sample in row.samples
-                if sample.is_active and sample.correctness.is_decided
+                if sample.is_active and sample.is_review_complete
             ],
             "subject": self._subject_summary(take, subject),
             "raw_source": raw_reference,
@@ -1486,7 +1487,12 @@ class ReleaseBuilder:
             "length_unit": output_spec.length_unit,
             # ---- level 1: the movement label ----
             "exercise": sample.exercise,
-            "correctness": sample.correctness.value,
+            # Derived, never stored: a sample is incorrect exactly when it
+            # carries a classified error interval. The two can therefore never
+            # disagree in a release, which is what the validation below checks.
+            "correctness": sample.derived_correctness.value,
+            "correctness_source": "derived_from_error_intervals",
+            "reviewed_at": sample.reviewed_at,
             # ---- level 2: temporal error localisation ----
             "error_intervals": intervals,
             "error_classes": sorted({i["error_code"] for i in intervals}),
@@ -1596,22 +1602,37 @@ class ReleaseBuilder:
             entry["checksum"] = actual
 
         # --- label-level consistency, mirroring the UI's readiness rule ------
+        # Correctness is derived from the intervals, so these can only fire if
+        # something between the domain rule and the writer has gone wrong. They
+        # stay as an assertion on the shipped artefact rather than on an
+        # in-memory object: a release is what other people will trust.
         for entry in samples:
             correctness = entry["correctness"]
-            count = len(entry["error_intervals"])
-            if correctness == "correct" and count:
+            classified = [
+                interval
+                for interval in entry["error_intervals"]
+                if interval.get("error_code")
+            ]
+            if correctness == "correct" and classified:
                 errors.append(
                     {
                         "sample_id": entry["sample_id"],
                         "issue": "correct_with_error_intervals",
-                        "detail": f"{count} hata aralığı",
+                        "detail": f"{len(classified)} hata aralığı",
                     }
                 )
-            if correctness == "incorrect" and not count:
+            if correctness == "incorrect" and not classified:
                 errors.append(
                     {
                         "sample_id": entry["sample_id"],
                         "issue": "incorrect_without_error_interval",
+                    }
+                )
+            if len(classified) != len(entry["error_intervals"]):
+                errors.append(
+                    {
+                        "sample_id": entry["sample_id"],
+                        "issue": "error_interval_without_class",
                     }
                 )
             if correctness not in ("correct", "incorrect"):

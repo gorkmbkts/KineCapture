@@ -1,9 +1,15 @@
 """The two small windows that do the actual labelling.
 
-A movement gets a class and a verdict; an error interval gets a class. That is
-the whole writable label model, and it is now the whole of these dialogs. They
-replace a permanently open panel that occupied two fifths of the review screen
-in order to show forms the user needed for a few seconds at a time.
+A movement gets a class; an error interval gets a class. That is the whole
+writable label model, and it is now the whole of these dialogs. They replace a
+permanently open panel that occupied two fifths of the review screen in order
+to show forms the user needed for a few seconds at a time.
+
+Correct-or-incorrect is not asked anywhere: it is derived from whether the
+movement has any classified error interval. Saving the movement dialog records
+that its class review is finished, which is the piece the intervals alone
+cannot tell you - "no errors marked" and "nobody has looked yet" would
+otherwise be the same state.
 
 Both open on a double click on the interval they belong to, so the thing being
 labelled is the thing that was clicked - there is no separate "which one is
@@ -35,20 +41,31 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from kinecapture.domain.enums import Correctness
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.domain.project import ErrorInterval, MovementSample
 from kinecapture.gui.theme import Theme
-from kinecapture.gui.widgets.common import FieldRow, make_button, make_label
+from kinecapture.gui.widgets.common import (
+    ElidedLabel,
+    FieldRow,
+    make_button,
+    make_label,
+)
 from kinecapture.gui.widgets.label_picker import LabelClassPicker, LabelKind
 
 
 class MovementLabelDialog(QDialog):
-    """Class and verdict for one movement.
+    """Which exercise this repetition is.
 
-    The verdict is here rather than on a side panel because it is inseparable
-    from the class: a movement with neither is not labelled, and the two are
-    always decided in the same breath.
+    That is the whole question. Correct-or-incorrect used to be asked here as
+    well, and it is now read off the movement's error intervals instead: a
+    repetition with a classified error interval is incorrect, one without is
+    correct. Asking for both invited them to disagree, and a stored verdict
+    that contradicts its own evidence tells you nothing about which half to
+    believe.
+
+    So saving this dialog means one thing: *the class review of this movement
+    is finished*. With no error intervals marked, that immediately makes the
+    movement correct and export-ready, with no second confirmation.
     """
 
     def __init__(
@@ -57,20 +74,21 @@ class MovementLabelDialog(QDialog):
         sample: MovementSample,
         schema: LabelSchema,
         *,
-        readiness: str = "",
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle(f"Hareket {sample.index} etiketi")
-        self.setMinimumSize(440, 480)
+        self.setWindowTitle(f"Hareket {sample.index} · hareket türü")
+        # Sized to its content rather than to a fixed rectangle: with the
+        # verdict row gone this is a search box, a short list and a note, and a
+        # 480px-tall window left most of it empty.
+        self.setMinimumSize(400, 340)
+        self.resize(440, 420)
         self._theme = theme
         self._sample = sample
         self._schema = schema
-        self._readiness = readiness
 
         # The draft. Nothing touches the repository until Save.
         self._exercise = sample.exercise
-        self._correctness = sample.correctness
         self._pending_new_class = ""
         #: Names typed into the picker that the caller must create. Reported
         #: even when the dialog is cancelled, because creating a class is a
@@ -97,47 +115,22 @@ class MovementLabelDialog(QDialog):
         self.picker.creation_requested.connect(self._creation_requested)
         layout.addWidget(self.picker, 1)
 
-        verdict = QHBoxLayout()
-        verdict.setSpacing(theme.space_xs)
-        self._correct_button = make_button(
-            "Doğru", theme=theme, icon="check", tooltip="Bu tekrar doğru yapıldı (1)"
-        )
-        self._correct_button.setCheckable(True)
-        self._correct_button.clicked.connect(
-            lambda: self._set_verdict(Correctness.CORRECT)
-        )
-        verdict.addWidget(self._correct_button)
-        self._incorrect_button = make_button(
-            "Hatalı",
-            theme=theme,
-            icon="warning",
-            tooltip="Bu tekrarda hata var; hata aralığını ayrıca işaretleyin (2)",
-        )
-        self._incorrect_button.setCheckable(True)
-        self._incorrect_button.clicked.connect(
-            lambda: self._set_verdict(Correctness.INCORRECT)
-        )
-        verdict.addWidget(self._incorrect_button)
-        verdict.addStretch(1)
-        holder = QWidget()
-        holder.setLayout(verdict)
-        layout.addWidget(FieldRow("Karar", holder, theme=theme))
-
         self._note = QPlainTextEdit()
         self._note.setPlainText(sample.note)
-        self._note.setMaximumHeight(56)
+        self._note.setMaximumHeight(48)
         self._note.setPlaceholderText("Bu hareketle ilgili not (isteğe bağlı)")
         layout.addWidget(FieldRow("Not", self._note, theme=theme))
 
-        self._status = make_label("", role="muted")
-        self._status.setWordWrap(True)
+        self._status = ElidedLabel("", role="muted")
         layout.addWidget(self._status)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Save
             | QDialogButtonBox.StandardButton.Cancel
         )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("Kaydet")
+        self._save_button = buttons.button(QDialogButtonBox.StandardButton.Save)
+        self._save_button.setText("Kaydet")
+        self._save_button.setDefault(True)
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("İptal")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
@@ -166,46 +159,38 @@ class MovementLabelDialog(QDialog):
         )
         self._pending_new_class = cleaned
 
-    def _set_verdict(self, correctness: Correctness) -> None:
-        self._correctness = correctness
-        self._sync()
-
     def _sync(self) -> None:
-        self._correct_button.setChecked(self._correctness is Correctness.CORRECT)
-        self._incorrect_button.setChecked(self._correctness is Correctness.INCORRECT)
+        """Say what saving will mean, and whether it is possible yet."""
+        has_class = bool(self._exercise or self._pending_new_class)
+        # Saving *is* the review. Without a class there is nothing to record,
+        # so the button stays disabled and says why rather than accepting a
+        # half-finished review that would look complete.
+        self._save_button.setEnabled(has_class)
         if self._pending_new_class:
             return
-        missing: list[str] = []
-        if not self._exercise:
-            missing.append("hareket türü")
-        if not self._correctness.is_decided:
-            missing.append("doğru/hatalı kararı")
-        if missing:
+        if not has_class:
+            self._status.setText("Kaydetmek için bir hareket türü seçin.")
+            return
+        classified = len(self._sample.localised_error_codes)
+        unclassified = len(self._sample.error_intervals) - classified
+        if unclassified:
             self._status.setText(
-                "Eksik: " + ", ".join(missing) + ". Kaydedebilirsiniz; hareket "
-                "tamamlanmamış olarak işaretlenir ve export'a girmez."
+                f"{unclassified} hata aralığının türü seçilmemiş; hareket "
+                "tamamlanmamış kalır."
             )
-        elif self._correctness is Correctness.INCORRECT and not self._sample.error_intervals:
+        elif classified:
             self._status.setText(
-                "Hatalı işaretlendi. Hata aralığı eklenene kadar export'a girmez."
+                f"{classified} hata aralığı işaretli → hareket HATALI sayılır."
             )
-        elif self._correctness is Correctness.CORRECT and self._sample.error_intervals:
-            self._status.setText(
-                "Çelişki: doğru işaretli bir harekette hata aralığı var."
-            )
-        elif self._readiness:
-            self._status.setText(f"Durum: {self._readiness}")
         else:
-            self._status.setText("")
+            self._status.setText(
+                "Hata aralığı yok → hareket DOĞRU sayılır ve export'a hazır olur."
+            )
 
     # -------------------------------------------------------------- result
     @property
     def exercise(self) -> str:
         return self._exercise
-
-    @property
-    def correctness(self) -> Correctness:
-        return self._correctness
 
     @property
     def note(self) -> str:

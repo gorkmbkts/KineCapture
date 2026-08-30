@@ -2,10 +2,13 @@
 
 Two writable layers, and only two:
 
-* **Hareket** - the repetitions across the take, each with an exercise class and
-  a correct/incorrect verdict.
+* **Hareket** - the repetitions across the take, each with an exercise class.
 * **Hata** - inside one selected repetition, the stretches where the error is
   visible, each with an error class.
+
+Correct-or-incorrect is not a third thing to fill in: a repetition with a
+classified error interval is incorrect and one without is correct, so the
+second layer *is* the verdict.
 
 The screen is built around one idea: *the picture and the timeline are the
 work*, everything else is a window you open when you need it. So the take
@@ -50,7 +53,6 @@ from PySide6.QtWidgets import (
 from kinecapture.annotations.repository import AnnotationRepository
 from kinecapture.core.errors import KineCaptureError
 from kinecapture.domain.enums import (
-    Correctness,
     SampleReadiness,
     SegmentStatus,
     TakeQuality,
@@ -92,6 +94,7 @@ _READINESS_PRESENTATION = {
     ),
     SampleReadiness.CONTRADICTION: ("warning", "Çelişki", "danger"),
     SampleReadiness.INVALID_INTERVAL: ("error", "Geçersiz aralık", "danger"),
+    SampleReadiness.LEGACY_CONFLICT: ("warning", "Eski karar çelişkisi", "danger"),
     SampleReadiness.EXCLUDED: ("eye", "Dışlandı", "text_muted"),
 }
 
@@ -107,8 +110,8 @@ class ReviewPage(Page):
 
     title = "İnceleme ve Etiketleme"
     description = (
-        "Hareketleri işaretleyin, doğru/yanlış kararını verin ve hatalı "
-        "hareketlerde hatanın tam olarak nerede olduğunu gösterin."
+        "Hareketleri işaretleyin ve hatanın tam olarak nerede göründüğünü "
+        "gösterin. Doğru/hatalı kararı hata aralıklarından türetilir."
     )
     icon = "review"
 
@@ -124,6 +127,9 @@ class ReviewPage(Page):
         self._selected_sample_id: Optional[str] = None
         self._selected_interval_id: Optional[str] = None
         self._info: Optional[InfoWindow] = None
+        #: Where the playhead was when a trim drag began, so it can go back
+        #: there afterwards rather than to wherever the mouse was released.
+        self._playhead_before_edit: Optional[int] = None
 
         self._take_selector = QComboBox()
         self._take_selector.setMinimumWidth(240)
@@ -424,6 +430,10 @@ class ReviewPage(Page):
         self._timeline.interval_bounds_changed.connect(self._interval_bounds_changed)
         self._timeline.interval_create_requested.connect(self._create_interval_range)
         self._timeline.interval_double_clicked.connect(self._open_error_dialog)
+        self._timeline.edit_started.connect(self._edit_started)
+        self._timeline.preview_position_changed.connect(self._preview_position)
+        self._timeline.edit_finished.connect(self._edit_finished)
+        self._timeline.edit_cancelled.connect(self._edit_finished)
         card.add_widget(self._timeline)
 
         self._status_label = ElidedLabel("", role="muted")
@@ -519,8 +529,6 @@ class ReviewPage(Page):
         add("F1", self._guarded(lambda: self._set_timeline_mode(TimelineMode.MOVEMENT)))
         add("F2", self._guarded(lambda: self._set_timeline_mode(TimelineMode.ERROR)))
         add("F4", self._toggle_info)
-        add("1", self._guarded(lambda: self._set_verdict(Correctness.CORRECT)))
-        add("2", self._guarded(lambda: self._set_verdict(Correctness.INCORRECT)))
         add("Ctrl+Z", self._undo)
         add("Ctrl+Y", self._redo)
         add("Ctrl+S", self._save_now)
@@ -892,8 +900,13 @@ class ReviewPage(Page):
         self._redraw()
 
     # --------------------------------------------------------------- drawing
-    def _redraw(self) -> None:
+    def _redraw(self, position: Optional[int] = None) -> None:
         """Draw one position: the selected person, on their own colour frame.
+
+        ``position`` defaults to the playhead. Passing one draws that frame
+        *without* moving anything - the trim preview looks at a frame the way
+        you would hold a strip of film up to the light, and the playhead stays
+        where the user left it.
 
         Everything here is deliberately allowed to come out empty. A missing
         subject, a missing proxy frame and an unprojectable skeleton are three
@@ -902,14 +915,17 @@ class ReviewPage(Page):
         loaded = self._loaded
         if loaded is None:
             return
-        frame = loaded.stream.frame_at(self._position)
-        body = loaded.review_body_at(self._position)
+        if position is None:
+            position = self._position
+        position = int(np.clip(position, 0, max(0, loaded.frame_count - 1)))
+        frame = loaded.stream.frame_at(position)
+        body = loaded.review_body_at(position)
         bodies = (body,) if body is not None else ()
 
         rgb = None
         rgb_missing = ""
         if loaded.has_video and loaded.video is not None:
-            video_position = loaded.video_position_for(self._position)
+            video_position = loaded.video_position_for(position)
             if video_position is None:
                 # No colour frame for this position. The previous one is not a
                 # substitute: it would show this pose over another moment.
@@ -947,16 +963,47 @@ class ReviewPage(Page):
             elapsed = (
                 (frame.camera_timestamp_ns - first) / 1e9
                 if first and frame.camera_timestamp_ns
-                else self._position / loaded.target_fps
+                else position / loaded.target_fps
             )
             inside = ""
             sample = self._current_sample()
-            if sample is not None and sample.contains(self._position):
+            if sample is not None and sample.contains(position):
                 inside = f"  ·  hareket {sample.index} içinde"
-            self._position_label.setText(
-                f"Konum {self._position + 1}/{loaded.frame_count}  ·  "
-                f"kayıt karesi {frame.frame_index}  ·  {elapsed:.2f} sn{inside}"
+            previewing = (
+                "  ·  ÖNİZLEME" if self._playhead_before_edit is not None else ""
             )
+            self._position_label.setText(
+                f"Konum {position + 1}/{loaded.frame_count}  ·  "
+                f"kayıt karesi {frame.frame_index}  ·  {elapsed:.2f} sn"
+                f"{inside}{previewing}"
+            )
+
+    # ------------------------------------------------------- trim preview
+    def _edit_started(self) -> None:
+        """A bounds drag began: pause, and remember where we were."""
+        if self._playhead_before_edit is None:
+            self._playhead_before_edit = self._position
+        self._pause()
+
+    def _preview_position(self, frame: int) -> None:
+        """Show the frame under the dragged endpoint, in whichever view is up.
+
+        Deliberately not a seek. ``self._position`` and the timeline playhead
+        are untouched, so the three scene modes all show this frame and the
+        take's own idea of "where am I" survives the drag intact.
+        """
+        if self._loaded is None:
+            return
+        self._redraw(frame)
+
+    def _edit_finished(self) -> None:
+        """The drag is over - put the playhead back exactly where it started."""
+        restore, self._playhead_before_edit = self._playhead_before_edit, None
+        if restore is None:
+            return
+        # Paused, not playing: an edit should never start playback on its own.
+        self._pause()
+        self._seek(restore)
 
     def _refresh_subject_chip(self, body) -> None:  # type: ignore[no-untyped-def]
         loaded = self._loaded
@@ -1082,7 +1129,7 @@ class ReviewPage(Page):
             )
             parts.append(
                 f"Seçili: {sample.index}. hareket · {exercise} · "
-                f"{LabelSchema.label_for_correctness(sample.correctness)} · "
+                f"{LabelSchema.label_for_correctness(sample.derived_correctness)} · "
                 f"{len(sample.error_intervals)} hata aralığı · "
                 f"{self._readiness_text(sample)}"
             )
@@ -1170,11 +1217,7 @@ class ReviewPage(Page):
         self._pause()
         self._select_sample_by_id(sample_id)
         dialog = MovementLabelDialog(
-            self.theme,
-            sample,
-            self.state.label_schema,
-            readiness=self._readiness_text(sample),
-            parent=self,
+            self.theme, sample, self.state.label_schema, parent=self
         )
         accepted = self._run_dialog(dialog)
         created = self._create_requested_classes(dialog.requested_classes)
@@ -1191,24 +1234,25 @@ class ReviewPage(Page):
                 return
             exercise = option
         try:
-            self._repo.label_sample(
-                sample_id,
-                exercise=exercise,
-                correctness=dialog.correctness,
-                note=dialog.note,
+            # ``reviewed=True`` is what Save means: the class review of this
+            # movement is finished. With no classified error interval that
+            # makes it correct and export-ready immediately - the verdict is
+            # read off the intervals, so there is nothing else to confirm.
+            updated = self._repo.label_sample(
+                sample_id, exercise=exercise, note=dialog.note, reviewed=True
             )
         except KineCaptureError as exc:
             self.state.report_error(exc)
             return
-        if (
-            dialog.correctness is Correctness.INCORRECT
-            and not sample.error_intervals
-        ):
-            self.state.notify(
-                "Hatalı olarak işaretlendi. Şimdi hatanın göründüğü aralığı "
-                "işaretleyin (F2 veya E).",
-                6000,
-            )
+        self.state.notify(
+            f"Hareket {updated.index}: "
+            + (
+                "hata aralığı yok → DOĞRU kabul edildi."
+                if not updated.has_localised_error
+                else f"{len(updated.localised_error_codes)} hata aralığı → HATALI."
+            ),
+            5000,
+        )
 
     def _open_error_dialog(self, interval_id: str) -> None:
         if self._repo is None:
@@ -1441,19 +1485,6 @@ class ReviewPage(Page):
         sample = self._current_sample()
         if sample is not None:
             self._timeline.zoom_to_range(sample.start_frame, sample.end_frame)
-
-    def _set_verdict(self, correctness: Correctness) -> None:
-        """The one label edit that stays on the keyboard, without a dialog."""
-        sample = self._current_sample()
-        if sample is None or self._repo is None:
-            return
-        self._repo.label_sample(sample.sample_id, correctness=correctness)
-        if correctness is Correctness.INCORRECT and not sample.error_intervals:
-            self.state.notify(
-                "Hatalı olarak işaretlendi. Şimdi hatanın göründüğü aralığı "
-                "işaretleyin (F2 veya E).",
-                6000,
-            )
 
     # ----------------------------------------------------------- error editing
     def _create_interval_here(self) -> None:

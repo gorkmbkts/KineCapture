@@ -423,11 +423,11 @@ def test_review_page_paints_with_a_loaded_take(qapp, workspace, session) -> None
     midpoint = loaded.frame_count // 2
     good = repository.create_sample(2, midpoint - 2)
     repository.label_sample(
-        good.sample_id, exercise="squat", correctness=Correctness.CORRECT
+        good.sample_id, exercise="squat", reviewed=True
     )
     bad = repository.create_sample(midpoint, loaded.frame_count - 3)
     repository.label_sample(
-        bad.sample_id, exercise="squat", correctness=Correctness.INCORRECT
+        bad.sample_id, exercise="squat", reviewed=True
     )
     repository.create_error_interval(
         bad.sample_id,
