@@ -19,7 +19,7 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.9.0"
+APP_VERSION: str = "0.10.0"
 
 #: Schema version for ``project.json``.
 PROJECT_SCHEMA_VERSION: str = "1.1.0"
@@ -47,7 +47,12 @@ SKELETON_STREAM_SCHEMA_VERSION: str = "1.1.0"
 #: field it already knows, and a 2.1 reader opening a 2.0 file keeps the
 #: recorded verdict verbatim and surfaces any disagreement with the intervals
 #: instead of silently resolving it.
-ANNOTATION_SCHEMA_VERSION: str = "2.1.0"
+#:
+#: 2.2 adds ``affected_roles`` and ``joint_status`` to an error interval: which
+#: anatomical joints the error is about, and why that list is empty when it is.
+#: Additive - a 2.1 reader ignores both and every existing field keeps its
+#: meaning, and a 2.2 reader treats a file without them as ``unreviewed``.
+ANNOTATION_SCHEMA_VERSION: str = "2.2.0"
 
 #: Schema version of the built-in label schema document.
 LABEL_SCHEMA_VERSION: str = "2.0.0"
@@ -60,7 +65,11 @@ LABEL_SCHEMA_VERSION: str = "2.0.0"
 #: 2.1 states in the manifest that ``correctness`` is derived from the error
 #: intervals and records ``reviewed_at``. Additive: every 2.0 field keeps its
 #: name, type and meaning.
-RELEASE_SCHEMA_VERSION: str = "2.1.0"
+#:
+#: 2.2 adds node-level evidence: per-interval affected anatomical roles, their
+#: supervision mask and status, the role-to-native-node mapping, and optional
+#: dense ``[T, C, J]`` targets. Additive again - nothing that existed changed.
+RELEASE_SCHEMA_VERSION: str = "2.2.0"
 
 #: Schema version of ``feature_spec.json`` inside a release.
 FEATURE_SPEC_SCHEMA_VERSION: str = "1.0.0"

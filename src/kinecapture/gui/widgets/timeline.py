@@ -56,6 +56,7 @@ from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 from kinecapture.domain.enums import Correctness, SegmentSource
 from kinecapture.domain.project import ErrorInterval, MovementSample
 from kinecapture.gui.theme import Theme
+from kinecapture.gui.widgets.joint_picker import describe_joint_annotation
 
 #: Lane heights in logical pixels.
 _RULER_H = 15
@@ -677,10 +678,30 @@ class TimelineWidget(QWidget):
         if self._frame_count:
             QToolTip.showText(
                 event.globalPosition().toPoint(),
-                f"Kare {frame}  ·  {frame / self._fps:.2f} s",
+                self._hover_text(frame, hit),
                 self,
             )
         self.update()
+
+    def _hover_text(self, frame: int, hit) -> str:  # type: ignore[no-untyped-def]
+        """What the pointer is over, in words.
+
+        The joint annotation is included because it is otherwise invisible on
+        the timeline: a reviewed-and-empty interval and one nobody has looked
+        at draw identically, and the difference is the whole point of the
+        field. Coverage is reported here, never mixed into the readiness
+        colour, so a take with no joints reviewed still reads as ready.
+        """
+        parts = [f"Kare {frame}", f"{frame / self._fps:.2f} s"]
+        if hit is not None:
+            target = hit[0]
+            if isinstance(target, ErrorInterval):
+                parts.append(
+                    self._error_labels.get(target.error_code, "")
+                    or "— tür seçilmedi"
+                )
+                parts.append(describe_joint_annotation(target))
+        return "  ·  ".join(parts)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         """End the drag, committing exactly one edit if there is one to make."""

@@ -75,6 +75,21 @@ def _samples(result):
 # ------------------------------------------------------- default behaviour
 
 
+#: Arrays that carry the *labels* rather than a feature. Always written, and
+#: documented in ``manifest.json``'s ``label_contract`` instead of in
+#: ``feature_spec.json``, because ticking a feature box must never change what
+#: the ground truth looks like.
+LABEL_ARRAYS = {
+    "error_intervals",
+    "error_multi_hot",
+    "error_interval_joint_multi_hot",
+    "error_interval_joint_mask",
+    "error_interval_joint_status",
+    "error_joint_target",
+    "error_joint_label_mask",
+}
+
+
 def test_default_export_writes_exactly_the_canonical_contract(labelled) -> None:
     """Ticking nothing must produce the release this app always produced."""
     result = _build(labelled)
@@ -88,9 +103,7 @@ def test_default_export_writes_exactly_the_canonical_contract(labelled) -> None:
             "frame_indices",
             "camera_timestamps_ns",
             "joint_confidences",
-            "error_intervals",
-            "error_multi_hot",
-        } == keys
+        } | LABEL_ARRAYS == keys
         assert payload["joints_xyz"].dtype == np.float32
 
     contract = manifest["feature_contract"]
@@ -194,7 +207,9 @@ def test_feature_spec_documents_every_written_array(labelled) -> None:
     _manifest, payloads = _samples(result)
 
     declared = set(spec["array_keys"])
-    stored = set(payloads[0].files) - {"error_intervals", "error_multi_hot"}
+    # Label arrays are part of the label contract, not the feature layer, so
+    # they are documented in the manifest rather than in feature_spec.json.
+    stored = set(payloads[0].files) - LABEL_ARRAYS
     assert stored <= declared
 
     for feature in spec["features"]:

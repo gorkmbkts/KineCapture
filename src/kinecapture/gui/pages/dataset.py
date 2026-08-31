@@ -272,6 +272,11 @@ class DatasetPage(Page):
             ("negatives", "Egzersizsiz kayıt", "info"),
             ("unlabelled_time", "Etiketsiz süre", "review"),
             ("subject", "Ort. kişi kapsamı", "participant"),
+            # Node evidence coverage. Deliberately its own tile rather than
+            # folded into "ready": a take can be ready for temporal error
+            # training while no interval has been reviewed for joints.
+            ("joint_reviewed", "Eklemi işaretli aralık", "skeleton"),
+            ("joint_pending", "Eklemi incelenmemiş", "review"),
         ]
         tiles = []
         for key, caption, icon in specs:
@@ -581,6 +586,23 @@ class DatasetPage(Page):
                 if summary.takes_with_raw_archive_loss
                 else ""
             )
+        )
+        # Node evidence coverage, reported next to - never mixed into - the
+        # temporal label readiness above it.
+        counts = summary.joint_status_counts
+        self._tiles["joint_reviewed"].set_value(str(summary.intervals_with_joints))
+        self._tiles["joint_reviewed"].set_detail(
+            f"{counts.get('not_applicable', 0)} eklem yok · "
+            f"{counts.get('indeterminate', 0)} belirlenemiyor"
+        )
+        self._tiles["joint_pending"].set_value(
+            str(summary.intervals_missing_joint_review),
+            colour=theme.warning if summary.intervals_missing_joint_review else None,
+        )
+        self._tiles["joint_pending"].set_detail(
+            f"{summary.takes_missing_joint_review} kayıtta"
+            if summary.intervals_missing_joint_review
+            else "node denetimi tam"
         )
         self._tiles["synthetic"].set_value(
             str(summary.synthetic_takes),

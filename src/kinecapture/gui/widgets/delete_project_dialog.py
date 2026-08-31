@@ -87,11 +87,20 @@ class DeleteProjectDialog(QDialog):
         project_path: Path,
         work: Callable[[Callable[[str], None]], Any],
         is_active: bool = False,
+        orphan: bool = False,
         take_count: Optional[int] = None,
         parent: Optional[QWidget] = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("Projeyi kalıcı olarak sil")
+        # ``orphan`` is the case where the recorded folder is gone: the same
+        # deliberate confirmation, but an entirely different promise, so the
+        # window says so everywhere rather than reusing destructive wording
+        # for an operation that destroys nothing.
+        #: True when the recorded folder is gone and only the record goes.
+        self.orphan = orphan
+        self.setWindowTitle(
+            "Yetim proje kaydını kaldır" if orphan else "Projeyi kalıcı olarak sil"
+        )
         self.setMinimumWidth(520)
         self._theme = theme
         self._project_name = project_name
@@ -110,7 +119,11 @@ class DeleteProjectDialog(QDialog):
         )
         layout.setSpacing(theme.space_md)
 
-        identity = Card("Silinecek proje", theme=theme, icon="warning")
+        identity = Card(
+            "Kaydı kaldırılacak proje" if orphan else "Silinecek proje",
+            theme=theme,
+            icon="warning",
+        )
         details = KeyValueList(theme)
         items = [("Proje", project_name), ("Proje kimliği", project_id)]
         if take_count is not None:
@@ -130,12 +143,20 @@ class DeleteProjectDialog(QDialog):
         layout.addWidget(identity)
 
         self.warning = make_label(
-            "Bu işlem GERİ ALINAMAZ. Proje klasöründeki her şey kalıcı olarak "
-            "silinir: ham RGB-D arşivi, proxy videolar, iskelet akışları, "
-            "etiketler ve oluşturulmuş dataset sürümleri. Geri dönüşüm "
-            "kutusuna taşınmaz, disk alanı boşalır."
+            (
+                "Kayıtlı proje klasörü DİSKTE BULUNAMADI. Bu işlem hiçbir "
+                "dosyayı silmez ve disk alanı boşaltmaz; yalnız uygulamadaki "
+                "eski proje kaydını ve erişim bağlantılarını kaldırır. Klasör "
+                "başka bir yere taşındıysa önce onu geri getirin: kayıt "
+                "kaldırıldıktan sonra proje listede görünmez."
+                if orphan
+                else "Bu işlem GERİ ALINAMAZ. Proje klasöründeki her şey "
+                "kalıcı olarak silinir: ham RGB-D arşivi, proxy videolar, "
+                "iskelet akışları, etiketler ve oluşturulmuş dataset "
+                "sürümleri. Geri dönüşüm kutusuna taşınmaz, disk alanı boşalır."
+            )
             + (
-                "\n\nBu proje şu anda açık; silmeden önce kapatılacak."
+                "\n\nBu proje şu anda açık; işlemden önce kapatılacak."
                 if is_active
                 else ""
             ),
@@ -166,7 +187,8 @@ class DeleteProjectDialog(QDialog):
 
         self._buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
         self.delete_button = self._buttons.addButton(
-            "Kalıcı olarak sil", QDialogButtonBox.ButtonRole.DestructiveRole
+            "Kaydı listeden kaldır" if orphan else "Kalıcı olarak sil",
+            QDialogButtonBox.ButtonRole.DestructiveRole,
         )
         self.delete_button.setProperty("variant", "danger")
         self.delete_button.clicked.connect(self.start)

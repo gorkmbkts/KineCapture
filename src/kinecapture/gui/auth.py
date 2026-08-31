@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QDialog,
@@ -13,16 +14,24 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QScrollArea,
     QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from kinecapture import APP_NAME
+from kinecapture import APP_NAME, APP_VERSION
 from kinecapture.core.errors import KineCaptureError, ValidationError
+from kinecapture.gui.assets import YTU_LOGO, asset_bytes
 from kinecapture.gui.state import AppState
 from kinecapture.gui.theme import Theme
-from kinecapture.gui.widgets.common import Card, FieldRow, make_button, make_label
+from kinecapture.gui.widgets.common import (
+    Card,
+    FieldRow,
+    horizontal_rule,
+    make_button,
+    make_label,
+)
 from kinecapture.identity.models import User
 
 
@@ -261,6 +270,22 @@ class ChangePasswordDialog(QDialog):
         self.accept()
 
 
+#: How tall the crest is on the sign-in screen. Large enough to be the first
+#: thing seen, small enough that the form still fits a 700px window.
+_AUTH_LOGO_HEIGHT = 88
+
+
+def _load_auth_logo():  # type: ignore[no-untyped-def]
+    """The packaged crest, or ``None``. Never raises, never blocks sign-in."""
+    data = asset_bytes(YTU_LOGO)
+    if not data:
+        return None
+    pixmap = QPixmap()
+    if not pixmap.loadFromData(data, "PNG") or pixmap.isNull():
+        return None
+    return pixmap
+
+
 class AuthPage(QWidget):
     """Full-window gate shown until a verified user context exists."""
 
@@ -269,26 +294,103 @@ class AuthPage(QWidget):
     def __init__(self, state: AppState, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self.state = state
-        outer = QHBoxLayout(self)
-        outer.setContentsMargins(40, 32, 40, 32)
-        outer.addStretch(1)
+        theme = state.theme
+
+        # One centred column, scrolling vertically. The stretches that used to
+        # centre it could not give way, so on a 700px-tall screen the sign-in
+        # button and the validation text were pushed off the bottom - which is
+        # the one thing a login screen must never do.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        self._scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        outer.addWidget(self._scroll)
+
+        canvas = QWidget()
+        canvas_layout = QHBoxLayout(canvas)
+        canvas_layout.setContentsMargins(
+            theme.space_lg, theme.space_lg, theme.space_lg, theme.space_lg
+        )
+        canvas_layout.addStretch(1)
+
         column = QWidget()
-        column.setMaximumWidth(540)
+        column.setMinimumWidth(360)
+        column.setMaximumWidth(520)
         layout = QVBoxLayout(column)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_md)
         layout.addStretch(1)
-        brand = make_label(APP_NAME, role="metric")
-        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(brand)
+
+        layout.addWidget(self._build_masthead(theme), 0, Qt.AlignmentFlag.AlignHCenter)
+
         self._stack = QStackedWidget()
-        self._setup = self._build_setup(state.theme)
-        self._login = self._build_login(state.theme)
+        self._setup = self._build_setup(theme)
+        self._login = self._build_login(theme)
         self._stack.addWidget(self._setup)
         self._stack.addWidget(self._login)
         layout.addWidget(self._stack)
+
+        self._footer = make_label(
+            f"{APP_NAME} v{APP_VERSION}  ·  Yıldız Teknik Üniversitesi",
+            role="muted",
+        )
+        self._footer.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # Wraps rather than overflowing the column at the narrowest window.
+        self._footer.setWordWrap(True)
+        layout.addWidget(self._footer)
         layout.addStretch(1)
-        outer.addWidget(column, 1)
-        outer.addStretch(1)
+
+        canvas_layout.addWidget(column, 1)
+        canvas_layout.addStretch(1)
+        self._scroll.setWidget(canvas)
         self.refresh_mode()
+
+    def _build_masthead(self, theme: Theme) -> QWidget:
+        """Crest, product name and one line of context, centred.
+
+        The logo comes from the packaged asset, so an installed copy started
+        from any directory finds it. A crest that fails to load leaves a
+        perfectly usable sign-in screen behind it - decoration must never be
+        load-bearing.
+        """
+        block = QWidget()
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(theme.space_xs)
+
+        self._logo = QLabel()
+        self._logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = _load_auth_logo()
+        if pixmap is None:
+            self._logo.setVisible(False)
+        else:
+            scaled = pixmap.scaled(
+                _AUTH_LOGO_HEIGHT,
+                _AUTH_LOGO_HEIGHT,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            self._logo.setPixmap(scaled)
+            self._logo.setFixedHeight(scaled.height())
+            self._logo.setAccessibleName("Yıldız Teknik Üniversitesi logosu")
+            self._logo.setToolTip("Yıldız Teknik Üniversitesi")
+        layout.addWidget(self._logo, 0, Qt.AlignmentFlag.AlignHCenter)
+
+        brand = make_label(APP_NAME, role="title")
+        brand.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(brand)
+
+        tagline = make_label(
+            "Hareket kaydı, etiketleme ve dataset üretimi", role="subtitle"
+        )
+        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tagline.setWordWrap(True)
+        layout.addWidget(tagline)
+        return block
 
     def refresh_mode(self) -> None:
         self._stack.setCurrentWidget(
@@ -301,8 +403,12 @@ class AuthPage(QWidget):
     def _build_setup(self, theme: Theme) -> QWidget:
         card = Card(
             "İlk Kurulum — Sistem Sahibi Hesabı",
-            subtitle="Bu hesap sistemdeki tek yönetici hesabıdır.",
+            subtitle=(
+                "Bu hesap sistemdeki tek yönetici hesabıdır ve sonradan "
+                "silinemez."
+            ),
             theme=theme,
+            icon="shield",
         )
         self._setup_fields = AccountFields(theme)
         card.add_widget(self._setup_fields)
@@ -318,8 +424,14 @@ class AuthPage(QWidget):
         return card
 
     def _build_login(self, theme: Theme) -> QWidget:
-        card = Card("Oturum Aç", theme=theme)
+        card = Card(
+            "Oturum Aç",
+            subtitle="Çalışma alanınıza erişmek için giriş yapın.",
+            theme=theme,
+            icon="participants",
+        )
         self._username = QLineEdit()
+        self._username.setPlaceholderText("kullanici.adi")
         self._username_row = FieldRow(
             "Kullanıcı adı", self._username, theme=theme, required=True
         )
@@ -329,8 +441,10 @@ class AuthPage(QWidget):
         row.setContentsMargins(0, 0, 0, 0)
         self._password = QLineEdit()
         self._password.setEchoMode(QLineEdit.EchoMode.Password)
+        self._password.setPlaceholderText("Şifreniz")
         row.addWidget(self._password, 1)
         self._show_password = QCheckBox("Göster")
+        self._show_password.setToolTip("Şifreyi geçici olarak açık göster")
         self._show_password.toggled.connect(
             lambda shown: self._password.setEchoMode(
                 QLineEdit.EchoMode.Normal if shown else QLineEdit.EchoMode.Password
@@ -345,20 +459,34 @@ class AuthPage(QWidget):
         self._login_error.setWordWrap(True)
         self._login_error.setVisible(False)
         card.add_widget(self._login_error)
-        login = make_button("Oturum Aç", variant="primary", theme=theme)
+        login = make_button(
+            "Oturum Aç", variant="primary", icon="chevron-right", theme=theme
+        )
+        login.setDefault(True)
         login.clicked.connect(self._attempt_login)
         card.add_widget(login)
+        self._login_button = login
+
+        card.add_widget(horizontal_rule())
         bottom = QHBoxLayout()
-        bottom.addWidget(make_label("Yeni misiniz?", role="muted"))
-        register = make_button("Yeni Kullanıcı Oluştur", theme=theme)
+        bottom.setSpacing(theme.space_sm)
+        bottom.addWidget(make_label("Hesabınız yok mu?", role="muted"))
+        register = make_button("Yeni Kullanıcı Oluştur", icon="add", theme=theme)
         register.clicked.connect(self._register)
         bottom.addWidget(register)
         bottom.addStretch(1)
         container = QWidget()
         container.setLayout(bottom)
         card.add_widget(container)
+        # Enter submits from either field; the tab order runs name -> password
+        # -> show -> sign in, which is the order the form is read in.
         self._username.returnPressed.connect(self._attempt_login)
         self._password.returnPressed.connect(self._attempt_login)
+        self.setTabOrder(self._username, self._password)
+        self.setTabOrder(self._password, self._show_password)
+        self.setTabOrder(self._show_password, login)
+        self._username.setAccessibleName("Kullanıcı adı")
+        self._password.setAccessibleName("Şifre")
         return card
 
     def _create_owner(self) -> None:

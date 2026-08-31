@@ -133,6 +133,81 @@ kaydedilmemiş hareket, hata aralığı olmasa da **Etiketlenmedi** kalır.
 silinmez; `legacy` bloğunda saklanır fakat arayüzde ve yeni export
 sözleşmesinde yer almaz.
 
+#### Etkilenen eklem: node düzeyinde kanıt
+
+Bir hata aralığı, hangi anatomik eklemlerle ilgili olduğunu da taşıyabilir.
+Bu alan **bir eklem sınıflandırıcısı ürünü değildir**. Amacı tek şeydir:
+ileride eğitilecek graph-temporal modele, hatanın iskeletin neresinde
+göründüğüne dair **node-level evidence/relevance denetimi** vermek. Model
+girdisinden hiçbir düğüm çıkarılmaz — `joints_xyz` bütün native topolojiyi
+taşımaya devam eder; seçilen eklemler yalnız *denetim hedefi* ve *maske*
+üretir.
+
+Seçim, hata penceresindeki önden görünüşlü şema üzerinden yapılır. Şema
+**sporcunun** sol/sağını gösterir: önden bakıldığı için sporcunun solu
+ekranın sağında çizilir ve figürün üstündeki bant bunu yazıyla da söyler.
+Durum yalnız renkle değil, seçili eklemin üzerindeki işaretle de belirtilir.
+
+##### Topolojiden bağımsız rol sözlüğü
+
+Depolanan değer eklem *indeksi* değil, **kanonik anatomik roldür**
+(`left_knee`, `pelvis`, `right_shoulder`, …). Tek otorite
+`kinecapture.features.roles` modülüdür; feature katmanı da aynı tabloyu
+kullanır, yani açı tanımları ile eklem etiketleri aynı sözlüğü paylaşır.
+
+Bunun sebebi karışık dataset'lerdir: aynı sürümde BODY_18 ve BODY_34 kayıtları
+bir arada olabilir ve `19` numaralı düğüm ikisinde farklı yerdedir. Rol
+kullanıldığında hedef uzayı tek kalır, native düğüme çeviri export
+manifestindeki `role_to_native_node` tablosuyla yapılır.
+
+Bir rolün karşılığı olmayan topolojide o rol **seçilemez**. `zed_body_18`
+içinde pelvis yoktur, `mock_16` içinde topuk yoktur; pencere bu eklemleri
+tıklanamaz gösterir ve repository katmanı yine de gelen böyle bir değeri
+`role_not_in_skeleton` ile reddeder. Rol listesinde bulunmayan eklemler
+export'tan **atılmaz**, yalnız hedef üretiminde kullanılmaz.
+
+##### Boş olmanın dört ayrı anlamı
+
+Eklem listesinin boş olması tek bir şey demek değildir, ve bunları tek bir
+"boş" değerine indirmek eğitimde sessizce yanlış negatif üretirdi:
+
+| `joint_status` | Anlamı | Node denetimi |
+|---|---|---|
+| `selected` | Bir veya daha fazla rol işaretlendi | **Pozitif kanıt** |
+| `not_applicable` | İncelendi; bu hatanın belirli bir eklem hedefi yok | Maskelenir |
+| `indeterminate` | İncelendi; görüntüden güvenilir belirlenemiyor | Maskelenir |
+| `unreviewed` | Eklem yönünden hiç incelenmedi (eski veri dahil) | Maskelenir |
+
+Maskelenmek **negatif etiket değildir**. `not_applicable` bir aralık, "bu
+eklemler etkilenmedi" demez; "bu satır node kaybında kullanılmaz" der.
+
+`selected` durumu boş rol listesiyle, boş olmayan rol listesi de başka bir
+durumla saklanamaz: ikisi de `joint_status_without_roles` /
+`roles_without_selected_status` ile reddedilir ve reddedilen düzenleme
+aralığı hiç değiştirmez.
+
+##### Etiket hazırlığı ile eklem kapsaması ayrı ölçülür
+
+Eklem incelemesi yapılmamış bir kayıt **export'a girer** ve zamansal hata
+sınıfı eğitimi bundan etkilenmez. Kapsama ayrı raporlanır:
+`AnnotationRepository.joint_annotation_counts()` dört durumu sayar, zaman
+çizelgesinin ipucu ile inceleme ekranının durum satırı seçili aralığın
+durumunu yazıyla söyler. İkisini birleştirmek ya kullanılabilir veriyi
+bloklardı ya da node denetimindeki boşluğu gizlerdi.
+
+##### Eski dosyalarla uyum
+
+Eski `affected_joints` alanı **kayıpsız korunur**. Değerlerin tamamı kanonik
+role birebir çevrilebiliyorsa aralık `selected` olarak okunur; **bir tanesi
+bile** çevrilemiyorsa hiçbiri çevrilmez, aralık `unreviewed` kalır ve ham
+liste `legacy.affected_joints` içinde durur. Yarım bir göç, tamamlanmış gibi
+görünürdü.
+
+Bir dosyayı açmak onu **yeniden yazmaz**: eski kayıt açıldığında ne autosave
+tetiklenir ne undo geçmişi oluşur, dosyanın baytları ve değişiklik zamanı
+aynı kalır. Bu sürümün tanımadığı bir `joint_status` değeri de `unreviewed`
+sayılır — bilinmeyen bir kelime, birinin verdiği karar gibi okunamaz.
+
 ---
 
 ## Kurulum
@@ -395,6 +470,30 @@ Uygulama silme sırasında kapanırsa, sonraki girişte `.deleting` altındaki
 işaretler okunur: DB tarafı bitmişse silme tamamlanır, bitmemişse proje eski
 yerine geri alınır. İşareti okunamayan klasöre **dokunulmaz** ve bildirilir —
 belirsizlik her zaman veriyi korumaktan yana çözülür.
+
+### Klasörü kaybolmuş proje kaydı
+
+Kayıtlı klasör diskte yoksa proje listede kalır fakat silinemez: silinecek bir
+şey yoktur. Bu durumda **ayrı** bir işlem devreye girer — *kaydı listeden
+kaldır*. Farkı gizlenmez; pencere başlığı, uyarı metni ve buton yazısı
+değişir, çünkü hiçbir dosya silinmez ve disk alanı boşalmaz. Yalnız
+uygulamadaki eski kayıt ve erişim bağlantıları kaldırılır.
+
+Güvenlik açısından ikisi aynı değildir ve aynı muameleyi görmez:
+
+- Kaldırma **yalnız** ön kontrol `delete_target_missing` döndüğünde
+  açılabilir. Manifest uyuşmazlığı, symlink, izin hatası gibi başka her guard
+  başarısızlığı `not_an_orphan_record` ile reddedilir; "silinemiyor" hatası
+  sessizce "kaydı at" işlemine dönüşemez.
+- Kaldırma dosya sistemine **hiç dokunmaz**.
+- Yine sistem sahibine özeldir ve yine proje adının birebir yazılmasını
+  ister — bir projeyi uygulamadan çıkarmak kazara yapılacak bir şey değildir.
+- Denetim kaydı ayrı bir olaydır: `project_deleted` değil
+  `project_record_removed`, ve metadata'sında `files_deleted: false` bulunur.
+  Kaydı okuyan biri dosyaların yok edilip edilmediğini ayırt edebilmelidir.
+
+Klasör yalnızca taşındıysa doğru davranış onu geri getirmektir; pencere bunu
+kayıt kaldırılmadan önce yazıyla söyler.
 
 ### Denetim izi
 
@@ -698,6 +797,56 @@ kodlarını, ters/boş aralıkları, doğruluk-hata çelişkilerini ve manifest-
 uzunluğu uyuşmazlıklarını yakalar. Fingerprint hata sınıflarına ve aralık
 sınırlarına duyarlıdır: bir aralığı eklemek, silmek, taşımak veya yeniden
 sınıflandırmak sürüm parmak izini değiştirir.
+
+##### Node kanıtı: eklem hedefleri ve maskeler
+
+Her hata aralığı, etkilenen eklem bilgisini de taşır:
+
+```jsonc
+{
+  "error_code": "diz-ice-cokuyor",
+  "affected_roles": ["pelvis", "left_knee"],   // kanonik rol adları
+  "joint_status": "selected",                   // dört durumdan biri
+  "has_node_supervision": true
+}
+```
+
+`.npz` içinde **her zaman** yazılan iki küçük dizi bunu kayıpsız taşır:
+
+- `error_interval_joint_multi_hot` — `uint8 [K, R]`; sütun sırası
+  `label_contract.joint_evidence.roles` ile aynıdır.
+- `error_interval_joint_mask` — `uint8 [K]`; 1 yalnız `selected` aralıklarda.
+  0 olan satır "hiçbir eklem etkilenmedi" **değil**, "bu satır node
+  denetiminde kullanılmaz" demektir.
+- `error_interval_joint_status` — `int8 [K]`; `joint_evidence.status_codes`
+  eşlemesi (`selected`=0, `not_applicable`=1, `indeterminate`=2,
+  `unreviewed`=3), yani dört durum maskede kaybolmaz.
+
+`store_error_target_arrays` açıkken ek olarak yoğun hedefler yazılır:
+
+- `error_joint_target` — `uint8 [T, C, J]`; `J` **native** düğüm sayısıdır,
+  rol sayısı değil. Model kendi topolojisinde çalışır.
+- `error_joint_label_mask` — `uint8 [T, C]`; node kaybı bu maskeyle
+  çarpılmalıdır.
+
+Yoğun diziler yazılmasa bile manifest içindeki `dense_target_recipe` onları
+interval dizilerinden birebir yeniden üretmeye yeter:
+
+> `error_joint_target[t, c, j] = 1` ancak ve ancak `class_index == c` olan,
+> `t` karesini kapsayan ve `error_interval_joint_mask == 1` olan bir aralık,
+> `role_to_native_node` üzerinden `j` düğümüne eşlenen bir rol taşıyorsa.
+
+Manifest'in `label_contract.joint_evidence` bloğu rol listesini,
+`role_to_index` eşlemesini, durum kodlarını, her durumun eğitimdeki anlamını,
+sürümde geçen her iskelet biçimi için `role_to_native_node` tablosunu, eşleme
+kaynağını ve `role_mapping_version` değerini yayınlar; tüketici hiçbir şeyi
+tahmin etmez.
+
+Doğrulama `unknown_joint_status`, `unknown_anatomical_role`,
+`selected_without_roles`, `roles_without_selected_status` ve
+`joint_mask_disagrees_with_status` sorunlarını raporlar. Fingerprint eklem
+durumuna ve rol listesine duyarlıdır: bir aralığın eklemlerini değiştirmek
+sürüm parmak izini değiştirir.
 
 **Export'a ne girer?** Ekranda "hazır" görünen hareketler — ne eksiği ne
 fazlası. Aynı kural (`evaluate_sample`) hem arayüzü hem exportu besler.

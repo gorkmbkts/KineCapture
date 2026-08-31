@@ -66,11 +66,13 @@ from kinecapture.domain.activity import (
     activity_label_mapping,
     evaluate_continuous,
 )
+from kinecapture.domain.enums import JointAnnotationStatus
 from kinecapture.domain.project import MovementSample, evaluate_sample
 from kinecapture.export import continuous as continuous_contract
 from kinecapture.features.base import Availability, SourceField
 from kinecapture.features.compute import FeatureContext, compute_features
 from kinecapture.features.registry import get_feature, order_features
+from kinecapture.features.roles import ALL_ROLES, resolve_roles
 from kinecapture.features.spec import availability_counter, build_feature_spec
 from kinecapture.playback.take_reader import load_skeleton_stream
 from kinecapture.visualization.mapping import JointMapping, find_mapping
@@ -109,6 +111,27 @@ _RELEASE_PATTERN = re.compile(r"^dataset_v(\d{3,})$")
 
 #: Progress callback: ``(completed, total, message)``. Returning False cancels.
 ProgressCallback = Callable[[int, int, str], bool]
+
+
+#: Integer codes for the joint annotation status, written next to every
+#: interval so a loader never has to parse the manifest to read an array.
+#: ``-1`` is deliberately absent from the enum: it can only appear if a future
+#: status reaches an older reader, which should notice rather than guess.
+#: Canonical role -> column, the order every joint array uses.
+_ROLE_INDEX: dict[str, int] = {
+    role: index for index, role in enumerate(ALL_ROLES)
+}
+
+#: The role table's contract version. Bumping it when the role
+#: vocabulary or a mapping changes lets a consumer notice.
+ROLE_MAPPING_VERSION = "anatomical-roles-1.0.0"
+
+_JOINT_STATUS_CODES: dict[str, int] = {
+    JointAnnotationStatus.SELECTED.value: 0,
+    JointAnnotationStatus.NOT_APPLICABLE.value: 1,
+    JointAnnotationStatus.INDETERMINATE.value: 2,
+    JointAnnotationStatus.UNREVIEWED.value: 3,
+}
 
 
 @dataclass
@@ -436,6 +459,10 @@ class ReleaseBuilder:
             feature_id: availability_counter() for feature_id in feature_ids
         }
         source_fields: dict[str, int] = {}
+        #: role -> native node index, per skeleton format written. Published
+        #: in the manifest so a loader can rebuild the dense node target from
+        #: the interval arrays without guessing at any topology.
+        role_nodes_by_format: dict[str, dict[str, Optional[int]]] = {}
         resolved_angles: Optional[list[dict[str, Any]]] = None
 
         for row in selected:
@@ -514,6 +541,13 @@ class ReleaseBuilder:
             tracking_id = self._preferred_tracking_id(stream)
             for field_name in stream.optional_field_names(tracking_id):
                 source_fields[field_name] = source_fields.get(field_name, 0) + 1
+            # The role -> native node map for the skeleton this release is
+            # written in. Resolved once per take, from the single authority in
+            # features.roles, so the dense node target below and the mapping
+            # published in the manifest can never disagree.
+            role_to_node = resolve_roles(output_spec)
+            role_nodes_by_format[output_spec.name] = role_to_node
+
             for sample in samples:
                 completed += 1
                 # Bounds are stream positions, inclusive. Clamping guards a
@@ -613,10 +647,39 @@ class ReleaseBuilder:
                     dtype=np.int32,
                 ).reshape(-1, 3)
 
+                # Interval-space node evidence. Always written: it is the
+                # lossless form, it is tiny, and every dense target below can be
+                # rebuilt from it plus the role mapping in the manifest.
+                payload["error_interval_joint_multi_hot"] = (
+                    self._interval_joint_multi_hot(intervals)
+                )
+                payload["error_interval_joint_mask"] = self._interval_joint_mask(
+                    intervals
+                )
+                payload["error_interval_joint_status"] = np.asarray(
+                    [
+                        _JOINT_STATUS_CODES.get(i["joint_status"], -1)
+                        for i in intervals
+                    ],
+                    dtype=np.int8,
+                )
+
                 if self.options.store_error_target_arrays:
                     payload["error_multi_hot"] = self._error_multi_hot(
                         intervals, frames=int(joints.shape[0]), classes=len(error_classes)
                     )
+                    # Dense node evidence, in the shape a graph-temporal model
+                    # consumes directly: which native skeleton node the error is
+                    # about, at which frame, for which class.
+                    target, mask = self._error_joint_target(
+                        intervals,
+                        frames=int(joints.shape[0]),
+                        classes=len(error_classes),
+                        nodes=int(joints.shape[1]),
+                        role_to_node=role_to_node,
+                    )
+                    payload["error_joint_target"] = target
+                    payload["error_joint_label_mask"] = mask
 
                 with open(long_path(sample_path), "wb") as handle:
                     np.savez_compressed(handle, **payload)
@@ -721,6 +784,7 @@ class ReleaseBuilder:
             availability=availability,
             source_fields=source_fields,
             resolved_angles=resolved_angles,
+            role_nodes_by_format=role_nodes_by_format,
             continuous_entries=continuous_entries,
         )
 
@@ -1160,9 +1224,94 @@ class ReleaseBuilder:
                     ),
                     "source": interval.source.value,
                     "note": interval.note,
+                    # Node-level evidence: which canonical anatomical roles the
+                    # annotator says this error is about, and why the list looks
+                    # the way it does. Roles rather than indices, so a dataset
+                    # mixing BODY_18 and BODY_34 keeps one target space.
+                    "affected_roles": list(interval.affected_roles),
+                    "joint_status": interval.joint_status.value,
+                    "has_node_supervision": bool(interval.has_node_supervision),
                 }
             )
         return resolved, dropped
+
+    @staticmethod
+    def _interval_joint_multi_hot(
+        intervals: Sequence[dict[str, Any]],
+    ) -> np.ndarray:
+        """``uint8 [K, R]`` - which canonical role each interval points at.
+
+        ``R`` is the fixed length of :data:`ALL_ROLES`, and its order is the
+        column order, so this array means the same thing in every release
+        regardless of which skeleton the take used.
+        """
+        target = np.zeros((len(intervals), len(ALL_ROLES)), dtype=np.uint8)
+        index = {role: column for column, role in enumerate(ALL_ROLES)}
+        for row, interval in enumerate(intervals):
+            for role in interval.get("affected_roles") or ():
+                column = index.get(role)
+                if column is not None:
+                    target[row, column] = 1
+        return target
+
+    @staticmethod
+    def _interval_joint_mask(intervals: Sequence[dict[str, Any]]) -> np.ndarray:
+        """``uint8 [K]`` - where the row above is supervision rather than silence.
+
+        Zero for ``unreviewed``, ``not_applicable`` and ``indeterminate``. Only
+        an explicit selection is positive evidence; the other three say
+        different things, and none of them says "no joint is affected by this
+        error", which is what a zero row would mean if the mask were on.
+        """
+        return np.asarray(
+            [1 if interval.get("has_node_supervision") else 0 for interval in intervals],
+            dtype=np.uint8,
+        )
+
+    @staticmethod
+    def _error_joint_target(
+        intervals: Sequence[dict[str, Any]],
+        *,
+        frames: int,
+        classes: int,
+        nodes: int,
+        role_to_node: Mapping[str, Optional[int]],
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """``uint8 [T, C, J]`` node evidence and ``uint8 [T, C]`` its mask.
+
+        The target is 1 at ``(frame, class, node)`` when a supervised interval
+        of that class covers that frame and names a role mapping to that node.
+        The mask is 1 at ``(frame, class)`` only where such an interval exists,
+        which is what keeps an unreviewed interval from teaching the model that
+        every node is negative for its class.
+
+        Bounds are inclusive at both ends, matching the interval contract used
+        everywhere else in this file.
+        """
+        target = np.zeros((frames, max(0, classes), max(0, nodes)), dtype=np.uint8)
+        mask = np.zeros((frames, max(0, classes)), dtype=np.uint8)
+        for interval in intervals:
+            if not interval.get("has_node_supervision"):
+                continue
+            column = int(interval["class_index"])
+            if not 0 <= column < classes:
+                continue
+            low = int(interval["relative_start"])
+            high = int(interval["relative_end"]) + 1
+            nodes_hit = [
+                role_to_node.get(role)
+                for role in interval.get("affected_roles") or ()
+            ]
+            nodes_hit = [n for n in nodes_hit if n is not None and 0 <= n < nodes]
+            if not nodes_hit:
+                # A supervised interval whose roles this skeleton cannot express
+                # is not evidence about any node here, so it is left masked out
+                # rather than recorded as an all-zero truth.
+                continue
+            mask[low:high, column] = 1
+            for node in nodes_hit:
+                target[low:high, column, node] = 1
+        return target, mask
 
     @staticmethod
     def _error_multi_hot(
@@ -1203,6 +1352,7 @@ class ReleaseBuilder:
         availability: Mapping[str, Mapping[str, int]],
         source_fields: Mapping[str, int],
         resolved_angles: Optional[Sequence[Mapping[str, Any]]],
+        role_nodes_by_format: Mapping[str, Mapping[str, Any]],
         continuous_entries: Sequence[Mapping[str, Any]] = (),
     ) -> ExportResult:
         project = self.workspace.project
@@ -1322,6 +1472,20 @@ class ReleaseBuilder:
                             "int32 [K, 3] = (class_index, relative_start, "
                             "relative_end), her iki uç dahil."
                         ),
+                        "error_interval_joint_multi_hot": (
+                            "uint8 [K, R]; sütun sırası joint_evidence.roles "
+                            "ile aynıdır. Bir aralığın etkilenen anatomik "
+                            "rolleri."
+                        ),
+                        "error_interval_joint_mask": (
+                            "uint8 [K]; 1 yalnız açık rol seçimi olan "
+                            "aralıklarda. 0 olan satır 'hiçbir eklem etkilenmedi' "
+                            "DEĞİL, 'bu satır node denetiminde kullanılmaz' "
+                            "anlamına gelir."
+                        ),
+                        "error_interval_joint_status": (
+                            "int8 [K]; joint_evidence.status_codes eşlemesi."
+                        ),
                         "error_multi_hot": (
                             "uint8 [T, C]; sütun sırası "
                             "label_mapping.error_types.code_to_index ile aynıdır. "
@@ -1329,6 +1493,76 @@ class ReleaseBuilder:
                         )
                         if self.options.store_error_target_arrays
                         else "yazılmadı (store_error_target_arrays=False)",
+                        "error_joint_target": (
+                            "uint8 [T, C, J]; (kare, hata sınıfı, native "
+                            "skeleton düğümü) için node kanıtı. Yalnız "
+                            "error_joint_label_mask 1 olduğunda anlamlıdır."
+                        )
+                        if self.options.store_error_target_arrays
+                        else "yazılmadı (store_error_target_arrays=False)",
+                        "error_joint_label_mask": (
+                            "uint8 [T, C]; 1 yalnız o kare/sınıf için açık rol "
+                            "seçimi bulunan bir aralık varsa. Node kaybı bu "
+                            "maske ile çarpılmalıdır."
+                        )
+                        if self.options.store_error_target_arrays
+                        else "yazılmadı (store_error_target_arrays=False)",
+                    },
+                    "joint_evidence": {
+                        "purpose": (
+                            "Gelecekteki graph-temporal hata modeli için "
+                            "node-level evidence/relevance denetimi. Bu bir "
+                            "eklem sınıflandırıcısı ÜRÜNÜ DEĞİLDİR ve modelin "
+                            "girdisinden hiçbir düğüm çıkarılmaz: joints_xyz "
+                            "bütün native topolojiyi taşımaya devam eder."
+                        ),
+                        "roles": list(ALL_ROLES),
+                        "role_to_index": {
+                            role: index for index, role in enumerate(ALL_ROLES)
+                        },
+                        "status_codes": dict(_JOINT_STATUS_CODES),
+                        "status_meaning": {
+                            "selected": (
+                                "Bir veya daha fazla anatomik rol seçildi. "
+                                "Node denetiminde POZİTİF kanıt."
+                            ),
+                            "not_applicable": (
+                                "İncelendi; bu hatanın belirli bir eklem hedefi "
+                                "yok. Node denetiminde MASKELENİR."
+                            ),
+                            "indeterminate": (
+                                "İncelendi; görüntüden güvenilir belirlenemiyor. "
+                                "Node denetiminde MASKELENİR."
+                            ),
+                            "unreviewed": (
+                                "Eklem yönünden hiç incelenmedi (eski veri "
+                                "dahil). Node denetiminde MASKELENİR; temporal "
+                                "hata sınıfı eğitimi bundan ETKİLENMEZ."
+                            ),
+                        },
+                        "role_to_native_node": {
+                            fmt: {
+                                role: (None if node is None else int(node))
+                                for role, node in sorted(table.items())
+                            }
+                            for fmt, table in sorted(role_nodes_by_format.items())
+                        },
+                        "role_mapping_source": (
+                            "kinecapture.features.roles - anatomik rol "
+                            "eşlemesinin tek otoritesi; feature katmanı da aynı "
+                            "tabloyu kullanır."
+                        ),
+                        "role_mapping_version": ROLE_MAPPING_VERSION,
+                        "dense_target_recipe": (
+                            "error_joint_target[t, c, j] = 1 ancak ve ancak "
+                            "class_index == c olan, t karesini kapsayan ve "
+                            "error_interval_joint_mask == 1 olan bir aralık, "
+                            "role_to_native_node üzerinden j düğümüne eşlenen "
+                            "bir rol taşıyorsa. error_joint_label_mask[t, c] "
+                            "böyle bir aralık varsa 1'dir. Diziler yazılmadıysa "
+                            "bu tarif interval dizilerinden birebir yeniden "
+                            "üretilebilir."
+                        ),
                     },
                     "error_classes": list(error_classes),
                     "movement_phase": (
@@ -1436,6 +1670,11 @@ class ReleaseBuilder:
                     interval["error_code"],
                     interval["relative_start"],
                     interval["relative_end"],
+                    # Node evidence is part of a sample's identity: changing
+                    # which joints an error is about must invalidate a cached
+                    # release, exactly as moving the interval does.
+                    interval.get("joint_status"),
+                    list(interval.get("affected_roles") or ()),
                 ]
                 for interval in entry["error_intervals"]
             ],
@@ -1635,6 +1874,56 @@ class ReleaseBuilder:
                         "issue": "error_interval_without_class",
                     }
                 )
+            # --- node evidence -------------------------------------------
+            for interval in entry["error_intervals"]:
+                status = interval.get("joint_status")
+                roles = list(interval.get("affected_roles") or ())
+                if status not in _JOINT_STATUS_CODES:
+                    errors.append(
+                        {
+                            "sample_id": entry["sample_id"],
+                            "interval_id": interval.get("interval_id"),
+                            "issue": "unknown_joint_status",
+                            "actual": status,
+                        }
+                    )
+                unknown = [role for role in roles if role not in _ROLE_INDEX]
+                if unknown:
+                    errors.append(
+                        {
+                            "sample_id": entry["sample_id"],
+                            "interval_id": interval.get("interval_id"),
+                            "issue": "unknown_anatomical_role",
+                            "actual": unknown,
+                        }
+                    )
+                selected = status == JointAnnotationStatus.SELECTED.value
+                if selected and not roles:
+                    errors.append(
+                        {
+                            "sample_id": entry["sample_id"],
+                            "interval_id": interval.get("interval_id"),
+                            "issue": "selected_without_roles",
+                        }
+                    )
+                if roles and not selected:
+                    errors.append(
+                        {
+                            "sample_id": entry["sample_id"],
+                            "interval_id": interval.get("interval_id"),
+                            "issue": "roles_without_selected_status",
+                        }
+                    )
+                if bool(interval.get("has_node_supervision")) != bool(
+                    selected and roles
+                ):
+                    errors.append(
+                        {
+                            "sample_id": entry["sample_id"],
+                            "interval_id": interval.get("interval_id"),
+                            "issue": "joint_mask_disagrees_with_status",
+                        }
+                    )
             if correctness not in ("correct", "incorrect"):
                 errors.append(
                     {

@@ -314,6 +314,22 @@ QPushButton[role="nav"]:checked {{
     border-color: {t.border_strong};
 }}
 
+/* The collapse control is not a list item. The page buttons above it are a
+   left-aligned column, but this one sits alone under the institutional logo,
+   where left-aligned content reads as a misalignment rather than as a list. */
+QPushButton[role="navToggle"] {{
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: {t.radius_md}px;
+    padding: {t.space_sm}px {t.space_sm}px;
+    text-align: center;
+    color: {t.text_secondary};
+}}
+QPushButton[role="navToggle"]:hover {{
+    background-color: {t.bg_hover};
+    color: {t.text_primary};
+}}
+
 /* --------------------------------------------------------------- input */
 QLineEdit, QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
     background-color: {t.bg_sunken};

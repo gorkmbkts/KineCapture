@@ -400,6 +400,60 @@ class ProjectDeletionService:
             dataset_root=self.dataset_root,
         )
 
+    # ---------------------------------------------------- orphaned record
+    def forget_orphan(self, actor, project_id: str) -> DeletionResult:
+        """Remove the *record* of a project whose folder is genuinely gone.
+
+        A separate operation from :meth:`delete`, and deliberately narrow. It
+        exists because a project whose directory was moved or removed outside
+        the application could not be got rid of at all: the delete flow refuses
+        - correctly - to touch a target it cannot verify, so the stale row sat
+        in the list forever.
+
+        This never touches the filesystem. It is only reachable when the
+        preflight says the recorded path is *missing*; every other refusal
+        (unreadable manifest, mismatched id, symlink, permission error) means
+        something is there and this application does not understand it, which
+        is exactly when guessing would be dangerous.
+        """
+        record = self.identity.authorize_project_deletion(actor, project_id)
+        report = inspect_target(
+            recorded_path=Path(record.path),
+            project_id=project_id,
+            dataset_root=self.dataset_root,
+        )
+        if report.code != "delete_target_missing":
+            raise ValidationError(
+                "Bu kayıt yetim değil: kayıtlı klasör diskte duruyor. "
+                "Kalıcı silme akışını kullanın."
+                if report.ok
+                else (
+                    "Kayıtlı hedef doğrulanamadı, fakat 'bulunamadı' da değil: "
+                    f"{report.reason} Yetim kayıt kaldırma bu durumda "
+                    "kullanılamaz."
+                ),
+                code="not_an_orphan_record",
+            )
+
+        self.identity.forget_project(
+            actor, project_id, path=str(record.path), orphaned=True
+        )
+        logger.info(
+            "Yetim proje kaydı kaldırıldı: %s (%s) - klasör bulunamadı: %s",
+            record.name,
+            project_id,
+            record.path,
+        )
+        return DeletionResult(
+            project_id=project_id,
+            project_name=record.name or project_id,
+            path=Path(record.path),
+            freed_bytes=0,
+            database_cleared=True,
+            # Nothing was on disk to remove, which is the whole premise.
+            files_removed=True,
+        )
+
     # --------------------------------------------------------------- delete
     def delete(
         self,

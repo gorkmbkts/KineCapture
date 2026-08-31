@@ -185,6 +185,58 @@ class Correctness(str, Enum):
         return cls.UNLABELLED
 
 
+class JointAnnotationStatus(str, Enum):
+    """Why an error interval's affected-joint list looks the way it does.
+
+    An empty list on its own is ambiguous, and the ambiguity is expensive: a
+    model trained on it cannot tell "the annotator looked and there is no
+    single joint to blame" from "nobody has been asked yet". The first is
+    usable supervision, the second must be masked out of the loss. So the
+    reason is recorded explicitly rather than inferred from a length.
+    """
+
+    #: One or more canonical anatomical roles were chosen.
+    SELECTED = "selected"
+    #: Looked at, and this error has no specific joint target.
+    NOT_APPLICABLE = "not_applicable"
+    #: Looked at, and the footage does not support a reliable answer.
+    INDETERMINATE = "indeterminate"
+    #: Nobody has reviewed this interval for joints yet - the default, and what
+    #: every interval written before this field existed becomes.
+    UNREVIEWED = "unreviewed"
+
+    @property
+    def is_reviewed(self) -> bool:
+        """Whether a human has actually answered the question."""
+        return self is not JointAnnotationStatus.UNREVIEWED
+
+    @property
+    def supervises_nodes(self) -> bool:
+        """Whether this interval may contribute to a node-evidence loss.
+
+        Only an explicit selection is positive evidence. ``not_applicable`` and
+        ``indeterminate`` are honest answers but they are not node targets, and
+        treating them as "no joint is affected" would teach the model that
+        every node is negative for that error.
+        """
+        return self is JointAnnotationStatus.SELECTED
+
+    @classmethod
+    def parse(cls, value: object) -> "JointAnnotationStatus":
+        """Accept a member, its value, or anything unrecognised as unreviewed.
+
+        ``str()`` on a ``str``-Enum member yields ``"JointAnnotationStatus.X"``
+        rather than its value, so members are matched before any text is.
+        """
+        if isinstance(value, cls):
+            return value
+        text = str(value or "").strip().lower()
+        for member in cls:
+            if member.value == text:
+                return member
+        return cls.UNREVIEWED
+
+
 class SampleReadiness(str, Enum):
     """Why a movement sample is, or is not, ready to be exported.
 
@@ -247,6 +299,7 @@ __all__ = [
     "Correctness",
     "DataOrigin",
     "HealthLevel",
+    "JointAnnotationStatus",
     "SampleReadiness",
     "SegmentSource",
     "SegmentStatus",

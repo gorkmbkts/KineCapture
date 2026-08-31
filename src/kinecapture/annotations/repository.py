@@ -44,6 +44,7 @@ from kinecapture.core.ids import utc_now_iso
 from kinecapture.core.logging import get_logger
 from kinecapture.dataset.workspace import ProjectWorkspace
 from kinecapture.domain.enums import (
+    JointAnnotationStatus,
     SampleReadiness,
     SegmentSource,
     SegmentStatus,
@@ -59,6 +60,8 @@ from kinecapture.domain.activity import (
     unlabelled_gaps,
 )
 from kinecapture.domain.labels import LabelOption
+from kinecapture.features.roles import missing_roles
+from kinecapture.visualization.skeleton_spec import SkeletonSpec
 from kinecapture.domain.project import (
     ErrorInterval,
     MovementSample,
@@ -1037,6 +1040,102 @@ class AnnotationRepository:
         interval.touch()
         self._changed()
         return interval
+
+    def update_error_interval(
+        self,
+        sample_id: str,
+        interval_id: str,
+        *,
+        error_code: Optional[str] = None,
+        note: Optional[str] = None,
+        joint_status: Optional[object] = None,
+        affected_roles: Optional[Sequence[str]] = None,
+        skeleton_spec: Optional[SkeletonSpec] = None,
+    ) -> ErrorInterval:
+        """Apply everything one Save decided, as one repository operation.
+
+        The error dialog now settles the class, the joint status, the affected
+        roles and the note together. Writing them through separate setters
+        produced a snapshot and an autosave each, so a single user action
+        became three undo steps and could be interrupted half applied - the
+        interval briefly carrying a new class with the old joints.
+
+        Validation happens before anything is mutated, so a rejected edit
+        leaves the interval exactly as it was.
+
+        ``skeleton_spec``, when given, is the topology of the take being
+        edited: roles it cannot resolve are refused rather than stored as a
+        target that no exported array could ever point at.
+        """
+        sample = self._require(sample_id)
+        interval = self._require_interval(sample, interval_id)
+
+        # --- validate against a copy first --------------------------------
+        pending_roles: Optional[tuple[str, ...]] = None
+        pending_status = None
+        if joint_status is not None or affected_roles is not None:
+            candidate = copy.deepcopy(interval)
+            candidate.set_affected_joints(
+                joint_status
+                if joint_status is not None
+                else candidate.joint_status,
+                affected_roles if affected_roles is not None else candidate.affected_roles,
+            )
+            if skeleton_spec is not None and candidate.affected_roles:
+                unavailable = missing_roles(skeleton_spec, candidate.affected_roles)
+                if unavailable:
+                    raise ValidationError(
+                        "Bu kaydın iskelet biçimi ("
+                        f"{skeleton_spec.name}) şu eklemleri içermiyor: "
+                        + ", ".join(unavailable),
+                        field="affected_roles",
+                        code="role_not_in_skeleton",
+                    )
+            pending_roles = candidate.affected_roles
+            pending_status = candidate.joint_status
+
+        changes = (
+            (error_code is not None and error_code != interval.error_code)
+            or (note is not None and note != interval.note)
+            or (
+                pending_status is not None
+                and (
+                    pending_status is not interval.joint_status
+                    or pending_roles != interval.affected_roles
+                )
+            )
+        )
+        if not changes:
+            return interval
+
+        self._snapshot()
+        if error_code is not None:
+            interval.error_code = error_code
+        if note is not None:
+            interval.note = note
+        if pending_status is not None:
+            interval.joint_status = pending_status
+            interval.affected_roles = pending_roles or ()
+        interval.touch()
+        sample.touch()
+        self._changed()
+        return interval
+
+    def joint_annotation_counts(self) -> dict[str, int]:
+        """How many error intervals are in each joint annotation state.
+
+        Deliberately separate from label readiness: a take can be perfectly
+        ready for temporal error training while none of its intervals has been
+        reviewed for joints. Mixing the two would either block usable data or
+        hide a gap in the node supervision.
+        """
+        counts = {status.value: 0 for status in JointAnnotationStatus}
+        for sample in self._samples:
+            if not sample.is_active:
+                continue
+            for interval in sample.error_intervals:
+                counts[interval.joint_status.value] += 1
+        return counts
 
     def delete_error_interval(self, sample_id: str, interval_id: str) -> None:
         sample = self._require(sample_id)

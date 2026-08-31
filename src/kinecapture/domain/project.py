@@ -43,6 +43,7 @@ from kinecapture.domain.enums import (
     ConsentStatus,
     Correctness,
     DataOrigin,
+    JointAnnotationStatus,
     SampleReadiness,
     SegmentSource,
     SegmentStatus,
@@ -50,6 +51,7 @@ from kinecapture.domain.enums import (
     TakeState,
 )
 from kinecapture.domain.models import CameraInfo
+from kinecapture.features.roles import ALL_ROLES
 
 
 def _enum(value: Any, enum_cls: type, default: Any) -> Any:
@@ -647,6 +649,65 @@ class Take:
 # ``frame_indices`` and ``camera_timestamps_ns`` arrays.
 
 
+#: Canonical anatomical roles an error interval may point at. Imported from the
+#: one module that owns the role-to-skeleton mapping, so the annotation
+#: vocabulary and the feature layer can never drift apart.
+_ROLE_ORDER: dict[str, int] = {role: index for index, role in enumerate(ALL_ROLES)}
+
+
+def normalise_roles(roles: Any) -> tuple[str, ...]:
+    """Deduplicate and order a role selection; reject anything unknown.
+
+    Order is :data:`ALL_ROLES` order rather than click order, so two annotators
+    who pick the same joints in different sequences produce byte-identical
+    files - which is what makes an export fingerprint mean anything.
+    """
+    if roles is None:
+        return ()
+    if isinstance(roles, str):
+        roles = [roles]
+    seen: set[str] = set()
+    for role in roles:
+        text = str(role).strip()
+        if not text:
+            continue
+        if text not in _ROLE_ORDER:
+            raise ValidationError(
+                f"'{text}' tanımlı bir anatomik rol değil.",
+                field="affected_roles",
+                code="unknown_anatomical_role",
+            )
+        seen.add(text)
+    return tuple(sorted(seen, key=_ROLE_ORDER.__getitem__))
+
+
+def _migrate_legacy_joints(
+    value: Any,
+) -> tuple[tuple[str, ...], "JointAnnotationStatus"]:
+    """Turn a pre-role ``affected_joints`` list into roles, or give up cleanly.
+
+    Deliberately strict: every entry must land on a canonical role after only
+    case and separator normalisation. One unrecognised entry and the whole list
+    is left alone, because a partial migration would look like a complete
+    annotation while quietly having dropped a joint the annotator chose.
+    """
+    if not value:
+        return (), JointAnnotationStatus.UNREVIEWED
+    entries = [value] if isinstance(value, str) else list(value)
+    lookup = {role.replace("_", ""): role for role in ALL_ROLES}
+    resolved: list[str] = []
+    for entry in entries:
+        key = str(entry).strip().lower().replace(" ", "").replace("-", "")
+        key = key.replace("_", "")
+        role = lookup.get(key)
+        if role is None:
+            return (), JointAnnotationStatus.UNREVIEWED
+        resolved.append(role)
+    if not resolved:
+        return (), JointAnnotationStatus.UNREVIEWED
+    return normalise_roles(resolved), JointAnnotationStatus.SELECTED
+
+
 @dataclass
 class ErrorInterval:
     """A sub-range of one movement sample where a specific error is visible.
@@ -659,6 +720,19 @@ class ErrorInterval:
 
     ``error_code`` refers to the project's label schema. Nothing here invents an
     error vocabulary.
+
+    **Affected joints** are recorded as canonical anatomical roles, never as
+    joint indices or format-specific tracker names. ``left_knee`` means the same
+    thing whether the take was captured as BODY_18, BODY_34 or BODY_38, so a
+    dataset mixing formats keeps one target space; an index would silently mean
+    a different body part in each. The role-to-node mapping lives in
+    :mod:`kinecapture.features.roles`, which is the single authority for it.
+
+    This is not a joint classifier. It is node-level evidence for a future
+    graph-temporal error model: which skeleton nodes the human says this error
+    is about, so the model's node relevance can be supervised instead of being
+    read off attention weights nobody validated. Every other node stays in the
+    input - none of this removes joints from the exported arrays.
     """
 
     interval_id: str
@@ -668,6 +742,10 @@ class ErrorInterval:
     start_timestamp_ns: Optional[int] = None
     end_timestamp_ns: Optional[int] = None
     note: str = ""
+    #: Canonical anatomical roles this error is about, in ``ALL_ROLES`` order.
+    affected_roles: tuple[str, ...] = ()
+    #: Why :attr:`affected_roles` looks the way it does. See the enum.
+    joint_status: JointAnnotationStatus = JointAnnotationStatus.UNREVIEWED
     source: SegmentSource = SegmentSource.MANUAL
     created_at: str = field(default_factory=utc_now_iso)
     updated_at: str = field(default_factory=utc_now_iso)
@@ -679,6 +757,8 @@ class ErrorInterval:
         self.source = _enum(self.source, SegmentSource, SegmentSource.MANUAL)
         self.start_frame = int(self.start_frame)
         self.end_frame = int(self.end_frame)
+        self.joint_status = JointAnnotationStatus.parse(self.joint_status)
+        self.affected_roles = normalise_roles(self.affected_roles)
 
     @classmethod
     def create(
@@ -702,6 +782,41 @@ class ErrorInterval:
         """Ordered, non-empty and carrying an error class."""
         return bool(self.error_code) and self.end_frame >= self.start_frame
 
+    # ------------------------------------------------------ affected joints
+    @property
+    def has_node_supervision(self) -> bool:
+        """Whether this interval can supervise a node-evidence head."""
+        return self.joint_status.supervises_nodes and bool(self.affected_roles)
+
+    def set_affected_joints(
+        self,
+        status: "JointAnnotationStatus | str",
+        roles: Sequence[str] = (),
+    ) -> None:
+        """Set the joint annotation as one consistent pair.
+
+        Status and roles are two halves of one statement, so they are set
+        together and validated together. Setting them separately would allow a
+        moment where the interval claims a selection with nothing selected.
+        """
+        resolved = JointAnnotationStatus.parse(status)
+        normalised = normalise_roles(roles)
+        if resolved is JointAnnotationStatus.SELECTED and not normalised:
+            raise ValidationError(
+                "Etkilenen eklem seçildi olarak işaretlendi fakat hiçbir eklem "
+                "seçilmemiş.",
+                field="affected_roles",
+                code="joint_status_without_roles",
+            )
+        if resolved is not JointAnnotationStatus.SELECTED and normalised:
+            raise ValidationError(
+                "Eklem seçimi yalnız 'seçildi' durumunda saklanabilir.",
+                field="affected_roles",
+                code="roles_without_selected_status",
+            )
+        self.joint_status = resolved
+        self.affected_roles = normalised
+
     def overlaps(self, other: "ErrorInterval") -> bool:
         return not (
             self.end_frame < other.start_frame or other.end_frame < self.start_frame
@@ -719,6 +834,8 @@ class ErrorInterval:
             "start_timestamp_ns": self.start_timestamp_ns,
             "end_timestamp_ns": self.end_timestamp_ns,
             "note": self.note,
+            "affected_roles": list(self.affected_roles),
+            "joint_status": self.joint_status.value,
             "source": self.source.value,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -743,6 +860,28 @@ class ErrorInterval:
             if data.get(dropped):
                 legacy.setdefault(dropped, data[dropped])
 
+        # Affected joints. A file written since this field exists says so
+        # directly; an older one may carry a free-form ``affected_joints`` list,
+        # which is migrated *only* when every entry maps unambiguously onto a
+        # canonical role. Anything else stays ``unreviewed`` rather than being
+        # guessed at, and the original list is kept under ``legacy`` either way.
+        roles = data.get("affected_roles")
+        status = data.get("joint_status")
+        if roles is None and status is None:
+            roles, status = _migrate_legacy_joints(legacy.get("affected_joints"))
+        try:
+            roles = normalise_roles(roles or ())
+        except ValidationError:
+            # An unreadable role list is data, not a crash: keep it in legacy
+            # and leave the interval unreviewed.
+            legacy.setdefault("unparsed_affected_roles", roles)
+            roles, status = (), JointAnnotationStatus.UNREVIEWED
+        status = JointAnnotationStatus.parse(status)
+        if roles and status is not JointAnnotationStatus.SELECTED:
+            status = JointAnnotationStatus.SELECTED
+        if status is JointAnnotationStatus.SELECTED and not roles:
+            status = JointAnnotationStatus.UNREVIEWED
+
         start = int(data.get("start_frame", 0))
         end = int(data.get("end_frame", start))
         if end < start:
@@ -757,6 +896,8 @@ class ErrorInterval:
             start_timestamp_ns=data.get("start_timestamp_ns"),
             end_timestamp_ns=data.get("end_timestamp_ns"),
             note=str(data.get("note", "")),
+            affected_roles=roles,
+            joint_status=status,
             source=_enum(data.get("source"), SegmentSource, SegmentSource.MANUAL),
             created_at=str(data.get("created_at") or utc_now_iso()),
             updated_at=str(data.get("updated_at") or utc_now_iso()),

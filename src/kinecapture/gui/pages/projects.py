@@ -359,6 +359,45 @@ class ProjectsPage(Page):
             None,
         )
 
+    def _forget_orphan_record(self, record) -> None:  # type: ignore[no-untyped-def]
+        """Remove the record of a project whose folder is no longer there.
+
+        Worded so the difference from a real deletion cannot be missed: this
+        one destroys nothing, because there is nothing left to destroy. It is
+        still owner-only and still typed-confirmation, because removing a
+        project from the application is not something to do by accident.
+        """
+        def work(progress):  # type: ignore[no-untyped-def]
+            progress("Kayıt kaldırılıyor…")
+            return self.state.deletion.forget_orphan(
+                self.state.current_user, record.project_id
+            )
+
+        dialog = DeleteProjectDialog(
+            self.theme,
+            project_name=record.name,
+            project_id=record.project_id,
+            project_path=Path(record.path),
+            work=work,
+            orphan=True,
+            parent=self,
+        )
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        if not accepted:
+            if dialog.error is not None:
+                QMessageBox.critical(
+                    self, "Kayıt kaldırılamadı", str(dialog.error)
+                )
+            self._reload()
+            return
+        self.state.finish_project_deletion(record.project_id)
+        self._reload()
+        self.state.notify(
+            f"'{record.name}' kaydı listeden kaldırıldı. Klasör zaten "
+            "bulunamadığı için hiçbir dosya silinmedi.",
+            8000,
+        )
+
     def _delete_selected(self) -> None:
         """Permanently delete the selected project, after a typed confirmation."""
         record = self._selected_record()
@@ -372,6 +411,13 @@ class ProjectsPage(Page):
             report = self.state.deletion.preflight(self.state.current_user, record.project_id)
         except KineCaptureError as exc:
             self.state.report_error(exc)
+            return
+        if report.code == "delete_target_missing":
+            # The folder is genuinely gone, so there is nothing to delete - but
+            # the record is still in the list and could not be got rid of at
+            # all. That is a different operation with a different promise, and
+            # it gets its own dialog rather than a quietly widened "delete".
+            self._forget_orphan_record(record)
             return
         if not report.ok:
             QMessageBox.warning(

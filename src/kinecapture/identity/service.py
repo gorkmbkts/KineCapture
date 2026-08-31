@@ -587,7 +587,7 @@ class IdentityService:
         return record
 
     def forget_project(
-        self, actor: User, project_id: str, *, path: str = ""
+        self, actor: User, project_id: str, *, path: str = "", orphaned: bool = False
     ) -> None:
         """Remove a project from the database, keeping the audit trail.
 
@@ -627,15 +627,24 @@ class IdentityService:
             connection.execute(
                 "DELETE FROM projects WHERE project_id=?", (project_id,)
             )
+            # Two different events on purpose. "The files were destroyed" and
+            # "a record pointing at a folder that no longer existed was
+            # removed" are not the same thing to whoever reads this later.
             self.repository.audit(
                 connection,
-                "project_deleted",
+                "project_record_removed" if orphaned else "project_deleted",
                 now,
                 actor_user_id=actor.user_id,
                 metadata={
                     "project_id": project_id,
                     "project_name": record.name,
                     "project_path": path or record.path,
+                    "reason": (
+                        "disk hedefi bulunamadı; yalnız uygulama kaydı kaldırıldı"
+                        if orphaned
+                        else "proje klasörü kalıcı olarak silindi"
+                    ),
+                    "files_deleted": not orphaned,
                 },
             )
         logger.info("Proje kalıcı olarak silindi: %s (%s)", record.name, project_id)

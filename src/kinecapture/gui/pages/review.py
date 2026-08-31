@@ -75,6 +75,7 @@ from kinecapture.gui.widgets.common import (
 )
 from kinecapture.gui.widgets.flow_layout import flow_row
 from kinecapture.gui.widgets.info_window import InfoWindow
+from kinecapture.gui.widgets.joint_picker import describe_joint_annotation
 from kinecapture.gui.widgets.label_dialogs import ErrorLabelDialog, MovementLabelDialog
 from kinecapture.gui.widgets.scene_view import SceneMode, SceneView
 from kinecapture.gui.widgets.skeleton_view import VIEW_PRESETS
@@ -1140,7 +1141,8 @@ class ReviewPage(Page):
                     else "— tür seçilmedi"
                 )
                 parts.append(
-                    f"Hata aralığı {interval.start_frame}-{interval.end_frame}: {name}"
+                    f"Hata aralığı {interval.start_frame}-{interval.end_frame}: "
+                    f"{name} · {describe_joint_annotation(interval)}"
                 )
             problems = self._repo.problems(sample)
             if problems:
@@ -1264,8 +1266,17 @@ class ReviewPage(Page):
             return
         self._pause()
         dialog = ErrorLabelDialog(
-            self.theme, interval, self.state.label_schema, parent=self
+            self.theme,
+            interval,
+            self.state.label_schema,
+            # The joints on offer come from the take being edited, not from
+            # whatever the camera happens to be configured for right now.
+            skeleton_spec=self._loaded.spec if self._loaded else None,
+            parent=self,
         )
+        # Playing loops the interval behind the dialog; it no longer closes it,
+        # so watching the movement again cannot commit a half-made decision.
+        dialog.play_requested_now.connect(self._loop_interval)
         accepted = self._run_dialog(dialog)
         created = self._create_requested_classes(dialog.requested_classes)
         if not accepted:
@@ -1284,18 +1295,20 @@ class ReviewPage(Page):
                 return
             code = option
         try:
-            if code:
-                self._repo.set_error_interval_class(
-                    sample.sample_id, interval.interval_id, code
-                )
-            self._repo.set_error_interval_note(
-                sample.sample_id, interval.interval_id, dialog.note
+            # One call, one snapshot, one autosave. Class, joints and note were
+            # decided together and are written together.
+            self._repo.update_error_interval(
+                sample.sample_id,
+                interval.interval_id,
+                error_code=code or None,
+                note=dialog.note,
+                joint_status=dialog.joint_status,
+                affected_roles=dialog.affected_roles,
+                skeleton_spec=self._loaded.spec if self._loaded else None,
             )
         except KineCaptureError as exc:
             self.state.report_error(exc)
             return
-        if dialog.play_requested:
-            self._loop_interval()
 
     def _create_requested_classes(self, names: list[str]) -> dict[str, str]:
         """Persist every class the user asked for; report name -> code.

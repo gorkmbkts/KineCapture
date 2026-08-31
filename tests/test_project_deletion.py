@@ -8,6 +8,7 @@ temporary directory.
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 from pathlib import Path
@@ -468,3 +469,125 @@ def test_measure_tree_reports_bytes_and_unreadable_entries(tmp_path) -> None:
     empty = tmp_path / "empty"
     empty.mkdir()
     assert measure_tree(empty) == (None, 0)
+
+
+# ------------------------------------------------- orphaned project records
+
+
+def test_an_orphan_record_can_be_removed_without_touching_the_disk(
+    identity, owner, dataset_root, service
+) -> None:
+    """The folder is gone; the row was previously impossible to get rid of."""
+    import shutil as _shutil
+
+    workspace = make_project(identity, owner, dataset_root)
+    project_id = workspace.project.project_id
+    _shutil.rmtree(workspace.root)
+    assert not workspace.root.exists()
+
+    # The normal delete correctly refuses: there is nothing it can verify.
+    assert service.preflight(owner, project_id).code == "delete_target_missing"
+
+    result = service.forget_orphan(owner, project_id)
+
+    assert result.database_cleared
+    assert result.freed_bytes == 0, "nothing was on disk to free"
+    assert identity.repository.get_project(project_id) is None
+    assert project_id not in {p.project_id for p in identity.list_projects(owner)}
+    assert not tombstone_root(dataset_root).exists(), "no filesystem work happened"
+
+
+def test_removing_an_orphan_keeps_a_distinguishable_audit_trail(
+    identity, owner, dataset_root, service
+) -> None:
+    """"Files destroyed" and "stale row removed" must not read the same."""
+    import shutil as _shutil
+
+    workspace = make_project(identity, owner, dataset_root)
+    project_id = workspace.project.project_id
+    name = workspace.project.name
+    path = str(workspace.root)
+    _shutil.rmtree(workspace.root)
+
+    service.forget_orphan(owner, project_id)
+
+    with identity.database.connection() as connection:
+        rows = connection.execute(
+            "SELECT event_type, actor_user_id, metadata_json FROM audit_log"
+        ).fetchall()
+    events = [row["event_type"] for row in rows]
+    assert "project_record_removed" in events
+    assert "project_deleted" not in events, (
+        "an orphan removal must not look like a destruction"
+    )
+    entry = next(r for r in rows if r["event_type"] == "project_record_removed")
+    assert entry["actor_user_id"] == owner.user_id
+    # Parsed rather than substring-matched: a Windows path is JSON-escaped in
+    # the stored text, and the point is what a reader gets back, not the bytes.
+    metadata = json.loads(entry["metadata_json"])
+    assert metadata["project_id"] == project_id
+    assert metadata["project_name"] == name
+    assert metadata["project_path"] == path
+    assert metadata["files_deleted"] is False
+    assert "bulunamadı" in metadata["reason"]
+
+
+def test_a_normal_user_cannot_remove_an_orphan_record(
+    identity, owner, normal_user, dataset_root, service
+) -> None:
+    import shutil as _shutil
+
+    workspace = make_project(identity, normal_user, dataset_root)
+    project_id = workspace.project.project_id
+    _shutil.rmtree(workspace.root)
+
+    with pytest.raises(AuthorizationError):
+        service.forget_orphan(normal_user, project_id)
+    assert identity.repository.get_project(project_id) is not None
+
+
+def test_a_project_that_still_exists_is_not_an_orphan(
+    identity, owner, dataset_root, service
+) -> None:
+    """The narrow door stays narrow: a present folder goes through delete."""
+    workspace = make_project(identity, owner, dataset_root)
+
+    with pytest.raises(ValidationError) as info:
+        service.forget_orphan(owner, workspace.project.project_id)
+    assert info.value.code == "not_an_orphan_record"
+    assert workspace.project_file.is_file()
+    assert identity.repository.get_project(workspace.project.project_id) is not None
+
+
+def test_a_target_that_fails_a_security_guard_is_not_an_orphan(
+    identity, owner, dataset_root, service, tmp_path
+) -> None:
+    """A folder we cannot verify is not the same as a folder that is gone.
+
+    Manifest mismatch, symlink and permission failure all mean *something* is
+    there that this application does not understand, which is exactly when
+    quietly dropping the record would be the wrong answer.
+    """
+    workspace = make_project(identity, owner, dataset_root)
+    project_id = workspace.project.project_id
+
+    # Present, but its manifest claims a different project.
+    manifest = read_json_mapping(workspace.project_file)
+    manifest["project_id"] = "prj_somebody_else"
+    write_json(workspace.project_file, manifest, overwrite=True)
+
+    report = service.preflight(owner, project_id)
+    assert report.code == "delete_identity_mismatch"
+    with pytest.raises(ValidationError) as info:
+        service.forget_orphan(owner, project_id)
+    assert info.value.code == "not_an_orphan_record"
+    assert identity.repository.get_project(project_id) is not None
+
+    # And a folder that exists but is not a project at all.
+    other = make_project(identity, owner, dataset_root, name="İkinci Proje")
+    other_id = other.project.project_id
+    (other.root / PROJECT_FILE).unlink()
+    assert service.preflight(owner, other_id).code == "delete_target_not_a_project"
+    with pytest.raises(ValidationError):
+        service.forget_orphan(owner, other_id)
+    assert identity.repository.get_project(other_id) is not None

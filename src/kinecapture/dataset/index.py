@@ -28,6 +28,7 @@ from kinecapture.domain.activity import (
     measure_coverage,
 )
 from kinecapture.domain.enums import (
+    JointAnnotationStatus,
     Correctness,
     DataOrigin,
     SampleReadiness,
@@ -248,6 +249,16 @@ class DatasetSummary:
     readiness_counts: dict[str, int] = field(default_factory=dict)
     error_class_counts: dict[str, int] = field(default_factory=dict)
 
+    # --- node evidence coverage, counted apart from label readiness -------
+    # A take can be perfectly ready for temporal error training while none of
+    # its intervals has been reviewed for joints. Adding the two together
+    # would either block usable data or hide a gap in the node supervision,
+    # so they are two numbers and stay two numbers.
+    joint_status_counts: dict[str, int] = field(default_factory=dict)
+    intervals_with_joints: int = 0
+    intervals_missing_joint_review: int = 0
+    takes_missing_joint_review: int = 0
+
     total_duration_s: float = 0.0
     mean_tracking_coverage: float = 0.0
     takes_with_capture_loss: int = 0
@@ -402,6 +413,9 @@ class DatasetIndex:
         exercises: Counter[str] = Counter()
         readiness: Counter[str] = Counter()
         error_classes: Counter[str] = Counter()
+        joint_status: Counter[str] = Counter(
+            {status.value: 0 for status in JointAnnotationStatus}
+        )
         coverage_total = 0.0
         coverage_count = 0
         subject_total = 0.0
@@ -453,6 +467,7 @@ class DatasetIndex:
             if take.metrics.has_raw_archive_loss:
                 summary.takes_with_raw_archive_loss += 1
 
+            take_needs_joint_review = False
             for sample in row.samples:
                 if sample.status is SegmentStatus.EXCLUDED:
                     summary.excluded_samples += 1
@@ -471,7 +486,16 @@ class DatasetIndex:
                 for interval in sample.error_intervals:
                     if interval.error_code:
                         error_classes[interval.error_code] += 1
+                    joint_status[interval.joint_status.value] += 1
+                    if interval.has_node_supervision:
+                        summary.intervals_with_joints += 1
+                    elif interval.joint_status is JointAnnotationStatus.UNREVIEWED:
+                        summary.intervals_missing_joint_review += 1
+                        take_needs_joint_review = True
+            if take_needs_joint_review:
+                summary.takes_missing_joint_review += 1
 
+        summary.joint_status_counts = dict(sorted(joint_status.items()))
         summary.correctness_counts = dict(sorted(correctness.items()))
         summary.exercise_counts = dict(sorted(exercises.items()))
         summary.readiness_counts = dict(sorted(readiness.items()))

@@ -85,6 +85,9 @@ _NAV_COLLAPSED_WIDTH = 56
 #: items and the collapse button still fit above it.
 _NAV_LOGO_MAX_HEIGHT = 96
 
+#: Breathing room between the crest and the collapse control below it.
+_NAV_LOGO_GAP = 10
+
 
 def _load_logo_pixmap() -> Optional[QPixmap]:
     """The university logo as a pixmap, or ``None`` if it cannot be loaded.
@@ -147,8 +150,17 @@ class NavigationRail(QFrame):
         self._logo.setVisible(self._logo_source is not None)
         layout.addWidget(self._logo, 0, Qt.AlignmentFlag.AlignHCenter)
 
+        # A deliberate, small gap. Without it the crest and the control touch
+        # and read as one smudged block; with the stretch above them doing all
+        # the spacing they drift apart by however much room is left over.
+        self._logo_gap = QWidget()
+        self._logo_gap.setFixedHeight(_NAV_LOGO_GAP)
+        layout.addWidget(self._logo_gap)
+
         self._toggle = QPushButton()
-        self._toggle.setProperty("role", "nav")
+        # Its own role: the page buttons are a left-aligned list, this is a
+        # single centred control under a centred logo.
+        self._toggle.setProperty("role", "navToggle")
         self._toggle.setCursor(Qt.CursorShape.PointingHandCursor)
         self._toggle.clicked.connect(self.toggle)
         layout.addWidget(self._toggle)
@@ -207,11 +219,13 @@ class NavigationRail(QFrame):
         source = self._logo_source
         if source is None:
             self._logo.setVisible(False)
+            self._logo_gap.setVisible(False)
             return
         if not self._expanded:
             self._logo.setVisible(False)
             self._logo.clear()
             self._logo.setFixedHeight(0)
+            self._logo_gap.setVisible(False)
             return
 
         width = _NAV_EXPANDED_WIDTH - 4 * self._theme.space_sm
@@ -232,6 +246,7 @@ class NavigationRail(QFrame):
         self._logo.setToolTip("Yıldız Teknik Üniversitesi")
         self._logo.setAccessibleName("Yıldız Teknik Üniversitesi logosu")
         self._logo.setVisible(True)
+        self._logo_gap.setVisible(True)
 
     def apply_theme(self, theme: Theme) -> None:
         self._theme = theme

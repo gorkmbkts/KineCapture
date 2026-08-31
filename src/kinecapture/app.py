@@ -370,7 +370,14 @@ def run_gui(config: AppConfig) -> int:
     app.setOrganizationName("KineCapture")
 
     window = MainWindow(config)
-    window.show()
+    # The real window state, not a resize to the screen's dimensions. Faking it
+    # ignores the task bar, gets multi-monitor and per-monitor DPI wrong, and
+    # leaves the window "restored" so the OS never gives it back its old size.
+    # Only the production launcher does this; the constructor still opens at a
+    # normal size so tests can resize it to whatever viewport they check.
+    window.showMaximized()
+    if not window.isVisible():  # pragma: no cover - platform without maximize
+        window.show()
     return int(app.exec())
 
 
