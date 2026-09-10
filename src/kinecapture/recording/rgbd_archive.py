@@ -57,6 +57,7 @@ from __future__ import annotations
 import json
 import queue
 import threading
+import time
 import zlib
 from dataclasses import dataclass, field
 from enum import Enum
@@ -68,6 +69,7 @@ import numpy as np
 from kinecapture.core.errors import StorageError
 from kinecapture.core.logging import get_logger
 from kinecapture.core.paths import ensure_dir, long_path, path_exists
+from kinecapture.domain.arrays import retain_snapshot
 
 logger = get_logger(__name__)
 
@@ -85,6 +87,7 @@ DEFAULT_WORKERS = 3
 
 #: How long a producer waits for a slot before calling the frame lost.
 _ENQUEUE_TIMEOUT_S = 0.5
+_CLOSE_TIMEOUT_S = 30.0
 
 
 class DepthCodec(str, Enum):
@@ -347,7 +350,7 @@ class _ChunkPool:
 
     def __init__(self, workers: int, capacity: int) -> None:
         self._queue: queue.Queue = queue.Queue(maxsize=max(1, capacity))
-        self._stop = object()
+        self._stopping = threading.Event()
         self._lock = threading.Lock()
         self._errors: list[str] = []
         self._threads = [
@@ -358,6 +361,8 @@ class _ChunkPool:
             thread.start()
 
     def submit(self, job) -> bool:  # type: ignore[no-untyped-def]
+        if self._stopping.is_set():
+            raise StorageError("Chunk kuyruğu kapatılıyor.", code="chunk_pool_closed")
         try:
             self._queue.put(job, timeout=_ENQUEUE_TIMEOUT_S)
         except queue.Full:
@@ -366,10 +371,13 @@ class _ChunkPool:
 
     def _run(self) -> None:
         while True:
-            job = self._queue.get()
             try:
-                if job is self._stop:
+                job = self._queue.get(timeout=0.05)
+            except queue.Empty:
+                if self._stopping.is_set():
                     return
+                continue
+            try:
                 try:
                     job()
                 except Exception as exc:  # a writer failure must be visible
@@ -380,10 +388,15 @@ class _ChunkPool:
                 self._queue.task_done()
 
     def close(self) -> list[str]:
-        for _ in self._threads:
-            self._queue.put(self._stop)
+        self._stopping.set()
+        deadline = time.monotonic() + _CLOSE_TIMEOUT_S
         for thread in self._threads:
-            thread.join(timeout=30.0)
+            thread.join(timeout=max(0.0, deadline - time.monotonic()))
+        if any(thread.is_alive() for thread in self._threads):
+            raise StorageError(
+                "Depth/renk yazıcıları henüz durmadı; arşiv tamamlanmış sayılmadı.",
+                code="archive_close_pending",
+            )
         with self._lock:
             return list(self._errors)
 
@@ -444,14 +457,14 @@ class RgbdArchiveWriter:
 
         if depth is not None:
             self.depth.frames_offered += 1
-            self._depth_buffer.append(np.asarray(depth, dtype=np.float32))
+            self._depth_buffer.append(retain_snapshot(depth, np.float32))
             self._depth_positions.append(int(position))
             if len(self._depth_buffer) >= self.chunk_frames:
                 depth_ok = self._flush_depth()
 
         if self.store_color and color is not None:
             self.color.frames_offered += 1
-            self._color_buffer.append(np.asarray(color, dtype=np.uint8))
+            self._color_buffer.append(retain_snapshot(color, np.uint8))
             self._color_positions.append(int(position))
             if len(self._color_buffer) >= self.chunk_frames:
                 color_ok = self._flush_color()
@@ -479,7 +492,7 @@ class RgbdArchiveWriter:
             with self._lock:
                 self.depth.frames_written += len(positions)
                 self.depth.chunks_written += 1
-                self.depth.bytes_written += path.stat().st_size
+                self.depth.bytes_written += Path(long_path(path)).stat().st_size
                 self._chunk_records.append(
                     {
                         "stream": "depth",
@@ -521,7 +534,7 @@ class RgbdArchiveWriter:
             with self._lock:
                 self.color.frames_written += len(positions)
                 self.color.chunks_written += 1
-                self.color.bytes_written += path.stat().st_size
+                self.color.bytes_written += Path(long_path(path)).stat().st_size
                 self._chunk_records.append(
                     {
                         "stream": "color",
@@ -575,9 +588,10 @@ class RgbdArchiveReader:
         self.directory = Path(directory)
 
     def _chunks(self, prefix: str, suffix: str) -> list[Path]:
-        if not self.directory.is_dir():
+        directory = Path(long_path(self.directory))
+        if not directory.is_dir():
             return []
-        return sorted(self.directory.glob(f"{prefix}_*{suffix}"))
+        return sorted(directory.glob(f"{prefix}_*{suffix}"))
 
     def depth_chunks(self) -> list[Path]:
         return self._chunks("depth", ".kcd")

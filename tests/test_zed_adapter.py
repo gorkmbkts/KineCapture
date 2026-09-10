@@ -76,11 +76,36 @@ class _Camera:
 
     def retrieve_bodies(self, target, runtime):  # noqa: ARG002
         target.body_list = self._bodies.body_list
+        return "SUCCESS"
 
 
 def _convert(backend: ZedCameraBackend, bodies):
     backend._bodies = _FakeBodies([])
-    return backend._retrieve_bodies(object(), _Camera(_FakeBodies(bodies)))
+    sl = SimpleNamespace(ERROR_CODE=SimpleNamespace(SUCCESS="SUCCESS"))
+    return backend._retrieve_bodies(sl, _Camera(_FakeBodies(bodies)))
+
+
+def test_sdk_reused_arrays_do_not_change_retained_body(backend):
+    body = _fake_body()
+    body.keypoint_2d = np.ones((34, 2), dtype=np.float32)
+    retained = _convert(backend, [body])[0]
+    before = retained.to_record()
+    for value in vars(body).values():
+        if isinstance(value, np.ndarray):
+            value.fill(999)
+    assert retained.to_record() == before
+    assert not retained.joint_positions_xyz.flags.writeable
+    assert not retained.joint_positions_2d.flags.writeable
+
+
+def test_failed_body_retrieval_never_returns_old_bodies(backend):
+    from kinecapture.core.errors import CameraError
+
+    backend._bodies = _FakeBodies([_fake_body()])
+    camera = SimpleNamespace(retrieve_bodies=lambda *args: "FAILURE")
+    sl = SimpleNamespace(ERROR_CODE=SimpleNamespace(SUCCESS="SUCCESS"))
+    with pytest.raises(CameraError, match="bodies"):
+        backend._retrieve_bodies(sl, camera)
 
 
 def test_confidence_is_rescaled_to_unit_range(backend) -> None:

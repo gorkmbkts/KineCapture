@@ -82,24 +82,28 @@ class CaptureProfile:
     resolution: str = "HD720"
     fps: int = 30
     depth_mode: str = "NEURAL_LIGHT"
-    enable_depth: bool = True
-    enable_body_tracking: bool = True
-    body_format: str = "BODY_34"
-    body_tracking_model: str = "HUMAN_BODY_MEDIUM"
+    enable_depth: bool = False
+    enable_body_tracking: bool = False
+    body_format: str = "BODY_38"
+    body_tracking_model: str = "HUMAN_BODY_ACCURATE"
     enable_body_fitting: bool = True
     detection_confidence: int = 40
     coordinate_system: str = "RIGHT_HANDED_Y_UP"
     length_unit: str = "METER"
     store_native_recording: bool = True
-    #: How the exact measured depth is archived. Never off for a real capture:
-    #: replaying an SVO2 was verified not to reproduce the depth that was
-    #: measured, so a take without this stream has permanently lost it. Only an
-    #: explicitly synthetic profile may set this to ``"none"``.
-    depth_archive: str = "float32_lossless"
+    #: Optional measured-live product; SVO reconstruction is a distinct result.
+    depth_archive: str = "none"
     #: SVO2 compression, verified against this SDK. ``H264`` is *lossy*; the
     #: lossless modes cost roughly 12x and 30x more. Recorded honestly rather
     #: than being described as lossless.
-    native_compression: str = "H264"
+    native_compression: str = "H264_LOSSLESS"
+    recording_policy_version: int = 2
+    store_skeleton: bool = False
+    store_proxy: bool = False
+    store_color: bool = False
+    preview_enabled: bool = True
+    preview_fps: float = 15.0
+    preview_width: int = 640
     proxy_video_width: int = 640
     #: Refuse to start a recording that could not run this long on the free
     #: space of the target disk.
@@ -107,9 +111,13 @@ class CaptureProfile:
 
     #: Historical name for the depth archive switch. Kept only so an old
     #: ``take.json`` still loads; the archive itself is no longer optional.
-    store_depth_frames: bool = True
+    store_depth_frames: bool = False
 
     def __post_init__(self) -> None:
+        if self.preview_fps <= 0 or self.preview_width < 160:
+            raise ValidationError("Önizleme hızı/boyutu geçersiz.", code="preview_invalid")
+        if self.depth_archive not in ("none", "float32_lossless", "uint16_quantised"):
+            raise ValidationError("Derinlik arşiv biçimi geçersiz.", code="depth_archive_invalid")
         if self.fps <= 0:
             raise ValidationError(
                 "Hedef FPS 0'dan büyük olmalıdır.", field="fps", code="fps_invalid"
@@ -126,13 +134,61 @@ class CaptureProfile:
         """Whether this profile keeps the measured depth."""
         return str(self.depth_archive or "none").lower() != "none"
 
+    @property
+    def computes_body(self) -> bool:
+        return self.enable_body_tracking or self.store_skeleton
+
+    @property
+    def computes_depth(self) -> bool:
+        return self.computes_body or self.retrieves_depth
+
+    @property
+    def retrieves_depth(self) -> bool:
+        return self.enable_depth or self.archives_depth
+
+    @property
+    def requires_full_rgb(self) -> bool:
+        return self.store_proxy or self.store_color
+
+    @classmethod
+    def legacy(cls, **overrides: Any) -> "CaptureProfile":
+        """Explicit pre-policy-2 behavior, used to read historical provenance."""
+        values = dict(
+            recording_policy_version=1, enable_depth=True, enable_body_tracking=True,
+            store_skeleton=True, store_proxy=True, depth_archive="float32_lossless",
+            body_format="BODY_34", body_tracking_model="HUMAN_BODY_MEDIUM",
+            native_compression="H264", store_depth_frames=True, preview_fps=30.0,
+        )
+        values.update(overrides)
+        return cls(**values)
+
+    @classmethod
+    def for_new_capture(cls, payload: Mapping[str, Any]) -> "CaptureProfile":
+        """Old preferences retain camera parameters, but adopt minimum products.
+
+        Reading an old take instead uses from_dict and never changes its policy.
+        No preference file is written by this upgrade.
+        """
+        values = dict(payload)
+        if "recording_policy_version" not in values:
+            for key in (
+                "enable_depth", "enable_body_tracking", "depth_archive",
+                "store_depth_frames", "store_native_recording", "native_compression",
+            ):
+                values.pop(key, None)
+        known = cls.__dataclass_fields__
+        return cls(**{k: v for k, v in values.items() if k in known})
+
     def to_dict(self) -> dict[str, Any]:
         return dict(self.__dict__)
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "CaptureProfile":
         known = {f for f in cls.__dataclass_fields__}
-        return cls(**{k: v for k, v in payload.items() if k in known})
+        values = {k: v for k, v in payload.items() if k in known}
+        if "recording_policy_version" not in payload:
+            return cls.legacy(**values)
+        return cls(**values)
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +537,11 @@ class TakeQualityMetrics:
     @property
     def subject_coverage(self) -> float:
         """Fraction of recorded frames where the selected person was found."""
-        total = self.subject_locked_frames + self.subject_lost_frames
+        total = (
+            self.subject_locked_frames
+            + self.subject_lost_frames
+            + self.subject_ambiguous_frames
+        )
         return self.subject_locked_frames / total if total else 0.0
 
     def to_dict(self) -> dict[str, Any]:
@@ -529,6 +589,7 @@ class Take:
     metrics: TakeQualityMetrics = field(default_factory=TakeQualityMetrics)
     app_version: str = APP_VERSION
     schema_version: str = TAKE_SCHEMA_VERSION
+    processing_status: str = "live"
 
     def __post_init__(self) -> None:
         self.state = _enum(self.state, TakeState, TakeState.RECORDING)
@@ -563,7 +624,7 @@ class Take:
 
     @property
     def usable_for_export(self) -> bool:
-        return self.is_finalized and self.quality not in (
+        return self.is_finalized and self.processing_status in ("live", "processed") and self.quality not in (
             TakeQuality.EXCLUDED,
             TakeQuality.TECHNICAL_ISSUE,
         )
@@ -594,6 +655,7 @@ class Take:
             "body_id_events": list(self.body_id_events),
             "metrics": self.metrics.to_dict(),
             "app_version": self.app_version,
+            "processing_status": self.processing_status,
         }
 
     @classmethod
@@ -623,6 +685,7 @@ class Take:
             camera_info=CameraInfo.from_dict(camera_info) if camera_info else None,
             skeleton_format=str(payload.get("skeleton_format", "")),
             files=dict(payload.get("files") or {}),
+            processing_status=str(payload.get("processing_status", "live")),
             markers=list(payload.get("markers") or []),
             body_id_events=list(payload.get("body_id_events") or []),
             metrics=TakeQualityMetrics.from_dict(payload.get("metrics") or {}),

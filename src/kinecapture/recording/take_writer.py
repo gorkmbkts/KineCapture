@@ -538,15 +538,14 @@ class TakeWriter:
 
     # ------------------------------------------------------------- finalise
     def close_streams(self) -> None:
-        """Flush and close every stream. Idempotent; never raises."""
+        """Close all writers; a timeout must not permit premature publication."""
         if self._closed:
             return
-        self._closed = True
         if self._skeleton is not None:
             try:
                 self._skeleton.close()
             except Exception as exc:  # pragma: no cover - shutdown path
-                logger.warning("İskelet akışı kapatılırken hata: %s", exc)
+                self.note_raw_failure(f"İskelet akışı kapatılamadı: {exc}")
         if self._proxy is not None:
             self._proxy.close()
         if self._archive is not None:
@@ -555,11 +554,13 @@ class TakeWriter:
             except Exception as exc:  # pragma: no cover - shutdown path
                 logger.error("RGB-D arşivi kapatılırken hata: %s", exc)
                 self._archive.depth.failure = f"{type(exc).__name__}: {exc}"
+                raise
         if self._raw_index is not None:
             try:
                 self._raw_index.close()
             except Exception as exc:  # pragma: no cover - shutdown path
-                logger.warning("Ham indeks kapatılırken hata: %s", exc)
+                self.note_raw_failure(f"Ham indeks kapatılamadı: {exc}")
+        self._closed = True
 
     def finalize(self, *, state: TakeState = TakeState.FINALIZED) -> Take:
         """Close streams, compute metrics, write checksums, publish ``take.json``.
@@ -632,13 +633,17 @@ class TakeWriter:
             overwrite=True,
         )
 
-        # take.json is written *before* checksums so the manifest can cover it.
-        self.workspace.save_take(take)
+        # take.json is the final commit, and remains mutable for human curation.
+        # It must not invalidate the immutable payload checksums on every note.
         write_json(
             self.paths.checksums,
-            checksum_manifest(self.paths.checksum_targets()),
+            checksum_manifest({
+                key: path for key, path in self.paths.checksum_targets().items()
+                if key != "take.json"
+            }),
             overwrite=True,
         )
+        self.workspace.save_take(take)
         logger.info(
             "Kayıt tamamlandı: %s (%d kare, %.1f s, %.1f FPS)",
             take.take_id,

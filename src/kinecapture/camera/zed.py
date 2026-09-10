@@ -36,6 +36,8 @@ from kinecapture.camera.base import (
 )
 from kinecapture.core.errors import CameraError, CameraNotConnectedError
 from kinecapture.core.logging import get_logger
+from kinecapture.core.paths import ensure_dir, path_exists
+from kinecapture.domain.arrays import owned_snapshot
 from kinecapture.domain.enums import (
     BodyActionState,
     CaptureStatus,
@@ -140,6 +142,7 @@ class ZedCameraBackend(CameraBackend):
         self._spec: Optional[SkeletonSpec] = None
         self._previewing = False
         self._frame_index = 0
+        self._last_rgb_time = float("-inf")
         self._recording = False
         self._recording_path: Optional[Path] = None
         self._body_tracking_enabled = False
@@ -281,7 +284,7 @@ class ZedCameraBackend(CameraBackend):
             init.camera_fps = int(profile.fps)
             init.depth_mode = (
                 self._enum(sl, "DEPTH_MODE", profile.depth_mode, "depth_mode")
-                if profile.enable_depth
+                if profile.computes_depth
                 else self._enum(sl, "DEPTH_MODE", "NONE", "depth_mode")
             )
             init.coordinate_units = self._enum(
@@ -316,19 +319,20 @@ class ZedCameraBackend(CameraBackend):
                 raise
 
             self._camera = camera
-            self._depth_enabled = profile.enable_depth
+            self._depth_enabled = profile.retrieves_depth
             self._frame_index = 0
             self._mat_color = sl.Mat()
             self._mat_depth = sl.Mat()
             self._bodies = sl.Bodies()
             self._runtime = sl.RuntimeParameters()
+            self._runtime.enable_depth = profile.computes_depth
             return self._info
 
     def _configure_modules(self, sl: Any, camera: Any, profile: CaptureProfile) -> None:
         """Enable positional tracking and body tracking, if requested."""
         self._body_tracking_enabled = False
         self._spec = None
-        if not profile.enable_body_tracking:
+        if not profile.computes_body:
             return
 
         # Body tracking requires positional tracking; enabling it here rather
@@ -434,12 +438,15 @@ class ZedCameraBackend(CameraBackend):
             coordinate_system=profile.coordinate_system.lower(),
             length_unit=profile.length_unit.lower(),
             body_format=self._spec.name if self._spec else None,
-            depth_available=profile.enable_depth,
+            depth_available=profile.retrieves_depth,
             body_tracking_available=self._body_tracking_enabled,
             extra={
                 "requested_resolution": profile.resolution,
                 "requested_fps": profile.fps,
-                "depth_mode": profile.depth_mode if profile.enable_depth else "NONE",
+                "depth_mode": profile.depth_mode if profile.computes_depth else "NONE",
+                "depth_computed": profile.computes_depth,
+                "depth_retrieved": profile.retrieves_depth,
+                "frame_index_semantics": "successful_grab_ordinal",
                 "body_tracking_model": profile.body_tracking_model,
                 "body_fitting": profile.enable_body_fitting,
                 "input_type": str(information.input_type),
@@ -463,7 +470,7 @@ class ZedCameraBackend(CameraBackend):
         """Release the device. Idempotent and safe during shutdown."""
         with self._open_lock:
             self._previewing = False
-            camera, self._camera = self._camera, None
+            camera = self._camera
             if camera is None:
                 self._info = None
                 return
@@ -482,6 +489,7 @@ class ZedCameraBackend(CameraBackend):
                 except Exception as exc:  # shutdown must never raise
                     logger.warning("ZED kapatma sırasında hata: %s", exc)
             self._info = None
+            self._camera = None
             self._spec = None
             self._body_tracking_enabled = False
             self._mat_color = None
@@ -522,15 +530,31 @@ class ZedCameraBackend(CameraBackend):
             logger.debug("ZED grab başarısız: %s", status)
             return None
 
-        camera.retrieve_image(self._mat_color, sl.VIEW.LEFT)
-        color_bgra = self._mat_color.get_data()
-        # ZED delivers BGRA; the domain contract is contiguous RGB uint8.
-        color = np.ascontiguousarray(color_bgra[:, :, :3][:, :, ::-1])
+        color = None
+        profile = self._profile
+        now = time.perf_counter()
+        full_rgb = profile.requires_full_rgb
+        preview_due = profile.preview_enabled and now - self._last_rgb_time >= 1 / profile.preview_fps
+        if full_rgb or preview_due:
+            if full_rgb:
+                status = camera.retrieve_image(self._mat_color, sl.VIEW.LEFT)
+            else:
+                width, height = self._info.resolution
+                scaled_width = min(width, profile.preview_width)
+                resolution = sl.Resolution(scaled_width, max(1, round(height * scaled_width / width)))
+                status = camera.retrieve_image(self._mat_color, sl.VIEW.LEFT, sl.MEM.CPU, resolution)
+            self._check_retrieval(sl, status, "rgb")
+            color_bgra = self._mat_color.get_data()
+            color = np.ascontiguousarray(color_bgra[:, :, :3][:, :, ::-1])
+            color.setflags(write=False)
+            self._last_rgb_time = now
 
         depth = None
         if self._depth_enabled:
-            camera.retrieve_measure(self._mat_depth, sl.MEASURE.DEPTH)
-            depth = np.ascontiguousarray(self._mat_depth.get_data(), dtype=np.float32)
+            self._check_retrieval(
+                sl, camera.retrieve_measure(self._mat_depth, sl.MEASURE.DEPTH), "depth"
+            )
+            depth = owned_snapshot(self._mat_depth.get_data(), np.float32)
 
         bodies = self._retrieve_bodies(sl, camera)
 
@@ -548,6 +572,7 @@ class ZedCameraBackend(CameraBackend):
             capture_status=CaptureStatus.OK,
             origin=DataOrigin.REAL,
             backend_dropped_frames=int(camera.get_frame_dropped_count()),
+            source_resolution=self._info.resolution,
         )
 
     @staticmethod
@@ -567,12 +592,23 @@ class ZedCameraBackend(CameraBackend):
         array = np.asarray(raw, dtype=np.float32)
         if array.shape != shape:
             return None
-        return array
+        return owned_snapshot(array, np.float32)
+
+    @staticmethod
+    def _check_retrieval(sl: Any, status: Any, product: str) -> None:
+        if status != sl.ERROR_CODE.SUCCESS:
+            raise CameraError(
+                f"ZED {product} verisi alınamadı: {status}",
+                code="zed_retrieval_failed",
+                details={"product": product, "error_code": str(status)},
+            )
 
     def _retrieve_bodies(self, sl: Any, camera: Any) -> tuple[BodyPose, ...]:
         if not self._body_tracking_enabled or self._spec is None:
             return ()
-        camera.retrieve_bodies(self._bodies, self._body_runtime)
+        self._check_retrieval(
+            sl, camera.retrieve_bodies(self._bodies, self._body_runtime), "bodies"
+        )
         expected_joints = self._spec.num_joints
         poses: list[BodyPose] = []
         for body in self._bodies.body_list:
@@ -602,8 +638,8 @@ class ZedCameraBackend(CameraBackend):
                     tracking_id=int(body.id),
                     tracking_state=self._map_tracking_state(body.tracking_state),
                     body_format=self._spec.name,
-                    joint_positions_xyz=joints,
-                    joint_confidences=confidences,
+                    joint_positions_xyz=owned_snapshot(joints, np.float32),
+                    joint_confidences=owned_snapshot(confidences, np.float32),
                     # Quaternion component order is xyzw, verified against this
                     # SDK: sl.Rotation for +90 deg about Y yields
                     # [0, 0.7071, 0, 0.7071].
@@ -647,7 +683,7 @@ class ZedCameraBackend(CameraBackend):
 
     # ------------------------------------------------------ native recording
     def start_native_recording(self, path: Path) -> bool:
-        """Start SVO2 recording, the SDK's own lossless-by-default raw format."""
+        """Start immutable SVO2 using the requested, explicitly named codec."""
         camera = self._camera
         if camera is None:
             raise CameraNotConnectedError("ZED kamera bağlı değil.")
@@ -659,10 +695,18 @@ class ZedCameraBackend(CameraBackend):
             return False
 
         path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
+        if path_exists(path):
+            raise CameraError("Ham kayıt hedefi zaten var.", code="raw_source_exists")
+        ensure_dir(path.parent)
         params = sl.RecordingParameters()
         params.video_filename = str(path)
-        params.compression_mode = sl.SVO_COMPRESSION_MODE.H264
+        codec = self._profile.native_compression.upper()
+        try:
+            params.compression_mode = getattr(sl.SVO_COMPRESSION_MODE, codec)
+        except AttributeError as exc:
+            raise CameraError(
+                f"Desteklenmeyen SVO codec: {codec}", code="zed_codec_invalid"
+            ) from exc
         status = camera.enable_recording(params)
         if status != sl.ERROR_CODE.SUCCESS:
             raise CameraError(
@@ -673,6 +717,7 @@ class ZedCameraBackend(CameraBackend):
             )
         self._recording = True
         self._recording_path = path
+        self._recording_codec = codec
         logger.info("SVO2 kaydı başladı: %s", path.name)
         return True
 

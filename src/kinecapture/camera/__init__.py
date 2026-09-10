@@ -59,6 +59,7 @@ def create_backend_from_config(
             tracking_loss_every=config.mock.tracking_loss_every,
             low_confidence_every=config.mock.low_confidence_every,
             real_time=True,
+            profile=config.capture,
         )
     return create_backend(resolved, profile=config.capture)
 

@@ -24,7 +24,7 @@ from kinecapture.camera.mock import MockCameraBackend  # noqa: E402
 from kinecapture.core.logging import setup_logging  # noqa: E402
 from kinecapture.dataset.workspace import ProjectWorkspace  # noqa: E402
 from kinecapture.domain.enums import ConsentStatus  # noqa: E402
-from kinecapture.domain.project import Participant, Session  # noqa: E402
+from kinecapture.domain.project import CaptureProfile, Participant, Session  # noqa: E402
 
 setup_logging("WARNING", None)
 
@@ -103,6 +103,7 @@ def session(workspace: ProjectWorkspace, participant: Participant) -> Session:
         participant.participant_id,
         operator="pytest",
         consent=ConsentStatus.GRANTED,
+        capture_profile=CaptureProfile.legacy(),
     )
 
 

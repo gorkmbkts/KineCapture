@@ -359,7 +359,7 @@ class FramePacket:
     frame_index: int
     host_timestamp_ns: int
     camera_timestamp_ns: int
-    color_frame: np.ndarray
+    color_frame: Optional[np.ndarray]
     depth_frame: Optional[np.ndarray] = None
     bodies: tuple[BodyPose, ...] = ()
     capture_status: CaptureStatus = CaptureStatus.OK
@@ -367,16 +367,21 @@ class FramePacket:
     backend_dropped_frames: int = 0
     take_id: Optional[str] = None
     session_id: Optional[str] = None
+    source_resolution: Optional[tuple[int, int]] = None
+    source_position: Optional[int] = None
+    integrity_issues: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        color = np.asarray(self.color_frame)
-        if color.ndim != 3 or color.shape[2] != 3:
+        color = np.asarray(self.color_frame) if self.color_frame is not None else None
+        if color is None and (self.source_resolution is None or min(self.source_resolution) <= 0):
+            raise ValidationError("Görüntüsüz paket kaynak çözünürlüğünü taşımalı.", code="source_resolution_missing")
+        if color is not None and (color.ndim != 3 or color.shape[2] != 3):
             raise ValidationError(
                 f"color_frame [H, W, 3] olmalı, gelen: {color.shape}",
                 field="color_frame",
                 code="color_shape_invalid",
             )
-        if color.dtype != np.uint8:
+        if color is not None and color.dtype != np.uint8:
             color = color.astype(np.uint8)
         self.color_frame = color
 
@@ -388,10 +393,14 @@ class FramePacket:
                     field="depth_frame",
                     code="depth_shape_invalid",
                 )
-            if depth.shape != color.shape[:2]:
+            expected_shape = (
+                (self.source_resolution[1], self.source_resolution[0])
+                if self.source_resolution is not None else color.shape[:2]
+            )
+            if depth.shape != expected_shape:
                 raise ValidationError(
                     "depth_frame çözünürlüğü color_frame ile uyuşmuyor: "
-                    f"{depth.shape} != {color.shape[:2]}",
+                    f"{depth.shape} != {expected_shape}",
                     field="depth_frame",
                     code="depth_resolution_mismatch",
                 )
@@ -407,7 +416,9 @@ class FramePacket:
 
     @property
     def resolution(self) -> tuple[int, int]:
-        """``(width, height)`` of the colour image."""
+        """Source pixel space (preview pixels may have a smaller resolution)."""
+        if self.source_resolution is not None:
+            return self.source_resolution
         return int(self.color_frame.shape[1]), int(self.color_frame.shape[0])
 
     @property

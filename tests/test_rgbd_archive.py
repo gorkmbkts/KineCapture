@@ -179,6 +179,24 @@ def test_writer_round_trips_every_frame(tmp_path) -> None:
     assert reader.verify() == []
 
 
+def test_reused_mutable_buffers_are_snapshotted_on_offer(tmp_path):
+    writer = RgbdArchiveWriter(tmp_path, store_color=True, chunk_frames=3, workers=1)
+    depth = np.empty((4, 6), dtype=np.float32)
+    color = np.empty((4, 6, 3), dtype=np.uint8)
+    for position in range(3):
+        depth.fill(position + 0.25)
+        color.fill(position + 10)
+        writer.add_frame(position, color, depth)
+    depth.fill(999)
+    color.fill(255)
+    writer.close()
+    reader = RgbdArchiveReader(tmp_path)
+    for position, frame in reader.iter_depth():
+        np.testing.assert_array_equal(frame, np.full((4, 6), position + 0.25))
+    for position, frame in reader.iter_color():
+        np.testing.assert_array_equal(frame, np.full((4, 6, 3), position + 10))
+
+
 def test_a_half_written_chunk_costs_only_that_chunk(tmp_path) -> None:
     """Recovery, not resilience theatre: the rest of the take stays readable."""
     writer = RgbdArchiveWriter(tmp_path, chunk_frames=5, workers=1)

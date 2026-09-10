@@ -30,6 +30,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -94,6 +95,14 @@ class CaptureService:
         self._acquisition_thread: Optional[threading.Thread] = None
         self._writer_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._writer_stop = threading.Event()
+        self._capture_gate = threading.Lock()
+        self._boundary_pending = threading.Event()
+        self._boundary_done = threading.Event()
+        self._boundary_done.set()
+        self._lifecycle_guard = threading.RLock()
+        self._recording_accepting = False
+        self._native_stop_failure = ""
 
         self._writer: Optional[TakeWriter] = None
         self._writer_guard = threading.Lock()
@@ -213,12 +222,14 @@ class CaptureService:
             return None, False
         if is_ambiguous_pick(candidates):
             return None, True
-        self.select_subject(body)
+        self.select_subject(body, packet=packet)
         return body, False
 
-    def select_subject(self, body: BodyPose, *, method: str = "click") -> str:
+    def select_subject(
+        self, body: BodyPose, *, method: str = "click", packet: Optional[FramePacket] = None
+    ) -> str:
         """Lock onto a specific detected body."""
-        packet = self.peek_frame()
+        packet = packet if packet is not None else self.peek_frame()
         frame_index = packet.frame_index if packet else 0
         timestamp = packet.camera_timestamp_ns if packet else 0
         subject_id = self._subject_lock.select(
@@ -415,18 +426,24 @@ class CaptureService:
 
     def stop_preview(self) -> None:
         """Stop acquisition (and any recording). Safe in any state."""
-        if self.state not in (CaptureState.PREVIEWING, CaptureState.RECORDING):
-            return
-        if self.is_recording:
+        if self._writer is not None:
             self.stop_recording()
-
-        self._state.transition(CaptureState.STOPPING)
+        if self._acquisition_thread is None:
+            return
+        if self._state.can_transition(CaptureState.STOPPING):
+            self._state.transition(CaptureState.STOPPING)
         self._stop_event.set()
-        thread, self._acquisition_thread = self._acquisition_thread, None
+        thread = self._acquisition_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=_JOIN_TIMEOUT_S)
             if thread.is_alive():
-                logger.error("Yakalama thread'i zamanında durmadı.")
+                error = CameraError(
+                    "Yakalama işlemi henüz durmadı; kamera handle'ı korunuyor.",
+                    code="acquisition_close_pending",
+                )
+                self._fail(error)
+                raise error
+        self._acquisition_thread = None
 
         try:
             self._backend.stop_preview()
@@ -434,13 +451,13 @@ class CaptureService:
             logger.warning("Önizleme durdurulurken hata: %s", exc)
         with self._preview_lock:
             self._preview_slot = None
-        self._state.transition(CaptureState.READY)
+        if self.state is CaptureState.STOPPING:
+            self._state.transition(CaptureState.READY)
         logger.info("Önizleme durduruldu (%s)", self._backend.name)
 
     def disconnect(self) -> None:
         """Release the device. Idempotent."""
-        if self.state in (CaptureState.PREVIEWING, CaptureState.RECORDING):
-            self.stop_preview()
+        self.stop_preview()
         try:
             self._backend.disconnect()
         except Exception as exc:
@@ -460,11 +477,11 @@ class CaptureService:
         """
         if self._shutdown:
             return
-        self._shutdown = True
         try:
-            if self.is_recording:
+            if self._writer is not None:
                 self.stop_recording(abort_reason="uygulama kapatıldı")
             self.disconnect()
+            self._shutdown = True
         except Exception as exc:
             logger.warning("Kapanış sırasında hata: %s", exc)
 
@@ -484,7 +501,38 @@ class CaptureService:
             return self._preview_slot
 
     # ------------------------------------------------------------- recording
+    @contextmanager
+    def _capture_boundary(self):
+        """No native start/stop may cut through a grab and its queue handoff."""
+        # Give control operations priority over the next grab. A plain mutex
+        # can starve its waiter when acquisition immediately reacquires it.
+        self._boundary_done.clear()
+        self._boundary_pending.set()
+        if not self._capture_gate.acquire(timeout=_JOIN_TIMEOUT_S):
+            self._boundary_pending.clear()
+            self._boundary_done.set()
+            raise StorageError(
+                "Kamera işlemi bitmedi; kayıt sınırı güvenle oluşturulamadı.",
+                code="capture_boundary_timeout",
+            )
+        try:
+            yield
+        finally:
+            self._capture_gate.release()
+            self._boundary_pending.clear()
+            self._boundary_done.set()
+
     def start_recording(
+        self, workspace: ProjectWorkspace, session: Session, **kwargs: Any
+    ) -> Take:
+        with self._lifecycle_guard, self._capture_boundary():
+            if self._writer is not None:
+                raise StorageError(
+                    "Önceki kaydın kapanışı bitmedi.", code="recording_close_pending"
+                )
+            return self._start_recording(workspace, session, **kwargs)
+
+    def _start_recording(
         self,
         workspace: ProjectWorkspace,
         session: Session,
@@ -532,6 +580,10 @@ class CaptureService:
                 native_started = bool(
                     self._backend.start_native_recording(paths.native_recording)
                 )
+                if not native_started:
+                    raise StorageError(
+                        "Backend ham kaydı başlatmadı.", code="raw_archive_unavailable"
+                    )
             except KineCaptureError as exc:
                 # Native recording is part of the immutable raw source; failing
                 # to start it is a real problem, so recording does not begin.
@@ -588,49 +640,69 @@ class CaptureService:
             self._active_take = take
 
         self._drain_recording_queue()
+        self._writer_stop.clear()
+        self._native_stop_failure = ""
         self._writer_thread = threading.Thread(
             target=self._writer_loop, name="kinecapture-writer", daemon=True
         )
         self._writer_thread.start()
+        self._recording_accepting = True
         self._state.transition(CaptureState.RECORDING)
         logger.info("Kayıt başladı: %s", take.take_id)
         return take
 
     def stop_recording(self, *, abort_reason: str = "") -> Optional[Take]:
+        with self._lifecycle_guard:
+            return self._stop_recording(abort_reason=abort_reason)
+
+    def _stop_recording(self, *, abort_reason: str = "") -> Optional[Take]:
         """Stop recording and finalise the take. Idempotent."""
         if self._writer is None:
             return None
         if self.state is CaptureState.RECORDING:
             self._state.transition(CaptureState.STOPPING)
 
-        native_stop_failure = ""
-        try:
-            self._backend.stop_native_recording()
-        except Exception as exc:
-            # Swallowing this used to let a take look successful while its
-            # immutable source was in an unknown state. It is now carried into
-            # the take, which cannot then be FINALIZED.
-            native_stop_failure = f"{type(exc).__name__}: {exc}"
-            logger.error("Native kayıt durdurulurken hata: %s", exc)
+        with self._capture_boundary():
+            # Gate includes the grab and enqueue: no stale pre-start packet and
+            # no packet captured after native stop can enter this recording.
+            self._recording_accepting = False
+            try:
+                self._backend.stop_native_recording()
+            except Exception as exc:
+                self._native_stop_failure = f"{type(exc).__name__}: {exc}"
+                logger.error("Native kayıt durdurulurken hata: %s", exc)
+            self._writer_stop.set()
 
-        # Tell the writer thread to finish what is already queued, then stop.
-        self._recording_queue.put(_SHUTDOWN)
-        thread, self._writer_thread = self._writer_thread, None
+        # An event, not a sentinel put into a possibly full/dead queue.
+        thread = self._writer_thread
         if thread is not None and thread.is_alive():
             thread.join(timeout=_JOIN_TIMEOUT_S)
             if thread.is_alive():
-                logger.error("Yazıcı thread'i zamanında durmadı.")
+                error = StorageError(
+                    "Yazıcı henüz durmadı; kayıt tamamlanmış sayılmadı. Yeniden kapatmayı deneyin.",
+                    code="writer_close_pending",
+                )
+                self._fail(error)
+                # Keep ownership: never close streams while a writer uses them.
+                raise error
 
         with self._writer_guard:
-            writer, self._writer = self._writer, None
+            writer = self._writer
         if writer is None:
             return None
 
-        if native_stop_failure:
+        remaining = self._drain_recording_queue()
+        if remaining:
+            writer.note_dropped(remaining)
+            writer.note_raw_failure(f"Yazıcı durduğunda {remaining} kare yazılmamıştı.")
+        if self._native_stop_failure:
             writer.note_raw_failure(
-                f"Native kayıt düzgün durdurulamadı: {native_stop_failure}"
+                f"Native kayıt düzgün durdurulamadı: {self._native_stop_failure}"
             )
         take = writer.abort(abort_reason) if abort_reason else writer.finalize()
+        with self._writer_guard:
+            self._writer = None
+            self._writer_thread = None
         self._active_take = take
 
         if self.state is CaptureState.STOPPING:
@@ -672,8 +744,19 @@ class CaptureService:
         """Pull frames from the backend as fast as it delivers them."""
         logger.debug("Yakalama thread'i başladı.")
         while not self._stop_event.is_set():
+            if self._boundary_pending.is_set():
+                self._boundary_done.wait(timeout=0.05)
+                continue
             try:
-                packet = self._backend.grab_frame()
+                with self._capture_gate:
+                    if self._stop_event.is_set():
+                        break
+                    packet = self._backend.grab_frame()
+                    if packet is not None:
+                        self._note_acquisition(packet)
+                        self._publish_preview(packet)
+                        if self._recording_accepting:
+                            self._enqueue_for_recording(packet)
             except KineCaptureError as exc:
                 self._fail(exc)
                 break
@@ -690,12 +773,6 @@ class CaptureService:
                 time.sleep(0.002)
                 continue
 
-            self._note_acquisition(packet)
-            self._publish_preview(packet)
-
-            if self._writer is not None:
-                self._enqueue_for_recording(packet)
-
             for listener in list(self._frame_listeners):
                 try:
                     listener(packet)
@@ -707,7 +784,12 @@ class CaptureService:
         """Drain the recording queue onto disk."""
         logger.debug("Yazıcı thread'i başladı.")
         while True:
-            item = self._recording_queue.get()
+            try:
+                item = self._recording_queue.get(timeout=0.05)
+            except queue.Empty:
+                if self._writer_stop.is_set():
+                    break
+                continue
             try:
                 if item is _SHUTDOWN:
                     break
@@ -719,9 +801,11 @@ class CaptureService:
                     with self._stats_lock:
                         self._statistics.recorded_frames_written += 1
                 except KineCaptureError as exc:
+                    writer.note_raw_failure(f"Yazıcı hatası: {exc}")
                     self._fail(exc)
                     break
                 except Exception as exc:
+                    writer.note_raw_failure(f"Yazıcı hatası: {exc}")
                     self._fail(
                         KineCaptureError(
                             f"Kare diske yazılamadı: {exc}",
@@ -750,6 +834,8 @@ class CaptureService:
 
     def _publish_preview(self, packet: FramePacket) -> None:
         """Latest-wins preview slot. Overwriting is a preview drop, not data loss."""
+        if packet.color_frame is None:
+            return
         with self._preview_lock:
             if self._preview_slot is not None:
                 with self._stats_lock:
@@ -776,13 +862,15 @@ class CaptureService:
                     self._acquisition_times[-1] - self._acquisition_times[-2]
                 ) * 1000.0
 
-    def _drain_recording_queue(self) -> None:
+    def _drain_recording_queue(self) -> int:
+        count = 0
         while True:
             try:
                 self._recording_queue.get_nowait()
             except queue.Empty:
-                return
+                return count
             else:
+                count += 1
                 self._recording_queue.task_done()
 
     # ------------------------------------------------------------------ error
@@ -790,6 +878,7 @@ class CaptureService:
         """Move to ERROR and notify listeners with a structured error."""
         logger.error("Yakalama hatası [%s]: %s", error.code, error.message)
         self._last_error = error
+        self._stop_event.set()
         if self._state.can_transition(CaptureState.ERROR):
             self._state.transition(CaptureState.ERROR)
         for listener in list(self._error_listeners):

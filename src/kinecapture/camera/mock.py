@@ -39,6 +39,7 @@ from kinecapture.domain.enums import (
     TrackingState,
 )
 from kinecapture.domain.models import BodyPose, CameraInfo, FramePacket
+from kinecapture.domain.project import CaptureProfile
 from kinecapture.visualization.skeleton_spec import MOCK_SKELETON, SkeletonSpec
 
 #: Neutral rest pose in metres, in the same right-handed Y-up convention the
@@ -81,6 +82,7 @@ class MockCameraBackend(CameraBackend):
         low_confidence_every: int = 0,
         skeleton: SkeletonSpec = MOCK_SKELETON,
         real_time: bool = False,
+        profile: Optional[CaptureProfile] = None,
     ) -> None:
         if width <= 0 or height <= 0:
             raise ValueError("mock frame size must be positive")
@@ -89,11 +91,12 @@ class MockCameraBackend(CameraBackend):
         if num_bodies < 1:
             raise ValueError("num_bodies must be >= 1")
         self._width = int(width)
+        self._profile = profile or CaptureProfile.legacy()
         self._height = int(height)
         self._fps = float(fps)
         self._seed = int(seed)
         self._num_bodies = int(num_bodies)
-        self._enable_depth = bool(enable_depth)
+        self._enable_depth = bool(enable_depth) and self._profile.retrieves_depth
         self._tracking_loss_every = int(tracking_loss_every)
         self._low_confidence_every = int(low_confidence_every)
         self._skeleton = skeleton
@@ -126,7 +129,7 @@ class MockCameraBackend(CameraBackend):
         return BackendCapabilities(
             color=True,
             depth=self._enable_depth,
-            body_tracking=True,
+            body_tracking=self._profile.computes_body,
             native_recording=False,
             multi_body=self._num_bodies > 1,
             device_enumeration=False,
@@ -162,8 +165,14 @@ class MockCameraBackend(CameraBackend):
             length_unit="meter",
             body_format=self._skeleton.name,
             depth_available=self._enable_depth,
-            body_tracking_available=True,
-            extra={"deterministic": True, "seed": self._seed, "synthetic": True},
+            body_tracking_available=self._profile.computes_body,
+            extra={
+                "deterministic": True, "seed": self._seed, "synthetic": True,
+                "num_bodies": self._num_bodies,
+                "tracking_loss_every": self._tracking_loss_every,
+                "low_confidence_every": self._low_confidence_every,
+                "frame_index_semantics": "synthetic_source_ordinal",
+            },
         )
         return self._info
 
@@ -191,7 +200,7 @@ class MockCameraBackend(CameraBackend):
         return self._info
 
     def skeleton_spec(self) -> Optional[SkeletonSpec]:
-        return self._skeleton
+        return self._skeleton if self._profile.computes_body else None
 
     # ---------------------------------------------------------------- frames
     def grab_frame(self) -> Optional[FramePacket]:
@@ -222,7 +231,7 @@ class MockCameraBackend(CameraBackend):
             body
             for slot in range(self._num_bodies)
             if (body := self._render_body(index, slot)) is not None
-        )
+        ) if self._profile.computes_body else ()
         color = self._render_color(index, bodies)
         depth = self._render_depth(index) if self._enable_depth else None
         camera_timestamp_ns = int(index * (1_000_000_000 / self._fps))
@@ -237,6 +246,7 @@ class MockCameraBackend(CameraBackend):
             capture_status=CaptureStatus.OK,
             origin=DataOrigin.SYNTHETIC,
             backend_dropped_frames=self._backend_drops,
+            source_resolution=(self._width, self._height),
         )
 
     @property

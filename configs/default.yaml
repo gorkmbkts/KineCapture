@@ -40,16 +40,25 @@ capture:
   resolution: "HD720"          # HD720 | HD1080 | HD1200 | SVGA | VGA ...
   fps: 30
   depth_mode: "NEURAL_LIGHT"   # NEURAL_LIGHT | NEURAL | NEURAL_PLUS | ULTRA ...
-  enable_depth: true
-  enable_body_tracking: true
-  body_format: "BODY_34"       # BODY_18 | BODY_34 | BODY_38
-  body_tracking_model: "HUMAN_BODY_MEDIUM"
+  recording_policy_version: 2
+  enable_depth: false
+  enable_body_tracking: false
+  store_skeleton: false
+  store_proxy: false
+  store_color: false
+  depth_archive: "none"
+  native_compression: "H264_LOSSLESS"
+  preview_enabled: true
+  preview_fps: 15
+  preview_width: 640
+  body_format: "BODY_38"       # BODY_18 | BODY_34 | BODY_38
+  body_tracking_model: "HUMAN_BODY_ACCURATE"
   enable_body_fitting: true
   detection_confidence: 40
   coordinate_system: "RIGHT_HANDED_Y_UP"
   length_unit: "METER"
-  # SVO2 keeps the raw stream so depth can be regenerated; storing depth frames
-  # a second time would duplicate gigabytes for no gain.
+  # Minimum source: lossless stereo SVO + calibration, parameters and timestamps.
+  # Optional measured-live depth differs from a later reconstruction.
   store_native_recording: true
   store_depth_frames: false
   # Width of the review proxy video. The proxy exists for scrubbing; the SVO2

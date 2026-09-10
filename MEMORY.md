@@ -1,7 +1,7 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: gpt6_astra_squat_offline_investigation_handoff_prepared
+status: squat_offline_investigation_complete_awaiting_implementation_approval
 last_updated: 2026-09-10
 app_version: 0.10.0
 ---
@@ -2117,6 +2117,200 @@ identity SQLite `1`. Önceden var olan kirli `label_dialogs.py`,
 `test_shell_chrome_gui.py` ve `test_label_dialog_class_creation.py`
 değişiklikleri korunmuştur; bu tur yalnız yeni handoff Markdown'u ve bu hafıza
 bölümünü eklemiştir.
+
+## 6T. Squat/offline incelemesi tamamlandı — yeni veri bütünlüğü bulguları (2026-09-10)
+
+Kullanıcı `GPT6_ASTRA_KINECAPTURE_SQUAT_OFFLINE_INCELEME_GOREVI.md` içindeki
+incelemenin uygulanmasını istedi. AGENTS.md, bu MEMORY.md'nin tamamı ve görev
+dosyası okundu; gerçek kod, log, kullanıcı tercihi, read-only identity proje
+alanları, iki kalıcı eski take ve tanı görselleri yeniden incelendi. Bu tur
+uygulama geliştirmesi değildir: kaynak/test kodu, configs, şemalar, kullanıcı
+tercihi, identity DB ve eski ham/türetilmiş kayıtlar değiştirilmedi. Rapor:
+[KINECAPTURE_SQUAT_OFFLINE_INCELEME_RAPORU_2026-09-10.md](C:/Users/gorke/Desktop/KineCapture/KINECAPTURE_SQUAT_OFFLINE_INCELEME_RAPORU_2026-09-10.md).
+
+Başlangıç Git ağacı temizdi; HEAD `d3182f5`. 6S/görev dosyasındaki eski dirty
+liste güncel değildi; ilgili kullanıcı değişiklikleri commit içinde korunmuştu.
+Bu turun repository değişiklikleri yalnız bu hafıza ve yeni rapordur. Yalnız
+mevcut `C:\Users\gorke\anaconda3\envs\KineSynth\python.exe` kullanıldı; paket
+kurulmadı/güncellenmedi, environment oluşturulmadı, yeni kamera kaydı alınmadı.
+
+### Bugünkü kanıt ve geçmiş kanıt ayrımı
+
+- Eski kötü squat SVO'ları kullanıcı tarafından silinmiş; bulunmayan
+  `pytest-386` dataset kökü, stale kullanıcı tercihi ve iki identity proje
+  kaydı aynı durumda. Bunlar düzeltilmedi/DB'den silinmedi; kalıcı projeler
+  içe aktarılmadı. Kullanıcı profilinin erişilebilir bölümünde yalnız iki
+  Ağustos SVO bulundu. `rg` taraması ilgisiz bir Windows CloudStore alt yolunda
+  hata verdi; bütün disklerde kesin yokluk iddiası değil.
+- 2 Eylül depth kuyruğunda 15 kayıp/PARTIAL/610 kare yaklaşık 14.2 FPS ve
+  3 Eylül 1078 kare/45.9 s/23.4 FPS olayları logdan bugün doğrulandı. 3 Eylül
+  ayrı testtir, kontrollü 15→23.4 FPS iyileşmesi sayılmaz.
+- Önceki squat BODY_34/38 açıları, reprojection medyan 0.00/p95 0.01 px ve
+  yanlış diz confidence yaklaşık 0.971 **önceki ölçüm** olarak kaldı. Bugün
+  ham kaynakla tekrar hesaplanmadı. Yerel tanı PNG'leri görsel kanıt olarak
+  incelendi; hiçbir sporcu görüntüsü dış servise yüklenmedi.
+- BODY_38 güçlü aday; eğitimde squat olmadığı bilinmiyor. En güçlü açıklama
+  önden görünüm/örtüşme ile SDK poz tahmini/fitting davranışı. Tek sporcu ve
+  iki geçmiş klip genelleme kanıtı değil. Offline aynı modelin semantik
+  hatasını kendiliğinden çözmez.
+
+### Yeni ve öncelikli hata: SDK depth tampon sahipliği
+
+**Bugün gerçek SDK ve değiştirilmemiş RgbdArchiveWriter ile yeniden üretildi.**
+`camera/zed.py:533` içindeki
+`np.ascontiguousarray(self._mat_depth.get_data(), dtype=np.float32)`, SDK'nin
+varsayılan `deep_copy=False` dönüşü zaten contiguous float32 olduğu için
+kopya oluşturmuyor. FramePacket ve `RgbdArchiveWriter.add_frame()` de kopya
+sahipliğini sağlamıyor; writer `np.asarray` ile veriyi chunk dolana kadar
+tutuyor. Sonraki retrieve_measure önceki kare belleğini değiştirebiliyor.
+
+Üç SDK depth karesi, her birinin bağımsız referans kopyası alınarak mevcut
+yazıcıya chunk_frames=3 ile verildi. Arşivden geri okunan 0/1/2 karelerinin
+kendi özgün verisine eşitliği `[false, false, true]`; son kareye eşitliği
+`[true, true, true]`; ilk/son array ortak bellek taşıyor. Dört tam BODY
+geçişindeki iki karelik probes da retained_previous_changed=true verdi.
+Bu test canlı GUI üzerinden tam oturum değildir; etkilenen geçmiş kare sayısı
+bilinmiyor. Fakat gerçek buffer/yazıcı kusuru doğrulanmış durumda.
+
+Bu bulgu, eski “lossless canlı depth birebir korunuyor” genel kabulünü
+geçersiz kılan önemli sınırlamadır: sıkıştırmanın kayıpsızlığı doğru anın
+ölçümünün saklandığını kanıtlamaz. Önceki canlı/SVO replay depth farkının
+büyüklüğü, tampon alias etkisi dışlanmadan yalnız SDK farkı sayılamaz. SVO
+depth'i yine reconstructed_offline olarak tutulmalı; geçmiş ham depth
+üzerine düzeltme yazılmamalı. Bu hata SDK'nin kendi squat skeleton geometrisi
+ile ayrı bir sorundur. Onay sonrası en küçük öneri: SDK sınırında owned
+snapshot, yeniden kullanılan tamponla regresyon, RAM/kopyalama ölçümü.
+**Bu turda düzeltme uygulanmadı.**
+
+### Gerçek offline deneyler ve yeni frame-map bulgusu
+
+Geçici kök:
+`C:\Users\gorke\AppData\Local\Temp\kinecapture_offline_audit_3213e217b93146a894135cd5439dca7d`.
+Deney öncesi yaklaşık 207 GB alan vardı; tam depth arşivi üretilmedi. Yalnız
+3 karelik tampon deneyi yaklaşık 6 MB yazdı. `audit.py`, `followup.py`, JSON
+özetleri, partial stream'ler ve test XML'i burada; bunlar geçici/türetilmiş.
+Önemli sayılar kalıcı rapora aktarıldı. Aynı betikler aynı dosya adlarını
+kullandığından mevcut dizinde körlemesine yeniden çalıştırılmamalı.
+
+İki RGB-only, dört BODY_34/38 sıralı geçişi ve 40 karede bir kooperatif iptal
+yapıldı. Kaynak HD720/30; RGB retrieval 640×360; body geçişleri ACCURATE,
+NEURAL_PLUS, fitting/tracking açık, confidence 40, reduced precision kapalı,
+svo_real_time_mode=False. Eski canlı take profili MEDIUM/NEURAL_LIGHT olduğu
+için yeni sonuçlar aynı canlı profilin karşılaştırması değildir.
+
+| Kaynak | SDK kare bildirimi / okunan | RGB decoding FPS | BODY_34 FPS / gövdeli kare | BODY_38 FPS / gövdeli kare |
+|---|---|---:|---|---|
+| take_20260820T165211_daeb | 668 / 667 | 69.43 | 17.02 / 609 | 14.80 / 615 |
+| take_20260821T111845_4ed7 | 230 / 229 | 65.07 | 17.19 / 226 | 13.79 / 229 |
+
+- B'de BODY_38 tüm 229 karede iki kişi buldu; BODY_34 hiç iki kişi bulmadı.
+  Proxy'de ana oturan kişi ve sağda kısmen görünen başka kişi var. Daha fazla
+  kişi bulmak squat doğruluğu veya doğru katılımcı eşlemesi kanıtı değildir.
+- Body geçişleri kaynak 30 FPS'in altında olmasına rağmen RGB geçişinin aynı
+  okunabilir konumlarını sıralı, tekrarsız ve ek iç boşluksuz işledi. Bu, yavaş
+  offline işlemenin ek kare atlaması gerektirmediğini doğrular.
+- A'da 0..666, B'de 0..228 okunuyor; SDK'nin bildirdiği son 667/229 konumuna
+  ayrıca seek de EOF dönüyor. Bütün tam geçişler declared count kontrolünü
+  geçemediği için partial tutuldu; başarılı publish yolu denenmedi. SDK EOF
+  sayımı/eskiden kayıt sınırı/dosya sorunu ayrımı bilinmiyor. Otomatik N−1
+  istisnası konmamalı.
+- Her iki take'te live[1:] timestamp'leri mikro saniyeye nicemlendiğinde SVO
+  0..N−2 ile tam eşleşiyor. Eşleşmeyen **canlı ilk kare**, ilk SVO timestamp'inden
+  A'da 66.744899 ms, B'de 66.757700 ms önce. Bu “canlı son kare eksik” değildir.
+  Bildirilen son SVO'nun okunamamasıyla nedenselliği kanıtlanmadı. Yeni offline
+  skeleton'ı eskisinin üzerine yazmak annotation konumlarını kaydırabilir.
+- 40 karede kooperatif iptal kaynak hash'ini değiştirmedi; yalnız partial çıktı
+  bıraktı. Süreç kill, elektrik kesintisi, resume ve tracker durum devamlılığı
+  test edilmedi.
+- Aşama süreleri raporda: grab medyan yaklaşık 48–50 ms; body retrieval ve
+  Python dizi hazırlığı BODY_34 yaklaşık 7.5–8 ms, BODY_38 yaklaşık 15–20 ms.
+  GPU kernel profiling değil; grab saf depth süresi sayılamaz. Açılış hariç;
+  tam proxy/depth yazımı yok. RGB FPS canlı NVENC/capture benchmark değildir.
+
+### Diğer doğrulanan sözleşme açıkları
+
+- `start_native_recording` H264 hardcode'u ve manifestte tercih codec'inin
+  yazılması sürüyor. Playback `get_recording_parameters()` H265 döndürdü ama
+  bu yeni RecordingParameters varsayılanıyla aynı; eski SVO codec'i olarak
+  doğrulanmadı. Requested/applied/readback bilinmiyor ayrımı önerildi.
+- Backend frame_index başarılı grab başına yerel sayaç; manifestteki “kameranın
+  kendi sayacı” açıklaması yanlış. missing_frame_indices=0 sensör kapsamını
+  kanıtlamaz. Backend cumulative drop sayısı take içi delta sayılamaz.
+- stop_recording native stop → sentinel → writer join sırasındayken acquisition
+  `_writer` var oldukça enqueue edebiliyor; zaman aşımı sonrası finalize riski
+  var. Gerçek eski indeks farkının nedeni olduğu yalnız hipotezdir.
+- finalize, take.json'u checksums'tan önce yazıyor; dosya bazında atomicity bütün
+  kapanış işlemini atomik yapmıyor. İki eski take'te raw/proxy/skeleton mevcut
+  checksum'la eşleşiyor, take.json eşleşmiyor. İnceleme öncesi/sonrası dosyalar
+  aynı. `_ask_verdict` sonrası mutable kalite/not kaydı muhtemel açıklama,
+  geçmiş olay nedeni kanıtlanmadı. Ham checksum ve mutable metadata ayrılmalı.
+- Raw-only ürün modu ve genel SVO job katmanı yok. Reader sabit skeleton/proxy
+  yollarını ve skeleton kare sayısını kullanıyor; export hazır olma durumu
+  offline/QC bilmez. CaptureMode guided/free anlamı korunmalı, processing ayrı
+  boyut olmalı. Bilinmeyen JSON alanı eklemek model/reader'ı düzeltmez.
+- SubjectLock body/keypoint bağımlı; aynı tracker ID dönüşünü güvenilir sayan
+  hızlı yol yanlış kişi riski taşıyor. select_subject displayed packet yerine
+  yeniden peek timestamp'i alıyor. Yeni hint gösterilen kareye bağlanmalı.
+  Genel tracking_coverage seçili kişiyi ölçmez; subject_coverage paydasında
+  ambiguous kareler yok. Bunlar ayrı ve bütün ilgili kareler üzerinden ölçülmeli.
+- Preview timer zaten acquisition'dan ayrı; yalnız GUI FPS azaltmak her grab'deki
+  full RGB/depth/body işini kaldırmaz. FramePacket RGB/depth aynı H×W ister;
+  düşük çözünürlüklü preview ayrı sözleşme gerektirir.
+
+### Çalıştırılan testler ve sınırlar
+
+- `-B -m kinecapture.tools.verify_zed_topology`: SDK 5.4.1 ile BODY_18 18/19,
+  BODY_34 34/35, BODY_38 38/37 eklem/bağlantı eşleşti.
+- Seçili 6 test dosyası: `test_zed_adapter.py`, `test_capture.py`,
+  `test_rgbd_archive.py`, `test_subject_lock.py`, `test_storage.py`,
+  `test_capture_subject_gui.py`.
+- İlk koşu uzun audit temp yolu altında 13 failure + 14 setup error verdi
+  (WinError 3 uzun yol sorunları). Aynı kapsam yeni kısa
+  `C:\Users\gorke\AppData\Local\Temp\kcA3213` basetemp ile,
+  `-B -m pytest -o addopts='' -q --tb=short -p no:cacheprovider` üzerinden
+  **143 passed in 23.73s**. JUnit `pytest_short_path.xml` deney kökünde.
+- Eski hafızadaki uzun yol sorununu yalnız proxy ile sınırlayan kabul doğru
+  değil; metadata taraması/depth dosya erişimi de bu uzun yolda etkilendi.
+  Kısa yolda test geçmesi uzun yol düzeltmesi değildir.
+- Testler offscreen GUI ve mock yolları kapsar; SDK buffer alias regresyonu
+  içermedikleri için yeni arşiv hatasını çürütmez. Yeni test kodu yazılmadı.
+- Tam suite, self-test, gerçek camera capture, codec/precision/FAST A/B,
+  koç pilotu, crash/power-loss/resume, başarılı atomic publish yapılmadı.
+- Deneyler ve testler sonunda kaynak/test/config/pyproject, gerçek user_state,
+  identity DB ve iki take içindeki 154 dosyanın hash+mtime kontrolünde değişen
+  dosya yok. Kontrol MEMORY/raporu ve bütün kullanıcı diskini kapsamaz.
+- Rapor teslim kontrolünde 10 ana bölüm, yerel bağlantıların varlığı/satır
+  sınırları ve tablo sütunları doğrulandı; JUnit XML'de 143 test, 0 hata,
+  0 failure, 0 skipped görüldü. `git diff --check` geçti. Yalnız MEMORY.md
+  değişikliği ve yeni rapor working tree'de kaldı.
+
+### Öneri ve kalıcı sınır
+
+Raporda dört plan, 13 alanlı karşılaştırma, Faz 0–5, coach GUI/failure states,
+offline kişi kartları/hafif tracker/hibrit/tek kişi alanı karşılaştırması,
+en az 5 sporcu için kontrollü ZED matrisi ve önerilen başarı kapıları var.
+Öneri: önce depth sahiplik + gözlemleme, ardından Plan 2 raw-only + sürümlü
+offline BODY_38; canlı kişi ipucu ancak pilotta koç yükü gerektirirse Plan 3.
+Plan 4 referans doğruluk yetersizse araştırma. Planlar **onaylanmış uygulama
+kararı değildir**. Kaynak FPS ve squat doğruluğu garanti edilmedi.
+
+Önerilen yeni mimaride raw hash/ledger, derived version, source frame map,
+subject association revision ve annotation/release bağı ayrı korunmalı.
+Tespitsiz kare atlanmamalı; canonical skeleton kural tabanlı sessiz düzeltilmemeli.
+Resume'da tracker state saklanamıyorsa baştan/history replay gerekeceği açık
+olmalı; N'ye seek edip ID sürekliliği varsayılmamalı. Şema numarası atanmadı.
+
+Gerçek sürümler değişmedi: app/package `0.10.0`; project `1.1.0`, session
+`2.0.0`, take/skeleton stream `1.1.0`, annotation/release `2.2.0`, label
+`2.0.0`, feature/raw archive `1.0.0`, identity SQLite `1`. Eski iki take
+app `0.3.0`, take/skeleton `1.0.0`; migration yapılmadı. Yerel Python 3.11.14,
+SDK 5.4.1, driver 616.56, RTX 2060 6 GB, i7-10750H, yaklaşık 15.84 GiB RAM
+yeniden sorgulandı; kamera listesi boştu. Resmî Stereolabs belgeleri güncel
+olarak kontrol edildi; belgedeki başka donanım FPS'i bu makineye taşınmadı.
+
+Görev talimatı gereği rapor tesliminden sonra duruldu. Uygulama geliştirmesi
+ayrı kullanıcı onayını bekler; bu tur onay için yeniden kamera bağlama şartı
+konmadı ve gereksiz veri/yol düzeltmesi yapılmadı.
 
 ## 7. Mimari sınırlar
 

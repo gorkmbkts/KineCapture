@@ -130,7 +130,7 @@ class AppConfig:
                     f"Geçerli değerler: {', '.join(b.value for b in BackendKind)}"
                 ) from exc
         if isinstance(self.capture, Mapping):
-            self.capture = CaptureProfile.from_dict(self.capture)
+            self.capture = CaptureProfile.for_new_capture(self.capture)
         if isinstance(self.mock, Mapping):
             known = {f.name for f in fields(MockSettings)}
             self.mock = MockSettings(**{k: v for k, v in self.mock.items() if k in known})
@@ -240,7 +240,10 @@ def load_config(
     if candidate.is_file():
         payload = _read_yaml(candidate)
     if include_user_state and USER_STATE_PATH.is_file():
-        payload = _deep_merge(payload, _read_yaml(USER_STATE_PATH))
+        overlay = _read_yaml(USER_STATE_PATH)
+        if isinstance(overlay.get("capture"), Mapping):
+            overlay["capture"] = CaptureProfile.for_new_capture(overlay["capture"]).to_dict()
+        payload = _deep_merge(payload, overlay)
     try:
         return AppConfig.from_mapping(payload)
     except ConfigError:
