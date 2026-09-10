@@ -12,7 +12,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtCore import QEvent, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QScrollArea  # noqa: E402
 
 from kinecapture.core.config import AppConfig  # noqa: E402
@@ -28,8 +28,21 @@ def qapp():
     return QApplication.instance() or QApplication([])
 
 
-@pytest.fixture
-def window(qapp, tmp_path):
+def destroy(widget) -> None:
+    """Actually delete a window, not merely schedule it.
+
+    ``deleteLater`` only queues the deletion; without an event loop turn the
+    window stays alive for the rest of the session. That matters here because
+    ``QApplication.setStyleSheet`` restyles *every* live widget, so windows
+    left behind by earlier tests make each later theme switch slower than the
+    last - these tests took minutes each before this line existed.
+    """
+    widget.close()
+    widget.deleteLater()
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
+def build_window(tmp_path) -> MainWindow:
     config = AppConfig(
         dataset_root=tmp_path / "data",
         log_dir=tmp_path / "logs",
@@ -38,10 +51,16 @@ def window(qapp, tmp_path):
     window = MainWindow(config)
     window.resize(1120, 700)
     window.show()
-    qapp.processEvents()
+    QApplication.processEvents()
+    return window
+
+
+@pytest.fixture
+def window(qapp, tmp_path):
+    """A window whose identity database is this test's own."""
+    window = build_window(tmp_path)
     yield window
-    window.close()
-    window.deleteLater()
+    destroy(window)
 
 
 @pytest.fixture
@@ -152,41 +171,43 @@ def test_a_missing_crest_leaves_a_working_sign_in(qapp, tmp_path, monkeypatch):
         assert page._setup_fields.line("username").isVisible()
         assert not window.grab().isNull()
     finally:
-        window.close()
-        window.deleteLater()
+        destroy(window)
 
 
-@pytest.mark.parametrize("size", VIEWPORTS)
 @pytest.mark.parametrize("theme_name", THEMES)
 def test_the_sign_in_form_fits_every_supported_window(
-    qapp, window, theme_name, size
+    qapp, window, theme_name
 ) -> None:
-    width, height = size
-    qapp.setStyleSheet(build_stylesheet(get_theme(theme_name)))
-    window.resize(width, height)
-    qapp.processEvents()
+    """All three viewports against one window, one stylesheet application.
 
+    The sizes are looped inside the test rather than parametrised because
+    applying the stylesheet is what costs time, and the size is what is being
+    varied - reapplying the theme per size measured nothing extra.
+    """
+    qapp.setStyleSheet(build_stylesheet(get_theme(theme_name)))
     page = window._auth_page
     fields = page._setup_fields
-    assert page._scroll.widget() is not None
-    for name in ("first_name", "last_name", "username"):
-        line = fields.line(name)
-        assert line.width() > 0, f"{name} collapsed at {size}"
-    assert not window.grab().isNull()
+
+    for width, height in VIEWPORTS:
+        window.resize(width, height)
+        qapp.processEvents()
+
+        assert page._scroll.widget() is not None
+        for name in ("first_name", "last_name", "username"):
+            line = fields.line(name)
+            assert line.width() > 0, f"{name} collapsed at {width}x{height}"
+        assert page._logo.isVisible() or page._logo.pixmap().isNull()
+        assert not window.grab().isNull(), f"paint failed at {width}x{height}"
 
 
-@pytest.mark.parametrize("size", VIEWPORTS)
-def test_the_column_never_stretches_across_a_wide_screen(
-    qapp, window, size
-) -> None:
+def test_the_column_never_stretches_across_a_wide_screen(qapp, window) -> None:
     """A 1600px-wide login form is unreadable; the column is bounded."""
-    width, height = size
-    window.resize(width, height)
-    qapp.processEvents()
-
     column = window._auth_page._stack
-    assert column.width() <= 520
-    assert column.width() >= 320 or width < 400
+    for width, height in VIEWPORTS:
+        window.resize(width, height)
+        qapp.processEvents()
+        assert column.width() <= 520, f"too wide at {width}"
+        assert column.width() >= 320, f"collapsed at {width}"
 
 
 def test_the_short_screen_scrolls_instead_of_clipping(qapp, window) -> None:

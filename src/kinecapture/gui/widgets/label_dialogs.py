@@ -167,6 +167,10 @@ class MovementLabelDialog(QDialog):
             f"“{cleaned}” kaydedince projeye eklenecek ve bu harekete atanacak."
         )
         self._pending_new_class = cleaned
+        # The dialog opened with no class has Save disabled.  Creation is a
+        # valid draft class choice, so recalculate the gate immediately instead
+        # of requiring the coach to close and reopen the window.
+        self._sync()
 
     def _sync(self) -> None:
         """Say what saving will mean, and whether it is possible yet."""
@@ -469,9 +473,9 @@ class ErrorLabelDialog(QDialog):
         if cleaned and cleaned not in self.requested_classes:
             self.requested_classes.append(cleaned)
         self._pending_new_class = cleaned
-        self._status.setText(
-            f"“{cleaned}” kaydedince projeye eklenecek ve bu aralığa atanacak."
-        )
+        # A pending class is enough to satisfy the class half of validation.
+        # Re-run the complete gate because the joint half may still be invalid.
+        self._sync()
 
     def _request_play(self) -> None:
         """Watch the interval again without committing or closing anything."""
@@ -527,13 +531,15 @@ class ErrorLabelDialog(QDialog):
         else:
             self._chips.setText("Henüz eklem seçilmedi.")
 
-        if self._pending_new_class:
-            return
-
         problem = self._validation_problem()
         self._save_button.setEnabled(problem == "")
         if problem:
             self._status.setText(problem)
+        elif self._pending_new_class:
+            self._status.setText(
+                f"“{self._pending_new_class}” kaydedince projeye eklenecek "
+                "ve bu aralığa atanacak."
+            )
         elif self.joint_status is JointAnnotationStatus.UNREVIEWED:
             self._status.setText(
                 "Eklem yanıtı verilmedi; aralık temporal hata eğitiminde "

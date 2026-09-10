@@ -1,9 +1,9 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: affected_joint_evidence_and_gui_prompt_prepared
-last_updated: 2026-08-31
-app_version: 0.9.0
+status: gpt6_astra_squat_offline_investigation_handoff_prepared
+last_updated: 2026-09-10
+app_version: 0.10.0
 ---
 
 # KineCapture Studio — Proje Hafızası
@@ -1691,6 +1691,432 @@ feature spec 1.0.0, raw archive 1.0.0, identity SQLite schema 1.
 ### Bu turda GERÇEKTEN çalıştırılanlar
 
 (Ayrıntılı sayılar bölüm 9'da.)
+
+## 6L. Yeni sınıfı dialogu yeniden açmadan kaydetme düzeltmesi (2026-08-31)
+
+Hareket ve hata etiketleme pencerelerinde yeni bir sınıf adı yazıp `Yeni …
+türü ekle` denildiğinde taslak sınıf doğru biçimde tutuluyor, fakat `Kaydet`
+düğmesinin uygunluk durumu yeniden hesaplanmıyordu. Bu nedenle sınıf ancak
+dialog kapatılıp yeniden açıldıktan sonra atanabiliyordu.
+
+- `MovementLabelDialog._creation_requested()` pending sınıfı kaydettikten
+  sonra save gate'i yeniden hesaplıyor.
+- `ErrorLabelDialog._sync()` pending sınıfta erken çıkmıyor; sınıf ile eklem
+  doğrulamasını birlikte hesaplıyor. Yeni sınıf geçerli olsa bile
+  “işaretlenen eklemler” seçilip node seçilmemişse kayıt hâlâ doğru biçimde
+  engelleniyor.
+- Yeni sınıfın gerçek oluşturulması ve aynı hareket/hata intervaline atanması
+  mevcut `ReviewPage` akışında kaldı. Böylece proje sözlüğünün atomik yazımı,
+  duplicate-normalization, iptalde sınıfın proje düzeyinde kalması ve hata
+  intervalinin class + joint + note tek-işlem güncellemesi değişmedi.
+- `tests/test_label_dialog_class_creation.py`, iki gerçek dialogda başlangıçta
+  pasif olan `Kaydet` düğmesinin yeni sınıf tıklamasından sonra aynı pencere
+  içinde etkinleştiğini ve gerçek Save tıklamasının dialogu kabul ettiğini
+  sabitliyor.
+
+Gerçek kod sürümleri değişmedi: app/package `0.10.0`, annotation/release
+`2.2.0`, label `2.0.0`; diğer schema sürümleri bölüm 6K ile aynıdır.
+
+Gerçekten çalıştırılan doğrulamalar:
+
+- `tests/test_label_dialog_class_creation.py -q` → **2 passed**.
+- İki mevcut sınıf oluşturma/atama ve iki eklem-save doğrulama testi →
+  **4 passed**.
+- Yeni dialog testleri + `test_review_flow.py` ve `test_annotations.py`
+  içindeki `class` odaklı kapsam → **22 passed**. Bu komut önceki dört testten
+  bazılarını tekrar içerir; sayılar bağımsız toplam gibi toplanmamalıdır.
+- `scripts/run_tests.ps1 -Quiet` başlatıldı ve yaklaşık `%57` ilerlemeye kadar
+  hata görülmedi; aynı makinedeki başka yüksek kaynaklı Python sürecine
+  müdahale etmemek için bu Codex test süreci kullanıcıya bildirildikten sonra
+  elle durduruldu. **Tam paket tamamlanmış veya geçmiş sayılmamalıdır.**
+
+Bu küçük GUI durum düzeltmesinde ZED donanımı, self-test ve paket/wheel testi
+çalıştırılmadı; kamera, export, şema ve paket kaynağı değiştirilmedi.
+
+## 6M. 30 günlük zorunlu staj raporu için kaynak denetimi ve anlatı planı (2026-09-01)
+
+Bu tur uygulama geliştirmesi değildir. KineCapture ile KineSynthV3'te bugüne
+kadar yapılan gerçek çalışmaların, her biri yaklaşık 500 kelimelik 30 iş günü
+anlatısına nasıl dönüştürüleceği planlandı. Günler, kesin commit tarihlerini
+taklit eden bir günlük olarak değil; gerçekten yapılmış işleri pedagojik ve
+teknik bağımlılık sırasına koyan **tematik iş paketleri** olarak ele alınacak.
+Kodda, sonuç artefaktlarında veya test kayıtlarında kanıtı olmayan teknik
+başarı, ölçüm ya da özellik rapora eklenmeyecek.
+
+Kaynak önceliği şu şekilde kararlaştırıldı: gerçek kod ve sürüm sabitleri →
+sonuç/manifest/test artefaktları → Git geçmişi → proje hafızası ve README →
+açıklayıcı yeniden çizilmiş şema. Git commit tarihi, tek başına bir çalışmanın
+stajın tam olarak hangi gününde yapıldığının kanıtı sayılmayacak. Nihai raporda
+KineSynthV3 ve KineCapture için dengeli iki ana bölüm, son günde de iki sistemin
+uçtan uca ilişkisi kullanılacak.
+
+Bu incelemede doğrulanan repository gerçekleri:
+
+- KineCapture Git geçmişinde 2026-08-20–2026-08-31 aralığında 9 commit vardır;
+  gerçek kod sürümü **0.10.0**'dır. Şemalar: project 1.1.0, session 2.0.0,
+  take/skeleton stream 1.1.0, annotation/release 2.2.0, label 2.0.0, feature
+  spec/raw archive 1.0.0 ve identity SQLite 1. Bu değerler
+  `pyproject.toml` ile `src/kinecapture/__init__.py` üzerinden yeniden
+  doğrulandı.
+- KineSynthV3 Git geçmişinde 2026-07-16–2026-08-18 aralığında 21 commit vardır;
+  gerçek paket sürümü **0.3.0**'dır. Güncel README, kod ve kayıtlı sonuçlar;
+  conditioned encoder çalışmalarının yanında pseudo-evidence decoder, weak
+  temporal evidence eğitimi ve masaüstü evidence timeline/prediction panelini
+  içerir.
+- KineSynthV3 `project_memory.md` içindeki “encoder-only, evidence decoder
+  uygulanmadı” durumu güncel kodla çelişir; raporda bu eski durum son gerçek
+  durum gibi kullanılmayacak. Eski hafıza tarihsel aşama olarak, güncel kod ve
+  `colab/results/` artefaktları ise mevcut durum için kullanılacak.
+- KineSynthV3 içinde rapora doğrudan alınabilecek 54 conditioned-hybrid analiz
+  figürü ile model sonuç görselleri vardır. KineCapture repository'sinde ürün
+  ekran görüntüsü arşivi yoktur; rapor üretiminde mock backend ve gerekirse
+  güvenli gerçek kayıt kullanılarak yeni, PII içermeyen ekran görüntüleri
+  alınmalıdır.
+
+Bu turda test paketi, self-test, GUI veya ZED donanım doğrulaması
+çalıştırılmadı; yalnız salt-okunur kod, Git geçmişi, dokümantasyon, mevcut
+sonuç artefaktı ve görsel envanteri denetlendi. Kaynak kod, paket ve şema
+sürümleri değiştirilmedi. Çalışma ağacında daha önceden bulunan kullanıcı
+değişikliklerine dokunulmadı; bu bölüm yalnız kalıcı raporlama kararlarını
+ekler.
+
+## 6N. Zorunlu staj raporunun ilk 5 iş günü belgesi (2026-09-01)
+
+30 günlük rapor planının ilk beş günü, düzenlenebilir Word belgesi olarak
+`C:\Users\gorke\Desktop\KineSynthV3\staj_raporu\KineSynthV3_Staj_Raporu_Ilk_5_Gun.docx`
+yolunda üretildi. Kapakta yalnız kullanıcı tarafından verilen kurum bilgileri
+kullanıldı: Yıldız Teknik Üniversitesi, Elektrik-Elektronik Fakültesi,
+Kontrol ve Otomasyon Mühendisliği Bölümü ve araştırma laboratuvarı. Ad,
+öğrenci numarası, staj tarihleri veya laboratuvarın özel adı uydurulmadı.
+
+Günler sırasıyla proje bütününün incelenmesi, REHAB24-6 veri yapısı,
+anotasyon/tekrar sınırları, tekrar bazlı indeksleme ve değişken uzunluklu veri
+erişimi, KineSynthV3 masaüstü inceleme uygulamasını kapsar. Metinler birinci
+tekil şahısla yazıldı; sözcük sayıları gün 1-5 için **509, 502, 500, 502 ve
+500**'dür. YTÜ logosuna ek olarak her gün için kaynak proje artefaktlarından
+bir teknik görsel, şekil açıklaması, kaynak satırı ve alternatif metin
+eklendi. Belge 12 sayfadır.
+
+Doğrulama olarak belge LibreOffice ile PDF/sayfa PNG'lerine çevrildi ve 12
+sayfanın tamamı görsel olarak incelendi; kırpılma, taşma veya okunamayan görsel
+görülmedi. `images_audit.py` altı görselin tamamının inline olduğunu,
+`a11y_audit.py` yüksek/orta/düşük önem düzeyinde bulgu olmadığını ve
+`heading_audit.py` beş adet Heading 1 başlığı bulunduğunu doğruladı. Bu turda
+KineCapture/KineSynth kaynak kodu, kullanıcı verisi veya şemalar değiştirilmedi;
+uygulama testi, self-test, GUI testi ve ZED donanım testi çalıştırılmadı.
+Gerçek sürümler değişmedi: KineCapture **0.10.0** (annotation/release 2.2.0
+dahil önceki bölümdeki şemalar), KineSynthV3 **0.3.0**.
+
+## 6O. İngilizce staj raporu, 6–15. iş günleri (2026-09-02)
+
+Kullanıcının sonraki raporlar için kalıcı biçim tercihi güncellendi: rapor dili
+**İngilizce**, her günün ana metni **300–400 kelime**, düzen ise kopyalamayı
+kolaylaştıran sade metin + inline proje görseli olacaktır. Özel kapak, dekoratif
+sayfa öğeleri, görsel hizalama çalışması veya yoğun masaüstü yayıncılık düzeni
+yapılmayacak. Günler kesin commit tarihlerini taklit etmeyecek; 6M'de
+kararlaştırıldığı gibi gerçek çalışmaları teknik bağımlılık sırasına yerleştiren
+tematik iş paketleri olarak yazılacaktır.
+
+6–15. günler için düzenlenebilir Word belgesi
+`C:\Users\gorke\Desktop\KineSynthV3\staj_raporu\KineSynthV3_Internship_Report_Days_06_15_EN.docx`
+yolunda üretildi. Konular sırasıyla eğitim zamanı preprocessing ve zamansal
+standardizasyon, subject-wise split/leakage önleme, 26 eklemli graph ve CTR-GCN,
+temporal Transformer + hibrit mimari, exercise-conditioned correctness,
+training/checkpoint/reproducibility, Small/Medium/Large kapasite deneyi, pooled
+OOF değerlendirme, weak temporal evidence modeli ve masaüstü evidence explorer
+entegrasyonudur. Gün 6–15 ana metin sözcük sayıları sırasıyla **381, 377, 389,
+367, 382, 364, 371, 344, 341 ve 362**'dir.
+
+Belgede yalnız güncel kod/README ve kayıtlı sonuç artefaktlarıyla doğrulanan
+değerler kullanıldı. P1–P9 ana benchmarkı 1.049 örnek ve dokuz katlı LOSO'dur;
+conditioned kapasite sonuçları correctness balanced accuracy için Small 0.6163,
+Medium 0.6985, Large 0.7514; weak temporal evidence final run sonucu 0.7612 BA
+ve 0.7620 macro-F1'dir. Suspected interval'ların frame-level ground truth veya
+klinik hata sınırı olmadığı açıkça yazıldı; conditioning müdahalelerinde
+bağlantının pratik etkisinin zayıf olduğu da abartılmadan raporlandı.
+
+Nihai DOCX LibreOffice ile 13 sayfaya render edildi ve sayfaların tamamı görsel
+olarak incelendi; kırpılma, taşma, bindirme, boş sayfa veya görselden ayrılmış
+caption görülmedi. Son erişilebilirlik metadata eklemesinden önceki ve sonraki
+13 sayfa PNG'lerinin SHA-256 karşılaştırması tamamen aynıdır. `images_audit.py`
+10 görselin tamamının inline olduğunu, `heading_audit.py` 10 adet Heading 1
+bulunduğunu, `a11y_audit.py` ise yüksek/orta/düşük önem düzeyinde bulgu
+olmadığını doğruladı. Bu turda uygulama kaynak kodu, kullanıcı verisi, paket veya
+şema değiştirilmedi; KineCapture **0.10.0** (project 1.1.0, session 2.0.0,
+take/skeleton stream 1.1.0, annotation/release 2.2.0, label 2.0.0,
+feature/raw archive 1.0.0, identity SQLite 1) ve KineSynthV3 **0.3.0** olarak
+kaldı. Uygulama testi, self-test, GUI testi ve ZED donanım testi çalıştırılmadı;
+yalnız belge sözcük sayımı, render, görsel, başlık ve erişilebilirlik denetimleri
+çalıştırıldı.
+
+## 6P. Squat bacak takibi ve ertelenmiş iskelet işleme tanısı (2026-09-02)
+
+Bu tur bir uygulama geliştirme turu değildir. Kullanıcının squat sırasında bir
+veya iki bacağın dizden bükülmeyip gövdeyle birlikte düz aşağı indiği gözlemi
+gerçek kayıtlar, kaynak kod ve ZED SVO2 yeniden oynatması üzerinde salt-okunur
+incelendi. Uygulama kaynak kodu ve kullanıcı kaydı değiştirilmedi.
+
+### Kök neden hakkında doğrulananlar
+
+- `ZedCameraBackend._retrieve_bodies()` SDK'nın `body.keypoint`,
+  `keypoint_2d` ve güven dizilerini eklem sırasını/geometrisini değiştirmeden
+  `BodyPose` içine geçiriyor. Uygulama tarafında dizleri düzelten, yeniden
+  eşleyen, yumuşatan veya önceki kareyle dolduran gizli bir dönüşüm yok.
+- `take_20260902T075335_36a0` kaydının proxy görüntüsünde dip squatta iki diz
+  de bükülmüşken BODY_34 çıktısı sporcunun sol kalça-diz-ayak bileğini neredeyse
+  aynı düşey çizgiye koydu. Hata yalnız 3B derinlik üretiminde oluşmadı: SDK'nın
+  kendi 2B keypoint'i de bu bacağı düz kabul etti. Sol diz güveni hatalı karede
+  yaklaşık `0.971` idi; dolayısıyla yalnız güven eşiği yükseltmek bu örneği
+  elemez.
+- Aynı kayıtta kaydedilen 3B noktaların kamera intrinsics'iyle yeniden
+  izdüşümü ile SDK 2B noktaları arasındaki medyan fark `0.00 px`, p95
+  `0.01 px` çıktı. RGB/iskelet uzayı veya uygulama çizimi kayması kök neden
+  değildir; yanlış poz SDK çıktısının kendi içinde tutarlıdır.
+- ZED eğitim dataseti kamuya açık olmadığı için “model squat görselleriyle
+  eğitilmedi” iddiası doğrulanamaz. Gözlenen hata bu olasılıkla uyumludur,
+  fakat daha somut açıklama BODY_34 pose hattının önden squat geometrisinde
+  yanlış bir kinematik çözüme kilitlenmesidir. Önden görünümde diz fleksiyonu
+  büyük ölçüde kamera derinlik ekseninde olur; 2B kalça-diz-ayak bileği neredeyse
+  üst üste gelebilir. Body fitting'in geçmiş ve insan kinematik kısıtlarıyla
+  eksik eklemleri tamamlaması yanlış düz-bacak çözümünü sürdürebilir.
+- SDK 5.4.1 varsayılanları yerel `KineSynth` ortamında okundu:
+  `skeleton_smoothing=0.0`, `minimum_keypoints_threshold=0`,
+  `allow_reduced_precision_inference=False`, `prediction_timeout_s=0.2`.
+  Yani hata fazla smoothing veya reduced precision kullanımından gelmiyor.
+
+### Aynı SVO2 üzerinde offline karşılaştırma
+
+Kaynak SVO2 dosyalarına dokunmadan `svo_real_time_mode=False`,
+`HUMAN_BODY_ACCURATE`, `NEURAL_PLUS`, body fitting açık olacak şekilde bütün
+kareler sırayla yeniden işlendi.
+
+- `take_20260902T075335_36a0`, BODY_34: 176 kare grab, 174 gövdeli kare,
+  11.60 s (`15.17 işleme FPS`). Dört dip squat grubunun üçünde sol diz
+  `178.8-179.0 derece` ile düz kaldı; yalnız bir tekrar doğru büküldü. Bu,
+  offline işlemenin kare kaybını çözse bile aynı BODY_34 model hatasını tek
+  başına çözmediğini kanıtlıyor.
+- Aynı SVO2, BODY_38: 176 grab ve 176 gövdeli kare, 13.38 s (`13.16 işleme
+  FPS`). Dört tekrarın tamamında iki diz de dipte yaklaşık `45-61 derece`
+  aralığında büküldü.
+- Bağımsız ikinci sorunlu `take_20260902T075046_63e2` kaydında BODY_34 dip
+  medyanı sağ diz için `178.4 derece` idi. BODY_38 offline çıktısında dip
+  medyanları sol `59.6`, sağ `57.2 derece` oldu (198/198 gövdeli kare).
+
+Bu iki kayıt BODY_38'i squat için güçlü bir çözüm adayı yapıyor; yine de nihai
+ürün kararı daha fazla kişi, kıyafet, mesafe ve kamera açısıyla kontrollü A/B
+doğrulama sonrasında alınmalıdır. BODY_38 aynı donanımda BODY_34'ten daha yavaş
+çalıştığı için canlı modda performans sorununu büyütebilir; offline modla iyi
+eşleşmesinin nedeni budur.
+
+### Canlı performans tanısı
+
+- Kullanıcı ayarı HD1080, istek 25 FPS, NEURAL_PLUS,
+  HUMAN_BODY_ACCURATE, BODY_34 ve body fitting açık. Kamera bu desteklenmeyen
+  kombinasyonda gerçekte `30.0 FPS` raporladı; take profile 25'i saklarken
+  `CameraInfo` 30'u saklıyor. GUI 1-120 arası her sayıya izin verdiği için
+  çözünürlüğe bağlı desteklenen ZED FPS değerleri doğrulanmıyor.
+- İncelenen HD1080 take'lerde ölçülen acquisition `14.17-15.67 FPS`, maksimum
+  kare boşluğu `133-334 ms` idi. En son kayıtta 610 kare / 42.99 s,
+  `14.17 FPS`; 15 derinlik karesi arşivlenemediği için take `PARTIAL` kaldı.
+- Donanım: RTX 2060 6 GB, i7-10750H (6C/12T), 16 GB RAM. Canlı her grab'da
+  sırasıyla renk, NEURAL_PLUS derinlik ve Accurate body tracking çalışıyor;
+  writer ayrıca kayıpsız float32 derinliği sıkıştırıyor. HD1080/30 kaynak bu
+  makinede yaklaşık yarı hızda tüketilebiliyor.
+- `backend_dropped_frames` SDK'nın bağlantı boyunca kümülatif sayacının take
+  içindeki maksimumudur; take başlangıcındaki değeri çıkarmadığı için kesin
+  take-başına kayıp değildir. Mevcut değerler kayıp olduğunu gösterir fakat
+  doğrudan toplanmamalıdır.
+
+### Ertelenmiş işleme uygulanabilirliği ve mimari kapsamı
+
+Resmî ZED sözleşmesinde SVO açıldığında depth/body tracking dahil modüller canlı
+kamera gibi kullanılabilir. Dolayısıyla yalnız stereo SVO2 + hafif RGB önizleme
+kaydedip iskeleti sonra, her kareyi sırayla ve gerekirse BODY_38/daha ağır bir
+modelle üretmek teknik olarak uygulanabilir ve bu donanım için anlamlıdır.
+
+Ancak mevcut kodda SVO input backend'i veya post-processing job katmanı yoktur.
+Ürünleştirme için en az şunlar gerekir: canlı-iskelet ile raw-only modunu ayrı
+provenance olarak saklamak; `awaiting_processing/processing/processed/failed`
+durumları; ilerleme/iptal/yeniden deneme; SVO checksum + SDK/model/parametre
+manifesti; staging'e yazıp atomik yayınlanan sürümlü `derived` çıktısı; offline
+kişi seçimi/subject association; annotation'ın bağlı olduğu iskelet sürümünü
+değiştirmeme veya yeniden işlemeyi annotation sonrası engelleme; crash recovery
+ve GUI/test kapsamı. Bu nedenle proof-of-concept orta, güvenli ürün entegrasyonu
+orta-yüksek zorluktadır.
+
+Raw-only modda canlı derinlik hiç üretilmediği için “kayıt anındaki ölçülmüş
+derinliği koruma” şartı uygulanmaz; SVO'dan sonra hesaplanan derinlik açıkça
+`reconstructed_offline` provenance taşımalıdır. Ham SVO değişmez kalır.
+
+### Kod/hafıza ile çelişen yan bulgular
+
+- `ZedCameraBackend.start_native_recording()` profilin
+  `native_compression` seçimini kullanmıyor ve her zaman `H264` yazıyor; buna
+  rağmen manifest profil değerini beyan ediyor. Ayrıca aynı metodun docstring'i
+  H264 kayıplı olmasına rağmen hâlâ “lossless-by-default” diyor. Offline kalite
+  profili eklenmeden önce gerçek compression seçimi uygulanmalı ve manifest
+  SDK'ya verilen gerçek değeri yazmalıdır.
+- `configs/default.yaml` içindeki eski yorum SVO2'nin derinliği yeniden
+  ürettiği için ikinci derinlik kopyasının gereksiz olduğunu söylüyor; gerçek
+  runtime ve bu hafızadaki ölçüm bunun tersidir. Dataclass varsayılanı nedeniyle
+  uygulama gerçekte `float32_lossless` arşivliyor, fakat shipped yorum/legacy
+  `store_depth_frames: false` yanıltıcıdır.
+- Kullanıcının güncel proje ve yedi gerçek take'i
+  `C:\Users\gorke\AppData\Local\Temp\pytest-of-gorke\pytest-386\viewports0\...`
+  altında. Identity DB ve `~/.kinecapture/user_state.yaml` da bu geçici yolu
+  gösteriyor. Bu tur taşımadı veya yeniden yazmadı; Windows/temp temizliği veri
+  kaybı yaratabileceği için yeni geliştirmeden önce kontrollü, checksum'lu bir
+  kalıcı konuma taşıma/yeniden bağlama planı gereklidir.
+
+### Bu turda gerçekten çalıştırılanlar ve sürümler
+
+- Kaynak inceleme, yedi take metadata/quality/JSONL analizi, gerçek proxy
+  karelerinin ve geçici overlay'lerin görsel incelemesi, iki SVO2 üzerinde üç
+  offline ZED geçişi (BODY_34 bir kez, BODY_38 iki kez), yerel SDK varsayılan
+  parametre introspection'ı ve donanım sorgusu çalıştırıldı. Geçici PNG'ler
+  `%LOCALAPPDATA%\Temp\kinecapture_squat_diag_20260902` altında; dataset ve
+  repository kaynakları değildir.
+- Pytest, self-test, wheel veya canlı kamera testi çalıştırılmadı. Yeni bir
+  canlı BODY_38 take alınmadı; BODY_38 sonucu kayıtlı SVO2 replay kanıtıdır.
+- Uygulama/package `0.10.0`; project `1.1.0`, session `2.0.0`, take/skeleton
+  stream `1.1.0`, annotation/release `2.2.0`, label `2.0.0`, feature/raw
+  archive `1.0.0`, identity SQLite `1`. Hiçbiri değiştirilmedi.
+
+## 6Q. İngilizce staj defteri gün 16–25 (2026-09-06)
+
+Kullanıcının staj defterinin sonraki on günü İngilizce ve iş odaklı olarak
+hazırlandı. Çıktı:
+`C:\Users\gorke\Desktop\KineSynthV3\staj_raporu\KineSynthV3_Internship_Report_Days_16_25_EN.docx`.
+Her gün 300–400 sözcük sınırındadır: gün 16–25 sırasıyla 331, 334, 326, 331,
+333, 328, 319, 344, 335 ve 327 sözcük. Konular kamera backend sözleşmesi,
+deterministik mock backend, ZED 2i adapteri ve BODY topolojileri, threaded
+capture/yazıcı kuyrukları, kurtarılabilir skeleton ve RGB-D kayıtları, subject
+lock, senkron playback, iki seviyeli interval annotation, anatomik joint
+evidence ve feature/release export işidir. Metin deney raporu anlatımından
+kaçınıp birinci tekil şahısla yapılan geliştirme, hata önleme ve doğrulama
+işlerini anlatır.
+
+Belgede 11 inline görsel vardır. Altısı gerçek kaynak koddan oluşturulan,
+dosya ve satırları görünür code screenshot'larıdır; beşi gerçek PySide6
+bileşenlerinin disposable mock proje/kamera verisiyle offscreen çalıştırılıp
+`grab()` ile alınan Capture, Review, Timeline, JointRolePicker ve
+FeatureSelectionDialog görüntüleridir. Görsel üretimi gerçek kullanıcı
+kayıtlarına, identity DB'ye veya kullanıcı tercihine dokunmadı; geçici dataset
+ve LOCALAPPDATA kullanıldı. Kullanıcının mevcut kirli
+`label_dialogs.py`, `test_shell_chrome_gui.py` ve
+`test_label_dialog_class_creation.py` değişiklikleri korunup değiştirilmedi.
+
+Gerçekten çalıştırılan doğrulamalar:
+
+- Mevcut `KineSynth` environment'ında
+  `tests/test_capture.py`, `tests/test_subject_lock.py`,
+  `tests/test_rgbd_archive.py`, `tests/test_timeline_preview.py`,
+  `tests/test_joint_annotation_gui.py`, `tests/test_export.py` ve
+  `tests/test_export_features.py`: toplanan 189 testin tamamı geçti.
+- DOCX, standart renderer ile 14 sayfa PNG ve QA PDF'e çevrildi; her sayfa
+  görsel olarak incelendi. Başlıktaki varsayılan mavi çizgi kaldırıldı.
+- `a11y_audit.py`: high/medium/low 0; `images_audit.py`: 11/11 inline;
+  `heading_audit.py`: 10 adet Heading 1.
+
+Uygulama/package `0.10.0`; project `1.1.0`, session `2.0.0`, take/skeleton
+stream `1.1.0`, annotation/release `2.2.0`, label `2.0.0`, feature/raw archive
+`1.0.0`, identity SQLite `1` olarak kaldı. Bu turda uygulama kodu, package veya
+şema değiştirilmedi. Canlı ZED donanım testi, self-test, wheel/package testi ve
+tam test paketi çalıştırılmadı; staj belgesindeki donanım adapteri anlatımı
+gerçek kod sözleşmesine ve önceki doğrulanmış proje hafızasına dayanır.
+
+## 6R. Staj defteri gün 16–25 anlatım akışı revizyonu (2026-09-06)
+
+Mevcut
+`C:\Users\gorke\Desktop\KineSynthV3\staj_raporu\KineSynthV3_Internship_Report_Days_16_25_EN.docx`
+dosyası yerinde güncellendi. Teknik kapsam, görseller ve günlük başlıklar
+korundu; birbirine mekanik biçimde bağlanan "I then implemented..." türü
+geçişler kaldırıldı. Her gün, o güne özgü bir gözlem veya amaçla başlayan,
+gerektiğinde önceki günün sonucuna doğal biçimde değinen ve farklı kapanış
+ifadeleri kullanan bağımsız bir staj günlüğü kaydına dönüştürüldü.
+
+Revizyon sonrasında gün 16–25 sözcük sayıları sırasıyla 308, 325, 321, 313,
+323, 315, 303, 340, 322 ve 314'tür; her gün 300–400 sözcük sınırındadır.
+Belge 14 sayfa ve 11 inline görsel olarak kaldı. Standart renderer ile tüm 14
+sayfa yeniden üretildi ve görsel olarak incelendi; kesilme, taşma veya bozuk
+karakter görülmedi. `a11y_audit.py`: high/medium/low 0;
+`images_audit.py`: 11 inline görsel; `heading_audit.py`: 10 adet Heading 1.
+
+Bu revizyonda uygulama kaynak kodu, package veya şema değiştirilmedi; pytest,
+self-test, canlı donanım ve wheel/package testi yeniden çalıştırılmadı.
+Uygulama/package `0.10.0`; project `1.1.0`, session `2.0.0`, take/skeleton
+stream `1.1.0`, annotation/release `2.2.0`, label `2.0.0`, feature/raw archive
+`1.0.0`, identity SQLite `1` olarak kaldı.
+
+## 6S. GPT-6 Astra squat/offline inceleme handoff'u (2026-09-10)
+
+Bu tur uygulama geliştirmesi değildir. Kullanıcının squat alt-ekstremite
+takip hatası, yaklaşık 15 FPS canlı performans sorunu, sonradan iskelet
+çıkarma önerisi, antrenör odaklı GUI ve çoklu kişi gereksinimi; yeni bir
+GPT-6 Astra görevinde eksiksiz kullanılmak üzere
+`GPT6_ASTRA_KINECAPTURE_SQUAT_OFFLINE_INCELEME_GOREVI.md` dosyasında bir araya
+getirildi. Dosya, Astra'nın önce kodu/veriyi/logu salt okunur yeniden
+denetlemesini, en az üç ürün planı hazırlamasını ve kullanıcı onayı olmadan kod
+uygulamamasını ister.
+
+Güncel disk incelemesi önceki 6P kaydına önemli bir düzeltme getirdi:
+
+- `~/.kinecapture/user_state.yaml` ve identity DB hâlâ
+  `C:\Users\gorke\AppData\Local\Temp\pytest-of-gorke\pytest-386\viewports0\datasets`
+  kökünü ve `prj_20260902T072943_e359` / `prj_20260903T124439_8b0e`
+  projelerini gösteriyor, fakat bu klasör artık yoktur.
+- Kullanıcı bu eski, daha kötü sonuç veren test kayıtlarını **kendisinin
+  sildiğini** açıkladı. Bu durum istemsiz veri kaybı gibi raporlanmamalıdır.
+  3 Eylül'deki 23.4 FPS kaydı ayrı bir testtir ve eski 15 FPS squat deneyiyle
+  kontrollü aynı-koşul karşılaştırması değildir.
+- Eski squat SVO/skeleton akışları bugün bulunmuyor; yeniden üretilebilir kanıt
+  değildir. Buna karşılık `C:\Users\gorke\KineCapture\logs\kinecapture.log`
+  içindeki 2–3 Eylül olayları ve
+  `%LOCALAPPDATA%\Temp\kinecapture_squat_diag_20260902` altındaki yedi görsel
+  hâlâ vardır.
+- Kullanıcı profili altında bulunan tek kalıcı iki `.svo2` take 20 ve 21
+  Ağustos BODY_34/HD720/30/HUMAN_BODY_MEDIUM/NEURAL_LIGHT kayıtlarıdır. Bunlar
+  squat doğruluğu kanıtı değil, SVO playback/offline işleme mimarisi için
+  kullanılabilecek eski şemalı teknik örneklerdir.
+- Güncel kullanıcı tercihi HD720/30, QUALITY, HUMAN_BODY_ACCURATE, BODY_38,
+  fitting açık ve float32_lossless depth arşividir; bu tercih eski take
+  provenance'ı yerine kullanılamaz.
+
+Kullanıcı, planlardan sonra gerekirse ZED'i bağlayarak Astra ile interaktif
+test yapmaya açıkça izin verdi. Astra monitörde görünür RGB + iskelet penceresi
+açabilir ve kullanıcı karşısında squat yaparken kontrollü A/B veri toplayabilir.
+Handoff şu sınırları koyar: test amacı ve süresi önce açıklanacak; kullanıcı
+hazır olmadan kayıt başlamayacak; GUI parolası kullanıcı tarafından girilecek
+ve model parolayı istemeyecek/okumayacak; mevcut stale pytest kökü yeni kayıt
+için kullanılmayacak; önce kalıcı test konumu doğrulanacak; BODY_34/BODY_38,
+kamera açısı ve diğer değişkenler kontrollü değiştirilecek; her ham SVO
+değişmez kalacak ve her klip sonunda finalize/kare/timestamp/checksum
+doğrulanacaktır. Bu test izni kaynak kodu değiştirme izni değildir.
+
+Bu turda gerçekten yapılan salt-okunur doğrulamalar:
+
+- `AGENTS.md` ve 2417 satırlık mevcut `MEMORY.md` tamamen okundu.
+- App/schema sürümleri gerçek kaynak sabitlerinden doğrulandı.
+- Kullanıcı tercihi, yalnız `projects` alanlarını okuyan SQLite read-only
+  bağlantısı, iki kalıcı take'in `take.json`/`quality.json`/dosya envanteri,
+  uygulama logu, kullanıcı profilindeki SVO envanteri ve tanı PNG'leri
+  incelendi.
+- Donanım yeniden sorgulandı: RTX 2060 6 GB, i7-10750H 6C/12T, 15.8 GB RAM,
+  driver 616.56; `KineSynth` Python 3.11.14 ve ZED SDK 5.4.1.
+- Güncel resmî Stereolabs body tracking, depth mode/settings/retrieval ve SVO
+  recording/playback belgeleri kontrol edildi. Resmî OpenAI GPT-6 Astra model
+  kılavuzu yeni görevin model seçimi ve çok adımlı çalışma biçimi için
+  doğrulandı.
+
+Pytest, self-test, uygulama GUI'si ve canlı ZED bu handoff hazırlama turunda
+çalıştırılmadı. Uygulama kaynak kodu, kullanıcı ayarı, identity DB, ham kayıt
+ve şemalar değiştirilmedi. Gerçek sürümler değişmedi: app/package `0.10.0`;
+project `1.1.0`, session `2.0.0`, take/skeleton stream `1.1.0`,
+annotation/release `2.2.0`, label `2.0.0`, feature/raw archive `1.0.0`,
+identity SQLite `1`. Önceden var olan kirli `label_dialogs.py`,
+`test_shell_chrome_gui.py` ve `test_label_dialog_class_creation.py`
+değişiklikleri korunmuştur; bu tur yalnız yeni handoff Markdown'u ve bu hafıza
+bölümünü eklemiştir.
 
 ## 7. Mimari sınırlar
 
