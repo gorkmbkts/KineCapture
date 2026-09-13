@@ -59,6 +59,11 @@ class ShellViewModel:
         self.navigate(keys[max(0, min(len(keys) - 1, index + offset))])
 
     @property
+    def session(self) -> SessionService:
+        """The one service the shell owns. Pages reach it through here."""
+        return self._session
+
+    @property
     def active_destination(self) -> Destination:
         found = destination(self.active_page.value)
         assert found is not None  # navigate() refuses unknown keys

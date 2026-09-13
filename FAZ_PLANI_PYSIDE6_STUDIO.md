@@ -5,7 +5,7 @@
 > Kaynak görev: `CLAUDE_PYSIDE6_YENI_BACKEND_ENTEGRASYON_PROMPT.md`.
 > Mevcut durum tespiti: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 
-Oluşturuldu: 2026-09-13 · **F0–F3 tamamlandı, F4 sırada.**
+Oluşturuldu: 2026-09-13 · **F0–F4 tamamlandı, F5 sırada.**
 Güncel durum için bölüm 7 (İlerleme kaydı).
 
 ---
@@ -127,7 +127,7 @@ Promptun orijinal sırasından iki sapma var ve ikisi de ölçüme dayanıyor:
 | ~~F1~~ | Mevcut durum tespiti ve ölçüm | ✅ 2026-09-13 (`62b04b8`) | — |
 | ~~F2~~ ✅ | Temel: `studio/` katmanları, `tokens.json` + QSS üretici, kabuk, gezinme, tema, pencere durumu; `test_raw_capture_fields.py` onarımı | Uygulama açılıyor, 8 sekme geziliyor, iki tema tutarlı, Qt-bağımsızlık testi geçiyor, 5 kırmızı test yeşil, ekran görüntüsü | — |
 | ~~F3~~ ✅ | Backend toplamsal ekleri (processing **1.1.0**) | Headless testler geçiyor, memmap/özet/thumbnail ölçüldü, eski `run_` dizinleri hâlâ okunabiliyor | F2 |
-| **F4** | Projeler · Katılımcılar · Ayarlar | Sanallaştırılmış listeler, 1000 kayıtla takılma yok (ölçüm), ayarlar atomik, geçersiz değer kilitlemiyor | F2 |
+| ~~F4~~ ✅ | Projeler · Katılımcılar · Ayarlar | Sanallaştırılmış listeler, 1000 kayıtla takılma yok (ölçüm), ayarlar atomik, geçersiz değer kilitlemiyor | F2 |
 | **F5** | Yakalama | Mock ile tam tur; hafif 2B pose kaplaması; anchor gösterilen kareye yazılıyor; önizleme/kayıt kaybı ayrı | F3 |
 | **F6** | Verileri Hesapla | İşleme ayrı süreçte, ilerleme gerçek, iptal/duraklat/restart çalışıyor, GUI bloklanmıyor | F3 |
 | **F7** | İşlenen Videolar | Kütüphane, thumbnail önbelleği, sürüm karşılaştırma, filtreler | F3, F6 |
@@ -343,8 +343,9 @@ ayrıca işaretlenir.
 | F1 | ✅ | 2026-09-13 | `62b04b8` |
 | F2 | ✅ | 2026-09-13 | `2f7108c` |
 | F3 | ✅ | 2026-09-13 | `add23cd` |
-| F4 | ⏳ sırada | | |
-| F5–F15 | — | | |
+| F4 | ✅ | 2026-09-13 | aşağıda |
+| F5 | ⏳ sırada | | |
+| F6–F15 | — | | |
 
 ### F2 sonucu (2026-09-13)
 
@@ -429,3 +430,57 @@ ayrıca işaretlenir.
   (ayrıntı `MEMORY.md` 6AA). Testlerde bu tuzağa düşüldü ve düzeltildi.
 - Uzun yolda proxy video yazılamadığı için o durumda önizleme testi açıkça
   skip ediliyor; kısa yolda tam çalışıyor.
+
+
+### F4 sonucu (2026-09-13)
+
+**Teslim edilen**
+
+- **Giriş kapısı**: ilk kurulum (tek Sistem Sahibi), giriş, self-registration,
+  zorunlu parola değişimi. Çalışma alanı kapının arkasında; giriş yapılmadan
+  hiçbir sayfa kurulmuyor. Parola hiçbir yerde saklanmıyor, kullanıldığı anda
+  alandan siliniyor; yalnız kullanıcı adı hatırlanıyor.
+- **Projeler ekranı**: üç sanallaştırılmış liste (proje → katılımcı → oturum),
+  arama, sıralama, yeni proje, katılımcı ekle. Sayımlar F3'teki türetilmiş
+  indeksten geliyor ve indeks **worker thread'de** yenileniyor.
+- **Ayarlar ekranı**: altı grup, her ayarın yanında ne işe yaradığını söyleyen
+  bir cümle, pahalı seçeneklerde ölçülmüş maliyet notu. Doğrulama alan bazlı;
+  **bir alan geçersizse hiçbiri yazılmıyor**; eski değer yürürlükte kalıyor.
+- `viewmodels/tasks.py` `TaskRunner` arayüzü + `views/tasks.py` `QtTaskRunner`:
+  viewmodel Qt'yi görmeden iş parçacığı kullanabiliyor, testler `InlineRunner`
+  ile senkron çalışıyor.
+- `views/models.py`: tek `QAbstractTableModel` + arama proxy'si, tüm listeler
+  için.
+
+**Ölçülen** (1400×800 tablo, 9 sütun, `windows` platformu)
+
+| Ölçüm | F1 tabanı (QTableWidget) | F4 |
+|---|---|---|
+| 1000 satır doldurma | 36 ms | **43 ms** |
+| 5000 satır doldurma | 183 ms | **48 ms** (kare sayısından bağımsız) |
+| 1000 satırda arama | — | 14 ms |
+| 5000 satırda arama | — | 74 ms |
+| Kaydırmada viewport çizimi (1000 satır) | 15 ms | **21 ms** |
+| Soğuk açılış | — | değişmedi |
+| 1120×700 · 1366×768 · iki tema | — | `minimumSizeHint` 880×393, sığıyor |
+
+**Dürüstlük notu:** Python model, C++ `QTableWidget`'tan **çizimde daha
+pahalı** (21 ms / 15 ms): her hücre için Qt Python'a giriyor. Karşılığında
+doldurma maliyeti satır sayısından bağımsız ve hücre başına nesne
+üretilmiyor. "1000 kayıtta takılma yok" ölçütü karşılanıyor, fakat sayı
+budur — 21 ms tam viewport çizimi, sürükleme sırasında ~45 Hz.
+
+**Ölçüm sonrası düzeltilen üç şey**
+
+1. `view.setSortingEnabled(True)` proxy'yi her veri sıfırlamasında yeniden
+   sıralatıyordu ve sıralama her karşılaştırmada Python'a giriyordu: 1000
+   satır doldurma **224 ms**. Sıralama modelin içine alındı (önbelleklenmiş
+   anahtarlar üzerinde tek `list.sort`) → **42 ms**.
+2. Arama hücre başına `data()` çağırıyordu: 5000 satırda **308 ms**. Satır
+   başına birleştirilmiş küçük harfli metin önbelleğe alındı → **74 ms**.
+3. Yanıtlanmayan roller tek bir küme aramasıyla erkenden elenince çizim
+   24 ms → 21 ms.
+
+**Not:** F2'de yazılan kabuk GUI testleri giriş kapısından önce yazılmıştı ve
+kapı eklenince kırıldı (çalışma alanı görünmüyor). Fixture giriş yapacak
+şekilde güncellendi; kapının kendisi ayrı testlerle kapsanıyor.

@@ -1,9 +1,9 @@
 """Destination pages.
 
-F2 ships the shell and one real page's worth of structure; the rest are
-:class:`PlaceholderPage` instances that name the phase which will build them.
-``build_page`` is the single registry the shell asks, so filling one in later
-is a one-line change here.
+``build_page`` is the single registry the shell asks, so delivering a screen in
+a later phase is a one-line change here. Anything not yet built is a
+:class:`PlaceholderPage` that names the phase which will build it - shown in
+its real place in the workflow rather than hidden.
 """
 
 from __future__ import annotations
@@ -16,9 +16,14 @@ from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.navigation import Destination
 
 from .base import PlaceholderPage, StudioPage
+from .projects import ProjectsPage
+from .settings import SettingsPage
 
-#: destination key -> page class. Empty until a phase delivers a real page.
-PAGE_TYPES: dict[str, type[StudioPage]] = {}
+#: destination key -> page class. Missing keys fall back to the placeholder.
+PAGE_TYPES: dict[str, type[StudioPage]] = {
+    "projects": ProjectsPage,
+    "settings": SettingsPage,
+}
 
 
 def build_page(
@@ -28,4 +33,4 @@ def build_page(
     return factory(destination, tokens, parent)
 
 
-__all__ = ["PAGE_TYPES", "PlaceholderPage", "StudioPage", "build_page"]
+__all__ = ["PAGE_TYPES", "PlaceholderPage", "ProjectsPage", "SettingsPage", "StudioPage", "build_page"]

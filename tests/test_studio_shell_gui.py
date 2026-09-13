@@ -66,6 +66,13 @@ def window(app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Shown for real: isVisible() on a child is False for an unshown window,
     # which would make every visibility assertion below pass vacuously.
     built.show()
+    # Signed in, because the workspace lives behind the sign-in gate and
+    # nothing inside it is visible until somebody is. The gate itself is
+    # covered by tests/test_studio_projects_gui.py.
+    assert built.auth_viewmodel.create_owner(
+        first_name="Ada", last_name="Lovelace", title="",
+        username="ada", password="kinecapture1", password_confirm="kinecapture1",
+    )
     app.processEvents()
     yield built
     built.close()

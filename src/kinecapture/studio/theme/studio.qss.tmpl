@@ -97,6 +97,18 @@ QLabel[kcRole="pageSubtitle"] {
     font-size: @KcFontSizeSm@px;
 }
 
+/* An inline problem under a field. Coloured, not filled: a red band across
+ * the whole row reads as a page-level failure, which it is not. */
+QLabel[kcRole="fieldError"] {
+    color: @KcStatusRecording@;
+    font-size: @KcFontSizeSm@px;
+}
+
+QLabel[kcRole="fieldCost"] {
+    color: @KcStatusWarning@;
+    font-size: @KcFontSizeXs@px;
+}
+
 QLabel[kcRole="sectionTitle"] {
     color: @KcTextSecondary@;
     font-size: @KcFontSizeXs@px;

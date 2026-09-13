@@ -25,14 +25,20 @@ from PySide6.QtWidgets import (
 )
 
 from kinecapture.studio.services.messages import Message
+from kinecapture.studio.services.settings import SettingsService
 from kinecapture.studio.services.window_state import WindowState, save_window_state
 from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
+from kinecapture.studio.viewmodels.auth import AuthViewModel
+from kinecapture.studio.viewmodels.projects import ProjectsViewModel
+from kinecapture.studio.viewmodels.settings import SettingsViewModel
 from kinecapture.studio.viewmodels.shell import ShellViewModel
 
+from .auth import AuthView
 from .contextbar import ContextBar
 from .navbar import NavBar
 from .pages import StudioPage, build_page
 from .qt_bridge import BoundView
+from .tasks import QtTaskRunner
 from .widgets import label, separator
 
 logger = logging.getLogger(__name__)
@@ -55,6 +61,12 @@ class StudioWindow(QMainWindow, BoundView):
         self._tokens: ThemeTokens = load_tokens(viewmodel.theme.value)
         self._pages: dict[str, StudioPage] = {}
         self._state_path: Optional[object] = None
+        # Slow work - scanning a project, mostly - runs here and comes back on
+        # the GUI thread. Viewmodels see only the TaskRunner interface.
+        self.runner = QtTaskRunner(self)
+        self._viewmodels: dict[str, object] = {}
+        self._settings_service = SettingsService(viewmodel.session.config)
+        self.auth_viewmodel = AuthViewModel(viewmodel.session)
 
         self.setWindowTitle("KineCapture Studio")
         self.setMinimumSize(
@@ -71,6 +83,7 @@ class StudioWindow(QMainWindow, BoundView):
         self._show_page(self.viewmodel.active_page.value)
         self.inspector.setVisible(self._state.inspector_open)
         self.context_bar.inspector_button.setChecked(self._state.inspector_open)
+        self._update_gate()
 
         self._context_timer = QTimer(self)
         self._context_timer.setInterval(_CONTEXT_INTERVAL_MS)
@@ -80,7 +93,8 @@ class StudioWindow(QMainWindow, BoundView):
     # ------------------------------------------------------------- assembly
     def _build(self) -> None:
         central = QWidget(self)
-        outer = QVBoxLayout(central)
+        shell_layout = QVBoxLayout(central)
+        outer = shell_layout
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
@@ -105,7 +119,14 @@ class StudioWindow(QMainWindow, BoundView):
         self.nav_bar = NavBar(self.viewmodel.destinations, self._tokens, self)
         outer.addWidget(self.nav_bar)
 
-        self.setCentralWidget(central)
+        # The gate: nothing of the workspace is built, shown or reachable
+        # before somebody is signed in.
+        self.shell_body = central
+        self.auth_view = AuthView(self.auth_viewmodel, self._tokens, self)
+        self.gate = QStackedWidget(self)
+        self.gate.addWidget(self.auth_view)
+        self.gate.addWidget(self.shell_body)
+        self.setCentralWidget(self.gate)
 
     def _build_inspector(self) -> QFrame:
         frame = QFrame(self)
@@ -155,6 +176,7 @@ class StudioWindow(QMainWindow, BoundView):
         QShortcut(QKeySequence("F9"), self).activated.connect(
             self.viewmodel.toggle_inspector
         )
+        self.auth_viewmodel.signed_in.subscribe(lambda _user: self._signed_in())
 
     # -------------------------------------------------------------- theming
     def apply_theme(self, name: str) -> None:
@@ -187,9 +209,44 @@ class StudioWindow(QMainWindow, BoundView):
         if item is None:  # pragma: no cover - navigate() refuses unknown keys
             raise KeyError(key)
         page = build_page(item, self._tokens, self)
+        self._attach_viewmodel(key, page)
         self._pages[key] = page
         self.stack.addWidget(page)
         return page
+
+    def _attach_viewmodel(self, key: str, page: StudioPage) -> None:
+        """Give a page the viewmodel it was written against, if it has one.
+
+        Built here rather than up front so opening the application does not
+        construct state for screens nobody visited.
+        """
+        attach = getattr(page, "attach", None)
+        if attach is None:
+            return
+        if key == "projects":
+            viewmodel = ProjectsViewModel(self.viewmodel.session, self.runner)
+        elif key == "settings":
+            viewmodel = SettingsViewModel(self._settings_service)
+        else:  # pragma: no cover - every attachable page is listed above
+            return
+        self._viewmodels[key] = viewmodel
+        attach(viewmodel)
+
+    # ------------------------------------------------------------------ gate
+    def _update_gate(self) -> None:
+        signed_in = self.viewmodel.session.is_authenticated
+        self.gate.setCurrentWidget(self.shell_body if signed_in else self.auth_view)
+
+    def _signed_in(self) -> None:
+        self._update_gate()
+        self.viewmodel.refresh_context()
+        current = self.stack.currentWidget()
+        if isinstance(current, StudioPage):
+            current.page_activated()
+
+    @property
+    def viewmodel_for(self) -> dict[str, object]:
+        return self._viewmodels
 
     def _show_page(self, key: str) -> None:
         page = self.page(key)
@@ -239,6 +296,10 @@ class StudioWindow(QMainWindow, BoundView):
         to leave, and a preference file is not worth refusing that.
         """
         self._context_timer.stop()
+        # A task still in flight would deliver into widgets that are being torn
+        # down. Waiting is the difference between a clean exit and a crash on
+        # the way out.
+        self.runner.wait(5_000)
         try:
             save_window_state(self.current_window_state(), self._state_path)
         except Exception as exc:  # noqa: BLE001 - see docstring
