@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 import os
 import time
 import uuid
@@ -25,9 +25,27 @@ from kinecapture.domain.project import CaptureProfile, Take
 from kinecapture.features.compute import FeatureContext, compute_features, FEATURE_FUNCTIONS, column_names
 from kinecapture.recording.take_writer import ProxyVideoWriter
 from kinecapture.recording.rgbd_archive import encode_depth_chunk, write_chunk, DEPTH_MAGIC, DepthCodec
+from .arrays import write_arrays
 from .sources import open_source
+from .summary import (
+    FLAG_CAPTURE_UNMATCHED,
+    FLAG_INTEGRITY_ISSUE,
+    FLAG_SUBJECT_AMBIGUOUS,
+    build_summary,
+)
+from .thumbnails import DEFAULT_THUMBNAIL_COUNT, build_thumbnails
 
-PROCESSING_SCHEMA_VERSION = "1.0.0"
+#: 1.1.0 is additive to the *consumer* contract and a change to the on-disk one:
+#: arrays are now one memory-mappable ``.npy`` each instead of a single
+#: compressed ``arrays.npz``, and a version also carries a timeline summary and
+#: preview images. ``ReviewDataset`` reads both layouts, so every run produced
+#: by 1.0.0 stays openable; nothing is migrated and nothing is rewritten.
+PROCESSING_SCHEMA_VERSION = "1.1.0"
+
+#: Frames to ignore before quoting a rate. The first inferences pay for model
+#: warm-up, and an estimate built from them is wrong in the direction that
+#: annoys people most - too pessimistic, then silently "early".
+_RATE_WARMUP_FRAMES = 20
 
 @dataclass(frozen=True)
 class ProcessingConfig:
@@ -41,6 +59,9 @@ class ProcessingConfig:
     store_proxy: bool = True
     compute_body: bool = True
     proxy_width: int = 640
+    #: Preview images for the library screen. Generated from the review proxy
+    #: after it is closed, so a list never decodes video while it scrolls.
+    thumbnail_count: int = DEFAULT_THUMBNAIL_COUNT
     feature_ids: tuple[str, ...] = ("validity_masks", "frame_timing", "joint_angles_degrees")
     # Optional SDK OpenCV calibration override is identified by content, not just path.
     calibration_file: Optional[str] = None
@@ -98,11 +119,34 @@ class Cancelled(Exception):
     pass
 
 
+def _mean_confidence(body) -> float:  # noqa: ANN001 - Optional[BodyPose]
+    """Mean joint confidence for one frame, or NaN when nothing was measured.
+
+    NaN rather than 0.0: a frame where the subject was not found has *no*
+    confidence, and painting that as zero confidence would tell the annotator
+    the tracker did badly when in fact it said nothing at all.
+    """
+    if body is None:
+        return float("nan")
+    values = np.asarray(body.joint_confidences, dtype=np.float32)
+    finite = values[np.isfinite(values)]
+    return float(finite.mean()) if finite.size else float("nan")
+
+
 def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
-                 cancel: Optional[threading.Event] = None, output_root: Optional[Path] = None,
+                 cancel: Optional[threading.Event] = None, pause: Optional[threading.Event] = None,
+                 output_root: Optional[Path] = None,
                  source_factory: Callable = open_source, restart_of: Optional[str] = None) -> Path:
+    """Process one take into a new versioned directory.
+
+    ``pause`` is held rather than cancelled: a new live recording needs the GPU
+    back, but throwing away twenty minutes of completed replay to get it would
+    be an expensive way to free a resource. Pausing stops at a frame boundary
+    with every stream still open, and resumes where it stopped.
+    """
     config = config or ProcessingConfig()
     cancel = cancel or threading.Event()
+    pause = pause or threading.Event()
     paths = TakePaths(Path(take_dir).resolve())
     take = Take.from_dict(read_json(paths.metadata))
     if take.state.value == "recording":
@@ -136,7 +180,9 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
     job = {"schema_version": PROCESSING_SCHEMA_VERSION, "app_version": APP_VERSION,
            "run_id": run_id, "take_id": take.take_id, "take_dir": str(paths.root),
            "state": "running", "restart_of": restart_of, "parameters": parameters,
-           "source": source, "calibration_override_sha256": calibration_hash, "frames_processed": 0}
+           "source": source, "calibration_override_sha256": calibration_hash,
+           "frames_processed": 0, "paused": False, "rate_fps": None, "eta_s": None,
+           "paused_s": 0.0}
     write_json(stage / "job.json", job)
     started = time.perf_counter()
     issues: set[str] = set()
@@ -147,15 +193,63 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
     lock = SubjectLock()
     depth_buffer, depth_positions = [], []
     depth_chunks = []
+    # Per-frame signals for the timeline summary, collected as we go so the
+    # pyramid costs one pass rather than a second read of everything.
+    frame_flags: list[int] = []
+    frame_confidence: list[float] = []
+    rate = {"frames": 0, "since": started, "paused_total": 0.0}
+
+    def progress() -> dict[str, Any]:
+        """Real progress only. A percentage is quoted when the total is known.
+
+        When the source never declared a frame count there is no honest
+        denominator, so none is invented: the caller is given the processed
+        count and ``total = None`` and says "işlenen N kare" instead.
+        """
+        done = len(positions)
+        total = job.get("source_frames_declared")
+        elapsed = time.perf_counter() - started - rate["paused_total"]
+        measured = done - rate["frames"]
+        window = time.perf_counter() - rate["since"]
+        fps = (measured / window) if measured >= _RATE_WARMUP_FRAMES and window > 0 else None
+        remaining = (int(total) - done) if isinstance(total, int) and total > done else None
+        return {
+            "frames_processed": done,
+            "source_frames_declared": total,
+            "elapsed_s": elapsed,
+            "paused_s": rate["paused_total"],
+            "rate_fps": fps,
+            "eta_s": (remaining / fps) if (fps and remaining is not None) else None,
+        }
 
     def checkpoint():
-        job.update(frames_processed=len(positions), elapsed_s=time.perf_counter()-started,
-                   issues=sorted(issues))
+        job.update(issues=sorted(issues), **progress())
         write_json(stage / "job.json", job, overwrite=True)
 
     def check_cancel():
         if cancel.is_set():
             raise Cancelled("Processing cancelled")
+
+    def wait_while_paused():
+        """Hold at a frame boundary while ``pause`` is set.
+
+        Cancelling wins over pausing: a paused job that is then cancelled must
+        not sit here waiting for a resume that is never coming.
+        """
+        if not pause.is_set():
+            return
+        began = time.perf_counter()
+        job.update(state="paused", paused=True, **progress())
+        write_json(stage / "job.json", job, overwrite=True)
+        while pause.is_set() and not cancel.is_set():
+            pause.wait(0.1)
+        rate["paused_total"] += time.perf_counter() - began
+        # The rate window restarts: time spent paused is not time spent working,
+        # and folding it in would quote an estimate nobody should trust.
+        rate["frames"], rate["since"] = len(positions), time.perf_counter()
+        job.update(state="running", paused=False, **progress())
+        write_json(stage / "job.json", job, overwrite=True)
+        check_cancel()
 
     def flush_depth():
         if not depth_buffer:
@@ -195,6 +289,7 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
             proxy = ProxyVideoWriter(stage / "proxy.mp4", fps=processing_info.target_fps, target_width=config.proxy_width)
         for packet in reader:
             check_cancel()
+            wait_while_paused()
             pos = packet.source_position
             if pos is None or pos != len(positions):
                 issues.add("source_position_discontinuity")
@@ -213,6 +308,18 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
                 issues.add("source_capture_timestamp_unmatched_or_ambiguous")
             else:
                 matched_capture.add(captured["i"])
+            # Per-frame timeline signals. Recorded here because this is the only
+            # place that sees the packet; deriving them later would mean reading
+            # the whole skeleton stream back.
+            flags = 0
+            if captured is None:
+                flags |= FLAG_CAPTURE_UNMATCHED
+            if packet.integrity_issues:
+                flags |= FLAG_INTEGRITY_ISSUE
+            if association.get("state") in ("ambiguous", "reidentifying", "temporarily_lost"):
+                flags |= FLAG_SUBJECT_AMBIGUOUS
+            frame_flags.append(flags)
+            frame_confidence.append(_mean_confidence(subject))
             row = {"record": "frame", "p": len(positions), "source_position": pos,
                    "cam_ns": packet.camera_timestamp_ns, "capture_frame_index": captured["i"] if captured else None,
                    "capture_timestamp_ns": captured["cam_ns"] if captured else None,
@@ -274,16 +381,28 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
             stamps = np.asarray(timestamps, dtype=np.int64)
             context = FeatureContext(spec, joints, stamps, indices, processing_info.target_fps, confidences=confidences)
             features = compute_features(context, config.feature_ids)
-            with open(long_path(stage / "arrays.npz"), "wb") as output:
-                np.savez_compressed(output, joints=joints, confidences=confidences,
-                    source_positions=indices, camera_timestamps_ns=stamps,
-                    subject_present=np.array([b is not None for b in selected]),
-                    **features.arrays)
+            present = np.array([b is not None for b in selected])
+            # One uncompressed .npy per array: a review screen reads the window
+            # it is showing instead of decompressing the whole session (1.1.0).
+            job["arrays"] = write_arrays(stage, {
+                "joints": joints, "confidences": confidences,
+                "source_positions": indices, "camera_timestamps_ns": stamps,
+                "subject_present": present, **features.arrays})
             write_json(stage / "features.json", {"schema_version": "1.0.0", "feature_ids": list(config.feature_ids),
                 "availability": features.availability_dict(), "reasons": features.reasons,
                 "columns": column_names(spec), "subject_association": lock.provenance()})
             write_json(stage / "skeleton_spec.json", spec.to_dict())
+            job["summary"] = build_summary(
+                stage, present=present,
+                confidence=np.asarray(frame_confidence, dtype=np.float32),
+                flags=np.asarray(frame_flags, dtype=np.uint8),
+                fps=processing_info.target_fps)
         check_cancel()
+        # Previews come last: the proxy has to be closed before it can be read,
+        # and a failure here must not cost the version that is already written.
+        if config.thumbnail_count and positions:
+            job["thumbnails"] = build_thumbnails(
+                stage, stage / "proxy.mp4", len(positions), count=config.thumbnail_count)
         job.update(state="partial" if issues else "complete", issues=sorted(issues),
                    subject_status="associated" if any(b is not None for b in selected) else "needs_subject_selection",
                    depth_chunks=depth_chunks, capture_frames_unmatched=len(capture_rows)-len(matched_capture))

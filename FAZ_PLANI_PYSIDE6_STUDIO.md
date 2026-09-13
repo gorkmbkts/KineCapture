@@ -5,7 +5,8 @@
 > Kaynak görev: `CLAUDE_PYSIDE6_YENI_BACKEND_ENTEGRASYON_PROMPT.md`.
 > Mevcut durum tespiti: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 
-Oluşturuldu: 2026-09-13 · F0 ve F1 tamamlandı, F2 sırada.
+Oluşturuldu: 2026-09-13 · **F0–F3 tamamlandı, F4 sırada.**
+Güncel durum için bölüm 7 (İlerleme kaydı).
 
 ---
 
@@ -124,8 +125,8 @@ Promptun orijinal sırasından iki sapma var ve ikisi de ölçüme dayanıyor:
 |---|---|---|---|
 | ~~F0~~ | Hafıza politikası + `MEMORY_INDEX.md` | ✅ 2026-09-13 (`314eb8b`) | — |
 | ~~F1~~ | Mevcut durum tespiti ve ölçüm | ✅ 2026-09-13 (`62b04b8`) | — |
-| **F2** | Temel: `studio/` katmanları, `tokens.json` + QSS üretici, kabuk, gezinme, tema, pencere durumu; `test_raw_capture_fields.py` onarımı | Uygulama açılıyor, 8 sekme geziliyor, iki tema tutarlı, Qt-bağımsızlık testi geçiyor, 5 kırmızı test yeşil, ekran görüntüsü | — |
-| **F3** | Backend toplamsal ekleri (processing **1.1.0**) | Headless testler geçiyor, memmap/özet/thumbnail ölçüldü, eski `run_` dizinleri hâlâ okunabiliyor | F2 |
+| ~~F2~~ ✅ | Temel: `studio/` katmanları, `tokens.json` + QSS üretici, kabuk, gezinme, tema, pencere durumu; `test_raw_capture_fields.py` onarımı | Uygulama açılıyor, 8 sekme geziliyor, iki tema tutarlı, Qt-bağımsızlık testi geçiyor, 5 kırmızı test yeşil, ekran görüntüsü | — |
+| ~~F3~~ ✅ | Backend toplamsal ekleri (processing **1.1.0**) | Headless testler geçiyor, memmap/özet/thumbnail ölçüldü, eski `run_` dizinleri hâlâ okunabiliyor | F2 |
 | **F4** | Projeler · Katılımcılar · Ayarlar | Sanallaştırılmış listeler, 1000 kayıtla takılma yok (ölçüm), ayarlar atomik, geçersiz değer kilitlemiyor | F2 |
 | **F5** | Yakalama | Mock ile tam tur; hafif 2B pose kaplaması; anchor gösterilen kareye yazılıyor; önizleme/kayıt kaybı ayrı | F3 |
 | **F6** | Verileri Hesapla | İşleme ayrı süreçte, ilerleme gerçek, iptal/duraklat/restart çalışıyor, GUI bloklanmıyor | F3 |
@@ -341,8 +342,9 @@ ayrıca işaretlenir.
 | F0 | ✅ | 2026-09-13 | `314eb8b` |
 | F1 | ✅ | 2026-09-13 | `62b04b8` |
 | F2 | ✅ | 2026-09-13 | `2f7108c` |
-| F3 | ⏳ sırada | | |
-| F4–F15 | — | | |
+| F3 | ✅ | 2026-09-13 | aşağıda |
+| F4 | ⏳ sırada | | |
+| F5–F15 | — | | |
 
 ### F2 sonucu (2026-09-13)
 
@@ -385,3 +387,45 @@ ayrıca işaretlenir.
   hiçbir şey ölçmemiş bir test yerine dürüst bir skip tercih edildi.
 - Gezinme şeridi dar ekranda etiketleri bırakıp yalnız ikona düşüyor; adımı
   kaydırmanın arkasına gizlemek iş akışını kısa gösterirdi.
+
+### F3 sonucu (2026-09-13) — processing **1.1.0**
+
+**Teslim edilen** (hepsi toplamsal; ham veri değişmedi, eski sürümler okunuyor)
+
+| Ek | Modül |
+|---|---|
+| Bellek eşlemeli diziler (`arrays/*.npy` + `index.json`) | `processing/arrays.py` |
+| Çok çözünürlüklü timeline özeti (min/max piramidi) | `processing/summary.py` |
+| Önizleme görüntüleri (WebP, seek ile) | `processing/thumbnails.py` |
+| İndeksli + önbellekli offline derinlik erişimi | `processing/depth.py` |
+| `job.json`: duraklat / `paused_s` / `rate_fps` / `eta_s` | `processing/jobs.py` |
+| Anchor sözlük indeksi, `window()`, tembel açıcılar | `processing/review.py` |
+| Türetilmiş proje indeksi (`cache/take_index.json`) | `dataset/summary_index.py` |
+| Başlık-yalnız chunk okuma | `recording/rgbd_archive.py` |
+
+**Ölçülen** (60 dk / 60 FPS / BODY_38; ayrıntı `MEMORY.md` 6AA)
+
+| Ölçüm | Önce | Sonra |
+|---|---|---|
+| Dizi yazımı | 5,05 s | **0,13 s** |
+| 600 karelik pencere | 403,7 ms | **13,5 ms** (sonraki 0,14 ms) |
+| Timeline lane okuma | yok | **0,007 ms** (ilk 7,9 ms) |
+| Thumbnail (13 adet) | yok | **131 ms**, uzunluktan bağımsız |
+| `position_of_anchor` ×1000 | doğrusal | **0,7 ms** |
+| Proje indeksi, 1000 kayıt | 1247 ms/yenileme | **154 ms** (0 yeniden okuma) |
+
+**Dürüstlük notları**
+
+- 154 ms bir UI karesi değildir; indeks F4/F7'de worker thread'de çalışacak.
+  İndeks işi *sık çalıştırılabilecek kadar* küçültür, sıfırlamaz.
+- İlk sezgim yanlıştı: thumbnail için sıralı okuma seek'ten **yavaş** çıktı
+  (305 ms / 131 ms) ve uzunlukla büyüyordu. Ölçüm sonrası seek'e geçildi.
+- İndeks yapısal değişikliği algılar, çalışan işin ilerlemesini değil.
+- Yeni sürümlerde `arrays.npz` yazılmıyor; 1.0.0 sürümleri `ArrayStore`
+  üzerinden okunmaya devam ediyor ve pencere okumasının ucuz olmadığı
+  `is_memmapped=False` ile söyleniyor.
+- `long_path` her yol için ayrı karar verir: kısa bir ebeveynden özyinelemeli
+  glob, sınırı aşan çocuğu **sessizce** bulamaz. Yol kademeli kurulmalı
+  (ayrıntı `MEMORY.md` 6AA). Testlerde bu tuzağa düşüldü ve düzeltildi.
+- Uzun yolda proxy video yazılamadığı için o durumda önizleme testi açıkça
+  skip ediliyor; kısa yolda tam çalışıyor.

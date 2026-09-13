@@ -5,8 +5,8 @@ ilgili bölüm hedefli açılır. Kod hafızadan önceliklidir.
 
 ## Güncel faz
 
-Yeni arayüz `kinecapture/studio/` altında yeniden yazılıyor (F0–F2 bitti,
-**F3 sırada**). Plan ve ilerleme: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** — yeni bir
+Yeni arayüz `kinecapture/studio/` altında yeniden yazılıyor (F0–F3 bitti,
+**F4 sırada**). Plan ve ilerleme: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** — yeni bir
 oturumda sıra oradan alınır. `python -m kinecapture` Studio'yu, `--legacy-gui`
 eski arayüzü açar. Kullanıcı kararı: **geriye dönük veri uyumluluğu aranmıyor;
 mevcut veri silinmiyor.**
@@ -19,7 +19,7 @@ mevcut veri silinmiyor.**
 | project / session | 1.1.0 / 2.0.0 |
 | take / skeleton stream | 1.2.0 / 1.2.0 |
 | raw archive · capture policy | 1.1.0 · 2 |
-| processing · canonical annotation | 1.0.0 · 1.0.0 |
+| processing · canonical annotation | **1.1.0** · 1.0.0 |
 | subject association | 1.1.0 |
 | eski annotation / release | 2.2.0 / 2.2.0 |
 | label / feature spec | 2.0.0 / 1.0.0 |
@@ -38,13 +38,13 @@ pyzed 5.4 / SDK 5.4.1. Donanım: RTX 2060 6 GB, i7-10750H, ~16 GB RAM.
 | `capture/` | `service.py` acquisition+writer thread; `subject_lock.py` |
 | `preview/` | `worker.py` LatestWorker; `pose.py` CPU 2B pose; `vendor/` |
 | `recording/` | `take_writer.py`; `rgbd_archive.py` ham RGB-D |
-| `processing/` | **offline katman**: `jobs.py` process_take · `sources.py` SVO replay · `review.py` ReviewDataset |
+| `processing/` | **offline katman**: `jobs.py` · `sources.py` · `review.py` · `arrays.py` memmap · `summary.py` piramit · `thumbnails.py` · `depth.py` |
 | `playback/` | `take_reader.py` iskelet akışı + proxy video, kurtarma |
 | `annotations/` | `repository.py` undo/redo, autosave |
-| `dataset/` | `workspace.py` disk · `index.py` sorgu/QA · `deletion.py` silme |
+| `dataset/` | `workspace.py` · `index.py` · `deletion.py` · `summary_index.py` (türetilmiş) |
 | `export/` | `release.py` staging → atomik yayın; `continuous.py` |
 | `features/` | sürümlü seçilebilir özellik katmanı (31 özellik) |
-| `identity/` | SQLite şema, scrypt, auth/erişim |
+| `identity/` | SQLite, scrypt, auth/erişim |
 | `visualization/` | `skeleton_spec.py` ZED tabloları; `mapping.py` |
 | `studio/` | **yeni arayüz**: `services/` · `viewmodels/` · `theme/` (Qt'siz) · `views/` |
 | `gui/` | eski arayüz; `--legacy-gui` ile açılır, eski kayıtlar için korunuyor |
@@ -74,9 +74,10 @@ REVIEWING`; `ERROR` her yerden erişilir.
 | 6V | 2375 | **BACKEND MİMARİSİ:** minimum ham kayıt, anchor, process_take, ReviewDataset |
 | 6X | 2546 | Canlı ZED tek kişi testi — **devam ediyor**, tamamlanmadı |
 | 6Y | 2580 | **F0/F1:** arayüz-backend kopukluğu, ölçülen performans açıkları |
-| 6Z | 2666 | **F2 (en güncel):** studio/ katmanları, tokens.json, kabuk, offscreen font uyarısı |
-| 7–9 | 2748 · 2775 · 2789 | Mimari sınırlar; test komutları; geçmiş doğrulamalar |
-| 10–12 | 3039 · 3060 · 3083 | Bilinen sorunlar; uygulanmayanlar; önerilen adımlar |
+| 6Z | 2666 | **F2:** studio/ katmanları, tokens.json, kabuk, offscreen font uyarısı |
+| 6AA | 2748 | **F3 (en güncel):** processing 1.1.0 — memmap, özet, thumbnail, derinlik, duraklat, indeks |
+| 7–9 | 2835 · 2862 · 2876 | Mimari sınırlar; test komutları; geçmiş doğrulamalar |
+| 10–12 | 3126 · 3147 · 3170 | Bilinen sorunlar; uygulanmayanlar; önerilen adımlar |
 
 Raporlar: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`,
 `KINECAPTURE_BACKEND_MIMARI_UYGULAMA_RAPORU_2026-09-11.md`.
@@ -85,11 +86,10 @@ Raporlar: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`,
 
 - **Studio'da henüz gerçek ekran yok** (F4'ten itibaren gelecek); yer tutucular
   hangi fazın yapacağını yazıyor. Eski arayüz yeni kayıtları açamıyor.
-- **Eski timeline 292–323 ms/çizim** (hedef ≤16 ms); etiketleme açılışı GUI
-  thread'inde senkron (20 000 kare = 5,95 s); diziler memmap değil (135 MB);
-  `DatasetIndex` 1000 kayıtta 650 ms tarıyor.
-- Backend ekleri (memmap, timeline özeti, thumbnail, derinlik erişimi, özet
-  indeksi) **F3'te** yapılacak; OpenGL 3B görünüm ve yardımcı pencereler yok.
+- **Eski timeline 292–323 ms/çizim** (hedef ≤16 ms); eski etiketleme açılışı
+  GUI thread'inde senkron. Veri tarafı F3'te kapatıldı, çizim tarafı F8'de.
+- Proje indeksi 1000 kayıtta 154 ms: worker thread gerekir, UI karesi değil.
+- OpenGL 3B görünüm ve altı yardımcı pencere yok.
 - `pytest tests/` tek süreçte tamamlanmıyor; dosya dosya çalıştırılmalı.
 - **`offscreen` Qt platformunda font ailesi yok**: genişlik/yerleşim ölçümleri
   orada anlamsız, `QT_QPA_PLATFORM=windows` gerekir (bkz. 6Z).
@@ -102,8 +102,7 @@ Raporlar: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`,
 
 ## Sonraki adım
 
-**F3 — backend toplamsal ekleri** (`PROCESSING_SCHEMA_VERSION` 1.0.0 → 1.1.0):
-`.npy` memmap dizileri, çok çözünürlüklü timeline özeti, thumbnail üretimi,
-`ReviewDataset`'te derinlik + anchor indeks erişimi, `job.json` duraklat/ETA,
-türetilmiş özet indeksi. Ayrıntı ve bitti ölçütü `FAZ_PLANI_PYSIDE6_STUDIO.md`
-bölüm 4'te.
+**F4 — Projeler · Katılımcılar · Ayarlar.** Sanallaştırılmış listeler
+(`QAbstractItemModel`), proje indeksi worker thread'de, atomik ayarlar,
+İşleme grubu (`ProcessingConfig` varsayılanları). Bitti ölçütü
+`FAZ_PLANI_PYSIDE6_STUDIO.md` bölüm 4'te.

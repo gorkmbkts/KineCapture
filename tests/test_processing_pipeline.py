@@ -1,3 +1,5 @@
+import os
+import time
 from pathlib import Path
 from threading import Event
 from dataclasses import replace
@@ -6,7 +8,7 @@ import pytest
 
 from kinecapture.camera.mock import MockCameraBackend
 from kinecapture.core.jsonio import read_json, write_json, read_jsonl
-from kinecapture.core.paths import long_path
+from kinecapture.core.paths import long_path, path_exists
 from kinecapture.domain.project import CaptureProfile
 from kinecapture.domain.enums import TakeState
 from kinecapture.recording.take_writer import TakeWriter
@@ -163,3 +165,225 @@ def test_source_anchor_drives_subject_arrays_and_features(raw_take):
     assert arrays["subject_present"].all()
     np.testing.assert_array_equal(arrays["joints"][0],packet.bodies[0].joint_positions_xyz)
     assert np.isfinite(arrays["joint_angles_deg"]).any()
+
+
+# --------------------------------------------- processing 1.1.0 derived layer
+#
+# Raw file access below goes through ``long_path``. The application already
+# does, which is why it works where a plain ``Path`` does not: pytest's temp
+# directory names contain the test name and a take path is eight levels deep,
+# so these directories routinely pass 260 characters. A test that opened them
+# naively would fail for a reason that has nothing to do with what it checks.
+
+
+def test_a_version_carries_arrays_summary_and_previews(raw_take):
+    """The three artefacts a review screen needs, produced once, not at paint time."""
+    take, paths = raw_take
+    run = process_take(paths.root, ProcessingConfig(store_depth=True, store_proxy=True))
+    job = read_json(run / "job.json")
+    assert job["schema_version"] == "1.1.0"
+    if job["issues"] == ["review_proxy_incomplete"]:
+        # OpenCV cannot open an extended-length path, so on a long temp path
+        # there is no proxy and therefore no previews. That is the known
+        # platform limit, not a defect in what this test is about.
+        pytest.skip("proxy video uzun yolda yazılamadı; önizleme kontrolü atlandı")
+    assert job["state"] == "complete", job["issues"]
+
+    review = ReviewDataset(run)
+    try:
+        assert review.array_store.is_memmapped is True
+        assert review.window("joints", 2, 6).shape == (4, 16, 3)
+        assert review.has_summary
+        lane = review.summary.lane(view_start=0, view_span=12, pixels=40)
+        assert lane["bins"] > 0
+        assert review.has_depth
+        assert review.depth.at(3) is not None
+        assert review.depth.provenance == "reconstructed_offline"
+    finally:
+        review.close()
+
+
+def test_summary_marks_frames_with_no_matching_capture_row(raw_take):
+    """QC flags come from the pass that produced them, not a second reading."""
+    from kinecapture.processing.summary import FLAG_CAPTURE_UNMATCHED
+
+    take, paths = raw_take
+    run = process_take(paths.root, ProcessingConfig(store_depth=False, store_proxy=False))
+    review = ReviewDataset(run)
+    try:
+        # This mock source matches every frame, so the flag must be absent -
+        # a flag that is always set would tell nobody anything.
+        assert review.summary.flags_present(FLAG_CAPTURE_UNMATCHED) is False
+    finally:
+        review.close()
+
+
+def test_progress_never_invents_a_percentage(raw_take):
+    take, paths = raw_take
+    run = process_take(paths.root, ProcessingConfig(store_depth=False, store_proxy=False))
+    job = read_json(run / "job.json")
+    assert job["frames_processed"] == 12
+    assert job["source_frames_declared"] == 12
+    assert job["paused"] is False
+    assert job["paused_s"] == 0.0
+    # Twelve frames is below the warm-up window, so no rate is quoted rather
+    # than one derived from model start-up.
+    assert job["rate_fps"] is None
+    assert job["eta_s"] is None
+
+
+def _run_in_thread(target):
+    """Run ``target`` on a thread, keeping whatever it returns or raises.
+
+    A worker that dies silently turns every assertion after it into "timed
+    out", which says nothing about why. Holding the exception means the test
+    reports the real failure instead.
+    """
+    import threading
+
+    outcome: dict[str, object] = {}
+
+    def wrapper() -> None:
+        try:
+            outcome["value"] = target()
+        except BaseException as exc:  # noqa: BLE001 - re-raised by the caller
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=wrapper)
+    worker.start()
+    return worker, outcome
+
+
+def _wait_for_job_state(paths, state: str, outcome: dict, timeout: float = 30.0):
+    """Poll the in-progress attempt until its job file reports ``state``.
+
+    The path is built up one level at a time rather than globbed. ``long_path``
+    decides per path, and a ``derived/processing`` directory can sit just under
+    the threshold while the ``job.json`` two levels inside it sits over - in
+    which case a recursive glob from the short parent silently returns nothing
+    and the wait looks like a timeout. Reading the leaf directly lets
+    ``read_json`` apply the prefix where it is actually needed.
+    """
+    base = paths.derived_dir / "processing"
+    deadline = time.time() + timeout
+    seen: object = None
+    attempts: list[str] = []
+    while time.time() < deadline:
+        if "error" in outcome:
+            raise AssertionError(f"işleme beklenmedik hata verdi: {outcome['error']!r}")
+        try:
+            names = os.listdir(long_path(base))
+        except FileNotFoundError:
+            # The attempt directory is created by the worker; on the first
+            # poll it may simply not exist yet.
+            names = []
+        attempts = [
+            name for name in names
+            if name.startswith(".") and name.endswith(".partial")
+        ]
+        for name in attempts:
+            try:
+                job = read_json(base / name / "job.json")
+            except Exception:  # noqa: BLE001 - caught mid-write; try again
+                continue
+            seen = job.get("state")
+            if seen == state:
+                return base / name / "job.json", job
+        time.sleep(0.02)
+    raise AssertionError(
+        f"iş '{state}' durumuna geçmedi (son görülen: {seen!r}, denemeler: {attempts})"
+    )
+
+
+def test_pause_holds_the_job_and_resume_finishes_it(raw_take):
+    """A new recording needs the GPU back; twenty minutes of replay should survive."""
+    import threading
+
+    take, paths = raw_take
+    pause = threading.Event()
+    pause.set()
+
+    worker, outcome = _run_in_thread(
+        lambda: process_take(
+            paths.root,
+            ProcessingConfig(store_depth=False, store_proxy=False),
+            pause=pause,
+        )
+    )
+    try:
+        _job_file, held = _wait_for_job_state(paths, "paused", outcome)
+        assert held["paused"] is True
+        assert held["frames_processed"] < 12
+    finally:
+        pause.clear()
+        worker.join(timeout=60)
+
+    assert not worker.is_alive()
+    assert "error" not in outcome, outcome.get("error")
+    job = read_json(outcome["value"] / "job.json")
+    assert job["state"] == "complete"
+    assert job["frames_processed"] == 12
+    assert job["paused"] is False
+    # Time spent waiting is not time spent working.
+    assert job["paused_s"] > 0
+
+
+def test_cancelling_a_paused_job_does_not_wait_for_a_resume(raw_take):
+    import threading
+
+    take, paths = raw_take
+    pause, cancel = threading.Event(), threading.Event()
+    pause.set()
+
+    worker, outcome = _run_in_thread(
+        lambda: process_take(
+            paths.root,
+            ProcessingConfig(store_depth=False, store_proxy=False),
+            pause=pause,
+            cancel=cancel,
+        )
+    )
+    try:
+        _wait_for_job_state(paths, "paused", outcome)
+        cancel.set()
+        worker.join(timeout=60)
+    finally:
+        pause.clear()
+
+    assert not worker.is_alive()
+    assert "error" not in outcome, outcome.get("error")
+    job = read_json(outcome["value"] / "job.json")
+    assert job["state"] == "cancelled"
+    # Cancelling is not deleting: the raw recording is untouched.
+    assert path_exists(paths.native_recording) or path_exists(paths.raw_index)
+
+
+def test_a_1_0_0_version_still_opens(raw_take):
+    """Compatibility, proved by building the old layout and reading it."""
+    take, paths = raw_take
+    run = process_take(paths.root, ProcessingConfig(store_depth=False, store_proxy=False))
+    review = ReviewDataset(run)
+    arrays = review.arrays()
+    review.close()
+
+    legacy = run.parent / "run_legacy_shape"
+    Path(long_path(legacy)).mkdir()
+    for name in ("job.json", "source_map.jsonl", "skeleton.jsonl", "checksums.json"):
+        payload = Path(long_path(run / name)).read_bytes()
+        Path(long_path(legacy / name)).write_bytes(payload)
+    with open(long_path(legacy / "arrays.npz"), "wb") as stream:
+        np.savez_compressed(stream, **arrays)
+    job = read_json(legacy / "job.json")
+    job["schema_version"] = "1.0.0"
+    write_json(legacy / "job.json", job, overwrite=True)
+
+    old = ReviewDataset(legacy, verify=False)
+    try:
+        assert old.processing_schema_version == "1.0.0"
+        assert old.array_store.is_memmapped is False
+        assert old.window("joints", 1, 4).shape == (3, 16, 3)
+        assert old.has_summary is False
+        assert old.thumbnails.cover() is None
+        assert old.position_of_anchor(old.anchor_at(5)) == 5
+    finally:
+        old.close()

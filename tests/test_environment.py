@@ -126,3 +126,31 @@ def test_cli_self_test_succeeds() -> None:
     from kinecapture.app import main
 
     assert main(["--self-test", "--log-level", "ERROR"]) == 0
+
+
+def test_offline_layer_imports_without_qt_or_the_sdk() -> None:
+    """The offline layer must stay usable while a recording is running.
+
+    ``processing`` and the project index are what a review screen reads. If
+    either pulled in Qt or ``pyzed`` at import time, opening a finished version
+    would mean loading a GUI toolkit into a headless job, or touching the SDK
+    while the camera is busy with a capture.
+    """
+    code = (
+        "import sys\n"
+        "import kinecapture.processing\n"
+        "from kinecapture.processing.review import ReviewDataset\n"
+        "from kinecapture.processing.arrays import ArrayStore\n"
+        "from kinecapture.processing.summary import TimelineSummary\n"
+        "from kinecapture.processing.thumbnails import ThumbnailIndex\n"
+        "from kinecapture.processing.depth import DepthReader\n"
+        "from kinecapture.dataset.summary_index import build_index\n"
+        "loaded = sorted(m for m in sys.modules "
+        "if m.split('.')[0] in ('pyzed', 'PySide6', 'shiboken6'))\n"
+        "print('CLEAN' if not loaded else 'LOADED:' + ','.join(loaded))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=120
+    )
+    assert result.returncode == 0, result.stderr
+    assert "CLEAN" in result.stdout, result.stdout

@@ -287,6 +287,25 @@ def write_chunk(path: Path, magic: bytes, header: dict[str, Any], payload: bytes
         stream.flush()
 
 
+def read_chunk_header(path: Path, expected_magic: bytes) -> dict[str, Any]:
+    """Read only a chunk's header, without touching the payload.
+
+    Building an index over a depth archive means knowing which positions each
+    chunk holds. Doing that with :func:`read_chunk` would decompress every
+    frame in the recording to answer a question the headers already contain.
+    """
+    with open(long_path(path), "rb") as stream:
+        magic = stream.readline().strip()
+        if magic != expected_magic:
+            raise StorageError(
+                f"Beklenmeyen chunk biçimi: {path.name}",
+                code="rgbd_chunk_magic_mismatch",
+                details={"path": str(path), "magic": magic.decode("latin-1")},
+            )
+        header_length = int(stream.readline().strip())
+        return json.loads(stream.read(header_length).decode("utf-8"))
+
+
 def read_chunk(path: Path, expected_magic: bytes) -> tuple[dict[str, Any], bytes]:
     """Read one chunk, refusing a truncated or foreign file."""
     with open(long_path(path), "rb") as stream:
@@ -710,5 +729,6 @@ __all__ = [
     "encode_depth_chunk",
     "estimate_bytes_per_second",
     "read_chunk",
+    "read_chunk_header",
     "write_chunk",
 ]
