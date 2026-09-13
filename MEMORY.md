@@ -8,21 +8,41 @@ app_version: 0.11.0
 
 # KineCapture Studio — Proje Hafızası
 
+> **BU BİR ARŞİVDİR. BAŞTAN SONA OKUNMAZ.**
+> Giriş noktası **`MEMORY_INDEX.md`**'dir (≤6 KB): güncel faz, sürüm tablosu,
+> modül haritası, aşağıdaki bölümlerin dizini, bilinen açıklar, sonraki adım.
+> Önce onu oku; buradan **yalnızca** görevinin dokunduğu bölümü, indeksin
+> verdiği satır aralığıyla hedefli aç. Kısa kalıcı talimatlar `CLAUDE.md`
+> (Claude) ve `AGENTS.md` (Codex) içindedir.
+
 ## 1. Bu belge nasıl kullanılmalı?
 
 Bu dosya, ZED 2i tabanlı veri toplama ve etiketleme uygulamasının Claude ve
-Codex tarafından paylaşılan kalıcı proje hafızasıdır. **Claude veya Codex yeni
-bir geliştirme oturumunda önce bu dosyanın tamamını okur.** Ardından model:
+Codex tarafından paylaşılan kalıcı proje hafızasıdır. Bir arşivdir; oturum
+başına tamamını okumak ciddi bağlam israfıdır ve bu kural **kaldırılmıştır**.
 
-1. Önce bu dosyanın tamamını okumalıdır.
-2. Ardından repository içindeki gerçek dosyaları incelemelidir.
-3. Buradaki kararlarla kod arasında çelişki varsa bunu belirtmeli ve gerçek
-   kodu doğrulamalıdır.
-4. Önemli mimari kararları, tamamlanan aşamaları ve doğrulama sonuçlarını bu
-   dosyaya eklemelidir.
-5. Kararlaştırılmamış ürün ayrıntılarını kendiliğinden kesinleştirmemelidir.
+### Okuma
 
-Kısa kalıcı talimatlar `CLAUDE.md` içindedir.
+1. Her görevde önce `MEMORY_INDEX.md` okunur.
+2. Bu dosyadan yalnız ilgili bölüm, hedefli olarak (grep veya satır aralığı)
+   açılır. Görevin dokunmadığı bölüm açılmaz.
+3. Ardından repository içindeki gerçek dosyalar incelenir.
+4. Buradaki kararlarla kod arasında çelişki varsa bu belirtilmeli ve **gerçek
+   kod** doğrulanmalıdır; kod hafızadan önceliklidir.
+5. Kararlaştırılmamış ürün ayrıntıları kendiliğinden kesinleştirilmez.
+
+### Yazma
+
+6. Buraya **yalnızca kalıcı bir şey öğrenildiğinde** yazılır: mimari karar,
+   gerçekten çalıştırılmış doğrulama sonucu, sürüm/şema değişikliği, kapanmış
+   veya yeni açılmış bir bilinmeyen. Küçük düzeltme, biçimlendirme, yeniden
+   adlandırma ve başarısız deneme yazılmaz.
+7. "Her görev sonunda hafıza güncellenir" kuralı kaldırılmıştır; yerine
+   "kalıcı bilgi üretildiğinde yazılır" geçmiştir.
+8. Durum değiştiyse `MEMORY_INDEX.md` güncellenir — bu kısa dosyanın güncel
+   kalması arşivin güncel kalmasından önemlidir.
+9. Bu dosya sonsuza kadar büyümez: şişen bölümün eski ayrıntısı özetlenerek
+   sıkıştırılır, aynı bilgi iki yere yazılmaz.
 
 ## 2. Mevcut aşama
 
