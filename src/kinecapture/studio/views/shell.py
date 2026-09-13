@@ -29,6 +29,7 @@ from kinecapture.studio.services.settings import SettingsService
 from kinecapture.studio.services.window_state import WindowState, save_window_state
 from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 from kinecapture.studio.viewmodels.auth import AuthViewModel
+from kinecapture.studio.viewmodels.capture import CaptureViewModel
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
 from kinecapture.studio.viewmodels.settings import SettingsViewModel
 from kinecapture.studio.viewmodels.shell import ShellViewModel
@@ -225,6 +226,8 @@ class StudioWindow(QMainWindow, BoundView):
             return
         if key == "projects":
             viewmodel = ProjectsViewModel(self.viewmodel.session, self.runner)
+        elif key == "capture":
+            viewmodel = CaptureViewModel(self.viewmodel.session)
         elif key == "settings":
             viewmodel = SettingsViewModel(self._settings_service)
         else:  # pragma: no cover - every attachable page is listed above
@@ -307,6 +310,15 @@ class StudioWindow(QMainWindow, BoundView):
         for page in self._pages.values():
             page.page_deactivated()
             page.unbind_all()
+        # The camera is held open across page changes, so closing the window is
+        # the one place it has to be released - and a half-closed take
+        # finalised - rather than left to the process exiting.
+        capture = self._viewmodels.get("capture")
+        if capture is not None:
+            try:
+                capture.service.disconnect()
+            except Exception as exc:  # noqa: BLE001 - never block the close
+                logger.warning("Kamera kapanışında hata: %s", exc)
         self.unbind_all()
         self.viewmodel.close()
         super().closeEvent(event)

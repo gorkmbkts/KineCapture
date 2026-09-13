@@ -153,6 +153,44 @@ QLabel[kcStatus="error"] {
     font-size: @KcFontSizeXs@px;
 }
 
+/* ------------------------------------------------------ switches and radios */
+/* Drawn from tokens rather than left to the native style: the platform
+ * indicator is painted for a light palette and all but disappears on this
+ * one, which turns a two-state control into a guess. */
+
+QCheckBox::indicator, QRadioButton::indicator {
+    width: @KcIconSize@px;
+    height: @KcIconSize@px;
+    background-color: @KcSurfaceControl@;
+    border: @KcBorderWidth@px solid @KcBorderStrong@;
+}
+
+QCheckBox::indicator {
+    border-radius: @KcRadiusControl@px;
+}
+
+QRadioButton::indicator {
+    border-radius: @KcIconSize@px;
+}
+
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {
+    border-color: @KcTextSecondary@;
+}
+
+QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+    background-color: @KcAccentPrimary@;
+    border-color: @KcAccentPrimary@;
+}
+
+QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
+    background-color: @KcSurfaceBase@;
+    border-color: @KcBorderSubtle@;
+}
+
+QCheckBox:focus, QRadioButton:focus {
+    color: @KcFocusRing@;
+}
+
 /* ----------------------------------------------------------------- buttons */
 
 QPushButton {

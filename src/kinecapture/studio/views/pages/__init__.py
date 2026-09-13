@@ -16,12 +16,14 @@ from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.navigation import Destination
 
 from .base import PlaceholderPage, StudioPage
+from .capture import CapturePage
 from .projects import ProjectsPage
 from .settings import SettingsPage
 
 #: destination key -> page class. Missing keys fall back to the placeholder.
 PAGE_TYPES: dict[str, type[StudioPage]] = {
     "projects": ProjectsPage,
+    "capture": CapturePage,
     "settings": SettingsPage,
 }
 
@@ -33,4 +35,12 @@ def build_page(
     return factory(destination, tokens, parent)
 
 
-__all__ = ["PAGE_TYPES", "PlaceholderPage", "ProjectsPage", "SettingsPage", "StudioPage", "build_page"]
+__all__ = [
+    "PAGE_TYPES",
+    "CapturePage",
+    "PlaceholderPage",
+    "ProjectsPage",
+    "SettingsPage",
+    "StudioPage",
+    "build_page",
+]

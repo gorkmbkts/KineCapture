@@ -5,7 +5,7 @@
 > Kaynak görev: `CLAUDE_PYSIDE6_YENI_BACKEND_ENTEGRASYON_PROMPT.md`.
 > Mevcut durum tespiti: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 
-Oluşturuldu: 2026-09-13 · **F0–F4 tamamlandı, F5 sırada.**
+Oluşturuldu: 2026-09-13 · **F0–F5 tamamlandı, F6 sırada.**
 Güncel durum için bölüm 7 (İlerleme kaydı).
 
 ---
@@ -128,7 +128,7 @@ Promptun orijinal sırasından iki sapma var ve ikisi de ölçüme dayanıyor:
 | ~~F2~~ ✅ | Temel: `studio/` katmanları, `tokens.json` + QSS üretici, kabuk, gezinme, tema, pencere durumu; `test_raw_capture_fields.py` onarımı | Uygulama açılıyor, 8 sekme geziliyor, iki tema tutarlı, Qt-bağımsızlık testi geçiyor, 5 kırmızı test yeşil, ekran görüntüsü | — |
 | ~~F3~~ ✅ | Backend toplamsal ekleri (processing **1.1.0**) | Headless testler geçiyor, memmap/özet/thumbnail ölçüldü, eski `run_` dizinleri hâlâ okunabiliyor | F2 |
 | ~~F4~~ ✅ | Projeler · Katılımcılar · Ayarlar | Sanallaştırılmış listeler, 1000 kayıtla takılma yok (ölçüm), ayarlar atomik, geçersiz değer kilitlemiyor | F2 |
-| **F5** | Yakalama | Mock ile tam tur; hafif 2B pose kaplaması; anchor gösterilen kareye yazılıyor; önizleme/kayıt kaybı ayrı | F3 |
+| ~~F5~~ ✅ | Yakalama | Mock ile tam tur; hafif 2B pose kaplaması; anchor gösterilen kareye yazılıyor; önizleme/kayıt kaybı ayrı | F3 |
 | **F6** | Verileri Hesapla | İşleme ayrı süreçte, ilerleme gerçek, iptal/duraklat/restart çalışıyor, GUI bloklanmıyor | F3 |
 | **F7** | İşlenen Videolar | Kütüphane, thumbnail önbelleği, sürüm karşılaştırma, filtreler | F3, F6 |
 | **F8** | Etiketleme — timeline, senkron, canonical sidecar 1.1.0 | **Bütçeler ölçülüp raporlandı** (≤8 ms boşta, ≤16 ms timeline, ≤50 ms scrub, ≤1,5 GB) | F3, F7 |
@@ -343,9 +343,10 @@ ayrıca işaretlenir.
 | F1 | ✅ | 2026-09-13 | `62b04b8` |
 | F2 | ✅ | 2026-09-13 | `2f7108c` |
 | F3 | ✅ | 2026-09-13 | `add23cd` |
-| F4 | ✅ | 2026-09-13 | aşağıda |
-| F5 | ⏳ sırada | | |
-| F6–F15 | — | | |
+| F4 | ✅ | 2026-09-13 | `f869940` |
+| F5 | ✅ | 2026-09-13 | aşağıda |
+| F6 | ⏳ sırada | | |
+| F7–F15 | — | | |
 
 ### F2 sonucu (2026-09-13)
 
@@ -484,3 +485,57 @@ budur — 21 ms tam viewport çizimi, sürükleme sırasında ~45 Hz.
 **Not:** F2'de yazılan kabuk GUI testleri giriş kapısından önce yazılmıştı ve
 kapı eklenince kırıldı (çalışma alanı görünmüyor). Fixture giriş yapacak
 şekilde güncellendi; kapının kendisi ayrı testlerle kapsanıyor.
+
+
+### F5 sonucu (2026-09-13)
+
+**Teslim edilen**
+
+- Büyük RGB önizleme (`views/preview.py`): kare başına yeniden alokasyon yok —
+  çözünürlük başına bir tampon ayrılıp içine yazılıyor, `QImage` o tamponun
+  kopyasız görünümü. Köşe yuvarlatma, gölge, çerçeve efekti yok.
+- Hafif 2B pose kaplaması ve **ne olmadığını söyleyen not**: kadraj kontrolü
+  içindir, metrik iskelet değildir, katılımcı kimliği taşımaz.
+- **Kişi seçimi gösterilen kareye bağlanıyor**: tıklama kaynak görüntü
+  pikseline çevriliyor, anchor kamera timestamp'i + kaynak çözünürlüğü + nokta
+  + bbox ile ham kaydın yanına yazılıyor. İki kişi örtüşüyorsa **seçim
+  yapılmıyor** — yanlış kişi, tekrar sormaktan kötüdür.
+- İki kayıt modu, ikincisi maliyetiyle birlikte işaretli.
+- Taşıma çubuğu, uyarı şeridi (en acili üstte), ve **ayrı** sayaçlar:
+  `Kayıt kaybı` ile `Önizleme kaybı` hiçbir yerde toplanmıyor.
+- Kayıt durumu üç yerde birden: düğme, görüntü kenarındaki ince kırmızı
+  çerçeve, pencere başlığı.
+- Kayıt bitişi: *"Ham kayıt kaydedildi · İskelet bekliyor"*. Kişi bulunamadı
+  diye kayıt başarısız gösterilmiyor.
+
+**Ölçülen** (mock kaynak, 4 sn kayıt, `windows` platformu)
+
+| | GUI kapalı | GUI açık |
+|---|---|---|
+| 60 FPS · kaydedilen / **kayıt kaybı** | 242 / **0** | 241 / **0** |
+| 200 FPS · kaydedilen / **kayıt kaybı** | 749 / **0** | 764 / **0** |
+| GUI kare işleme süresi | — | **medyan 0,09 ms · p95 3,7 ms** |
+| Önizleme kaybı (veri kaybı değil) | 55 | 1–3 |
+
+GUI kare maliyeti 8 ms bütçesinin çok altında ve kayıt kaybı GUI açıkken de
+kapalıyken de **sıfır**.
+
+**Ölçüm sırasında bulunan iki gerçek hata**
+
+1. **Mock backend hız sınırlaması olmadan çalışıyordu.** Studio onu
+   `real_time=False` ile kuruyordu; kaynak istenen 60 FPS yerine ~350 FPS
+   üretip 120 karelik yazıcı kuyruğunu taşırıyor ve **45–96 kare kaybına**
+   yol açıyordu. Take doğru biçimde `partial` kalıyordu — yani sistem doğru
+   davranıyordu, ölçüm ortamı yanlıştı. `real_time=True` verildi; kayıp sıfıra
+   indi. İlk ölçümüm "GUI kayıt kaybına yol açıyor" gibi okunabilirdi; A/B
+   yapılınca kaybın GUI'siz de aynı olduğu görüldü.
+2. **Ayarlar `backend`'i düz metin olarak saklıyordu** (F4'te benim
+   eklediğim hata). Değer kaydedilirken görünür bir sorun çıkmıyor, fakat
+   tercih dosyası yazılırken `'str' object has no attribute 'value'` ile
+   sessizce başarısız oluyordu. Tip dönüşümü eklendi, regresyon testi yazıldı.
+
+**Ayrıca:** radyo/onay kutusu göstergeleri platformun açık palet için
+çizdiği hâliyle koyu temada görünmüyordu; token tabanlı gösterge stili eklendi.
+
+**Kapsam dışı kalan:** gerçek ZED ile 60 FPS ölçümü. Buradaki sayılar mock
+kaynakla alınmıştır ve donanım doğrulaması yerine geçmez.

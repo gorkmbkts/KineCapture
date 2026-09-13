@@ -556,10 +556,7 @@ class SettingsService:
         capture, processing, extra = self._apply_to_copies(changes)
         for key, value in changes.items():
             if "." not in key:
-                if key == "backend":
-                    self.config.backend = value
-                else:
-                    setattr(self.config, key, _coerce_top_level(key, value))
+                setattr(self.config, key, _coerce_top_level(key, value))
         self.config.capture = capture
         self.config.extra.update(extra)
         self.processing = processing
@@ -627,10 +624,21 @@ def _validate_one(field: SettingField, value: Any) -> str:
 
 
 def _coerce_top_level(key: str, value: Any) -> Any:
+    """Store the typed value, not the string the widget produced.
+
+    ``backend`` is the one that bites: left as a plain string it looks fine
+    until the preference file is written, where the writer asks for ``.value``
+    and the save fails - quietly, because a preference that cannot be written
+    is deliberately not fatal.
+    """
     if key in ("dataset_root", "log_dir"):
         return Path(str(value)).expanduser()
     if key == "autosave_enabled":
         return bool(value)
+    if key == "backend":
+        from kinecapture.domain.enums import BackendKind
+
+        return value if isinstance(value, BackendKind) else BackendKind(str(value))
     return value
 
 

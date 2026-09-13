@@ -386,3 +386,16 @@ def test_a_failing_save_does_not_lose_the_change(config: AppConfig) -> None:
     viewmodel.edit("theme", "light")
     assert viewmodel.save()
     assert config.theme == "light"
+
+
+def test_backend_is_stored_as_an_enum_not_a_string(config: AppConfig) -> None:
+    """A raw string survives until the preference file is written, then fails."""
+    from kinecapture.core.config import save_user_state
+    from kinecapture.domain.enums import BackendKind
+
+    viewmodel = SettingsViewModel(SettingsService(config, save=lambda _c: None))
+    viewmodel.edit("backend", "mock")
+    assert viewmodel.save()
+    assert config.backend is BackendKind.MOCK
+    # The real writer must accept what we stored.
+    save_user_state(config)
