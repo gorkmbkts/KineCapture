@@ -5,7 +5,7 @@
 > Kaynak görev: `CLAUDE_PYSIDE6_YENI_BACKEND_ENTEGRASYON_PROMPT.md`.
 > Mevcut durum tespiti: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 
-Oluşturuldu: 2026-09-13 · **F0–F5 tamamlandı, F6 sırada.**
+Oluşturuldu: 2026-09-13 · **F0–F6 tamamlandı, F7 sırada.**
 Güncel durum için bölüm 7 (İlerleme kaydı).
 
 ---
@@ -129,7 +129,7 @@ Promptun orijinal sırasından iki sapma var ve ikisi de ölçüme dayanıyor:
 | ~~F3~~ ✅ | Backend toplamsal ekleri (processing **1.1.0**) | Headless testler geçiyor, memmap/özet/thumbnail ölçüldü, eski `run_` dizinleri hâlâ okunabiliyor | F2 |
 | ~~F4~~ ✅ | Projeler · Katılımcılar · Ayarlar | Sanallaştırılmış listeler, 1000 kayıtla takılma yok (ölçüm), ayarlar atomik, geçersiz değer kilitlemiyor | F2 |
 | ~~F5~~ ✅ | Yakalama | Mock ile tam tur; hafif 2B pose kaplaması; anchor gösterilen kareye yazılıyor; önizleme/kayıt kaybı ayrı | F3 |
-| **F6** | Verileri Hesapla | İşleme ayrı süreçte, ilerleme gerçek, iptal/duraklat/restart çalışıyor, GUI bloklanmıyor | F3 |
+| ~~F6~~ ✅ | Verileri Hesapla | İşleme ayrı süreçte, ilerleme gerçek, iptal/duraklat/restart çalışıyor, GUI bloklanmıyor | F3 |
 | **F7** | İşlenen Videolar | Kütüphane, thumbnail önbelleği, sürüm karşılaştırma, filtreler | F3, F6 |
 | **F8** | Etiketleme — timeline, senkron, canonical sidecar 1.1.0 | **Bütçeler ölçülüp raporlandı** (≤8 ms boşta, ≤16 ms timeline, ≤50 ms scrub, ≤1,5 GB) | F3, F7 |
 | **F9** | Etiketleme — 3B iskelet (`QOpenGLWidget`, offline veri) | OpenGL çizim, timestamp senkronu, kamera kalıcı, 60 Hz korunuyor | F8 |
@@ -344,9 +344,10 @@ ayrıca işaretlenir.
 | F2 | ✅ | 2026-09-13 | `2f7108c` |
 | F3 | ✅ | 2026-09-13 | `add23cd` |
 | F4 | ✅ | 2026-09-13 | `f869940` |
-| F5 | ✅ | 2026-09-13 | aşağıda |
-| F6 | ⏳ sırada | | |
-| F7–F15 | — | | |
+| F5 | ✅ | 2026-09-13 | `1cc99ce` |
+| F6 | ✅ | 2026-09-13 | aşağıda |
+| F7 | ⏳ sırada | | |
+| F8–F15 | — | | |
 
 ### F2 sonucu (2026-09-13)
 
@@ -539,3 +540,41 @@ kapalıyken de **sıfır**.
 
 **Kapsam dışı kalan:** gerçek ZED ile 60 FPS ölçümü. Buradaki sayılar mock
 kaynakla alınmıştır ve donanım doğrulaması yerine geçmez.
+
+
+### F6 sonucu (2026-09-13)
+
+**Teslim edilen**
+
+- İşleme **ayrı süreçte**: `python -m kinecapture.processing` bir alt süreç
+  olarak başlatılıyor. Gerekçe sırayla: SDK orada açılıyor (orada bir çökme
+  işi kaybeder, burada uygulamayı kaybederdi), hiçbir davranışı bir çizimi
+  bloklayamaz, ve işletim sistemi onu duraklatıp sonlandırabilir — "iptal"in
+  yirmi dakikadır süren bir iş için anlamı budur.
+- İlerleme **`job.json`'dan okunuyor**. Ekranla diskteki kayıt birbirinden
+  ayrılamaz; ikinci bir kopya tutulmuyor.
+- **Yüzde uydurulmuyor**: kaynak kare sayısı bildirilmemişse
+  *"İşlenen 412 kare"*, bildirilmişse *"İşlenen 412 / doğrulanmış 900 kare"*.
+  Model ısınmadan tahmini süre verilmiyor (*"süre hesaplanıyor"*).
+- Başlat · duraklat · devam · iptal · yeniden dene. **Duraklatma** alt süreci
+  askıya alıyor (psutil ortamda mevcut); desteklenmeyen bir makinede bunu
+  söyleyip iptali öneriyor.
+- **"İptal ham kaydı silmez"** düğmenin yanında yazılı ve testle sabit.
+- Kapsam uyuşmazlığı **"tamamlandı" denmiyor**: `partial` ayrı bir durum ve
+  her bulgu kod yerine cümleyle gösteriliyor.
+- Canlı kayıt başlayınca çalışan işler duraklıyor, kayıt bitince devam
+  ediyor (`take_finished` → `resume_all`).
+- Kapanışta her alt süreç sonlandırılıyor; yarım çıktı yayımlanmıyor.
+
+**Ölçülen** (mock kaynak, 363 karelik kayıt, `windows` platformu)
+
+| Ölçüm | Sonuç |
+|---|---|
+| Kayıt → işleme → tamamlandı | ✓ `complete`, 363/363 kare, bulgu yok |
+| Duraklat → ilerleme durdu mu | ✓ sayaç hareket etmedi |
+| Devam → tamamlandı | ✓ baştan başlamadan bitti |
+| **İşleme sürerken GUI kare süresi** | **medyan 2,88 ms · p95 7,72 ms** (bütçe 8 ms) |
+| İptal sonrası ham kayıt | ✓ dosya listesi değişmedi |
+
+**Not:** `psutil` ortamda zaten kurulu ve duraklatma onu kullanıyor; bağımlılık
+olarak **eklenmedi**, yokluğunda arayüz bunu söyleyip iptali öneriyor.

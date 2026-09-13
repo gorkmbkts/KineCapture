@@ -30,6 +30,7 @@ from kinecapture.studio.services.window_state import WindowState, save_window_st
 from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import CaptureViewModel
+from kinecapture.studio.viewmodels.processing import ProcessingViewModel
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
 from kinecapture.studio.viewmodels.settings import SettingsViewModel
 from kinecapture.studio.viewmodels.shell import ShellViewModel
@@ -228,12 +229,24 @@ class StudioWindow(QMainWindow, BoundView):
             viewmodel = ProjectsViewModel(self.viewmodel.session, self.runner)
         elif key == "capture":
             viewmodel = CaptureViewModel(self.viewmodel.session)
+            # A live recording needs the GPU back. The running jobs are held
+            # rather than cancelled, and resumed when the take is finished.
+            viewmodel.take_finished.subscribe(lambda _take: self._resume_jobs())
+        elif key == "processing":
+            viewmodel = ProcessingViewModel(
+                self.viewmodel.session, runner=self.runner, settings=self._settings_service
+            )
         elif key == "settings":
             viewmodel = SettingsViewModel(self._settings_service)
         else:  # pragma: no cover - every attachable page is listed above
             return
         self._viewmodels[key] = viewmodel
         attach(viewmodel)
+
+    def _resume_jobs(self) -> None:
+        processing = self._viewmodels.get("processing")
+        if processing is not None:
+            processing.service.resume_all()
 
     # ------------------------------------------------------------------ gate
     def _update_gate(self) -> None:
@@ -313,6 +326,12 @@ class StudioWindow(QMainWindow, BoundView):
         # The camera is held open across page changes, so closing the window is
         # the one place it has to be released - and a half-closed take
         # finalised - rather than left to the process exiting.
+        processing = self._viewmodels.get("processing")
+        if processing is not None:
+            try:
+                processing.shutdown()
+            except Exception as exc:  # noqa: BLE001 - never block the close
+                logger.warning("İşleme kapanışında hata: %s", exc)
         capture = self._viewmodels.get("capture")
         if capture is not None:
             try:

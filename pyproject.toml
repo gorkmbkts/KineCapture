@@ -48,4 +48,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    # Launches a real child process and waits for it. Kept marked so a quick
+    # run can skip them with -m 'not slow', not so they can be forgotten.
+    "slow: starts a child process and waits for it to finish",
+]
 filterwarnings = ["error::DeprecationWarning:kinecapture.*"]
