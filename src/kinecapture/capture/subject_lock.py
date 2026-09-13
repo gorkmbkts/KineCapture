@@ -64,7 +64,7 @@ from kinecapture.features.roles import resolve_roles
 from kinecapture.visualization.skeleton_spec import SkeletonSpec
 
 #: Bumped whenever the scoring below could produce a different decision.
-ASSOCIATION_ALGORITHM_VERSION = "1.0.0"
+ASSOCIATION_ALGORITHM_VERSION = "1.1.0"
 
 
 class SubjectLockState(str, Enum):
@@ -460,10 +460,30 @@ class SubjectLock:
 
         present = {int(body.tracking_id): body for body in bodies}
         self._seen_ids.update(present)
+        if self.state is SubjectLockState.AMBIGUOUS:
+            self._counters["ambiguous_frames"] += 1
+            return FrameAssociation(SubjectLockState.AMBIGUOUS, None, float("nan"), "awaiting_confirmation")
 
         # --- the easy, overwhelmingly common case ----------------------
         if self.tracking_id is not None and self.tracking_id in present:
             body = present[self.tracking_id]
+            gap = self._gap_seconds(timestamp_ns)
+            point = _root_position(body, self.spec) if self.spec is not None else None
+            contradiction = gap > self.policy.give_up_seconds
+            if point is not None and self._last_seen_position is not None:
+                contradiction |= float(np.linalg.norm(point-self._last_seen_position)) > max(0.5, self.policy.plausible_speed*gap)
+            if self.spec is not None and self.signature.is_usable:
+                limb, stature = self.signature.similarity(SubjectSignature.measure(body, self.spec))
+                contradiction |= any(math.isfinite(v) and v < 0.3 for v in (limb, stature))
+            if contradiction:
+                self.state = SubjectLockState.AMBIGUOUS
+                self._counters["ambiguous_frames"] += 1
+                self._log("same_id_evidence_conflict", frame_index=frame_index, timestamp_ns=timestamp_ns)
+                return FrameAssociation(self.state, None, float("nan"), "same_id_evidence_conflict")
+            if body.tracking_state.value not in ("ok", "off") or not body.valid_joint_mask.any():
+                self.state = SubjectLockState.TEMPORARILY_LOST
+                self._counters["lost_frames"] += 1
+                return FrameAssociation(self.state, None, float("nan"), "tracking_unusable")
             if self.state is not SubjectLockState.LOCKED:
                 self._log(
                     "subject_reacquired_same_id",

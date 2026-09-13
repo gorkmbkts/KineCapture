@@ -19,7 +19,7 @@ APP_NAME: str = "KineCapture Studio"
 PACKAGE_NAME: str = "kinecapture"
 
 #: Application version.
-APP_VERSION: str = "0.10.0"
+APP_VERSION: str = "0.11.0"
 
 #: Schema version for ``project.json``.
 PROJECT_SCHEMA_VERSION: str = "1.1.0"
@@ -28,14 +28,14 @@ PROJECT_SCHEMA_VERSION: str = "1.1.0"
 SESSION_SCHEMA_VERSION: str = "2.0.0"
 
 #: Schema version for ``take.json``.
-TAKE_SCHEMA_VERSION: str = "1.1.0"
+TAKE_SCHEMA_VERSION: str = "1.2.0"
 
 #: Schema version for the append-safe per-frame skeleton sidecar (JSONL).
 #: 1.1 adds optional tracker fields (2D keypoints, per-joint covariances,
 #: parent-relative joint positions, root orientation and velocity, action
 #: state). Every one of them is optional, so a 1.0 stream stays readable
 #: without migration and a 1.1 reader loses nothing from either version.
-SKELETON_STREAM_SCHEMA_VERSION: str = "1.1.0"
+SKELETON_STREAM_SCHEMA_VERSION: str = "1.2.0"
 
 #: Schema version for the label sidecar (``annotations/segments.json``).
 #: 2.x introduces the two-level MovementSample / ErrorInterval hierarchy;
@@ -76,7 +76,7 @@ FEATURE_SPEC_SCHEMA_VERSION: str = "1.0.0"
 
 #: Schema version of ``raw/raw_capture_manifest.json``: the description of the
 #: immutable colour/depth archive and how its streams line up in time.
-RAW_ARCHIVE_SCHEMA_VERSION: str = "1.0.0"
+RAW_ARCHIVE_SCHEMA_VERSION: str = "1.1.0"
 
 __all__ = [
     "APP_NAME",

@@ -108,6 +108,43 @@ def test_failed_body_retrieval_never_returns_old_bodies(backend):
         backend._retrieve_bodies(sl, camera)
 
 
+@pytest.mark.parametrize("fmt", ["BODY_18", "BODY_34", "BODY_38"])
+def test_sdk_to_disk_to_playback_preserves_joint_identity(workspace, session, fmt):
+    from kinecapture.visualization.skeleton_spec import spec_for_zed_body_format
+    from kinecapture.recording.take_writer import TakeWriter
+    from kinecapture.playback.take_reader import load_take
+    from kinecapture.domain.models import FramePacket, CameraInfo
+    from kinecapture.domain.project import CaptureProfile
+    from kinecapture.domain.enums import DataOrigin
+    spec = spec_for_zed_body_format(fmt)
+    adapter = ZedCameraBackend()
+    adapter._spec, adapter._body_tracking_enabled = spec, True
+    adapter._body_runtime = SimpleNamespace()
+    joints = np.arange(spec.num_joints*3, dtype=np.float32).reshape(-1,3)*np.float32(.013247)
+    joints[:,1] *= -1
+    raw = _fake_body(joints=joints, confidences=np.arange(spec.num_joints,dtype=np.float32)+50,
+                     orientations=np.zeros((spec.num_joints,4),dtype=np.float32))
+    raw.keypoint_2d = np.arange(spec.num_joints*2,dtype=np.float32).reshape(-1,2)*3.213456
+    body = _convert(adapter,[raw])[0]
+    session.capture_profile = CaptureProfile.legacy(depth_archive="none",store_proxy=False,body_format=fmt)
+    info=CameraInfo(backend="test",model="SDK stub",origin=DataOrigin.SYNTHETIC,resolution=(1280,720),target_fps=30)
+    take, paths=workspace.prepare_take(session,origin=DataOrigin.SYNTHETIC,camera_info=info,skeleton_format=spec.name)
+    writer=TakeWriter(workspace,take,paths)
+    packet=FramePacket(123,456,789,np.zeros((360,640,3),dtype=np.uint8),bodies=(body,),
+                       source_resolution=(1280,720),origin=DataOrigin.SYNTHETIC)
+    writer.write_frame(packet)
+    raw.keypoint.fill(999); raw.keypoint_2d.fill(999)
+    writer.finalize()
+    loaded=load_take(workspace,take,with_video=False)
+    restored=loaded.stream.frames[0].bodies[0]
+    np.testing.assert_array_equal(restored.joint_positions_xyz,body.joint_positions_xyz)
+    np.testing.assert_array_equal(restored.joint_positions_2d,body.joint_positions_2d)
+    np.testing.assert_array_equal(restored.joint_confidences,body.joint_confidences)
+    assert loaded.spec.joint_names == spec.joint_names
+    assert loaded.stream.frames[0].camera_timestamp_ns == 789
+    assert loaded.stream.frames[0].frame_index == 123
+
+
 def test_confidence_is_rescaled_to_unit_range(backend) -> None:
     """The SDK reports 0..100; the domain contract is 0..1."""
     poses = _convert(backend, [_fake_body()])

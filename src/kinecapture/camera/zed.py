@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import threading
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
@@ -135,8 +136,11 @@ class ZedCameraBackend(CameraBackend):
     name = "zed"
     origin = DataOrigin.REAL
 
-    def __init__(self, profile: Optional[CaptureProfile] = None) -> None:
-        self._profile = profile or CaptureProfile()
+    def __init__(self, profile: Optional[CaptureProfile] = None, *, svo_path: Optional[Path] = None) -> None:
+        self._profile = deepcopy(profile or CaptureProfile())
+        self._svo_path = Path(svo_path) if svo_path else None
+        self.source_frame_count: Optional[int] = None
+        self._grab_errors = 0
         self._camera: Any = None
         self._info: Optional[CameraInfo] = None
         self._spec: Optional[SkeletonSpec] = None
@@ -282,6 +286,11 @@ class ZedCameraBackend(CameraBackend):
                 sl, "RESOLUTION", profile.resolution, "resolution"
             )
             init.camera_fps = int(profile.fps)
+            if profile.calibration_file:
+                init.optional_opencv_calibration_file = str(profile.calibration_file)
+            if self._svo_path is not None:
+                init.set_from_svo_file(str(self._svo_path))
+                init.svo_real_time_mode = False
             init.depth_mode = (
                 self._enum(sl, "DEPTH_MODE", profile.depth_mode, "depth_mode")
                 if profile.computes_depth
@@ -319,6 +328,8 @@ class ZedCameraBackend(CameraBackend):
                 raise
 
             self._camera = camera
+            if self._svo_path is not None:
+                self.source_frame_count = int(camera.get_svo_number_of_frames())
             self._depth_enabled = profile.retrieves_depth
             self._frame_index = 0
             self._mat_color = sl.Mat()
@@ -349,6 +360,7 @@ class ZedCameraBackend(CameraBackend):
         params = sl.BodyTrackingParameters()
         params.enable_tracking = True
         params.enable_body_fitting = bool(profile.enable_body_fitting)
+        params.allow_reduced_precision_inference = bool(profile.allow_reduced_precision_inference)
         params.detection_model = self._enum(
             sl, "BODY_TRACKING_MODEL", profile.body_tracking_model, "body_tracking_model"
         )
@@ -425,7 +437,16 @@ class ZedCameraBackend(CameraBackend):
             int(configuration.resolution.width),
             int(configuration.resolution.height),
         )
+
         calibration = self._left_camera_calibration(configuration)
+        effective = {}
+        try:
+            actual = camera.get_init_parameters()
+            effective = {key: str(getattr(actual, key)) for key in (
+                "camera_resolution", "camera_fps", "depth_mode", "coordinate_system", "coordinate_units",
+                "depth_stabilization", "camera_disable_self_calib", "optional_opencv_calibration_file")}
+        except (AttributeError, RuntimeError):
+            pass
         return CameraInfo(
             backend=self.name,
             model=str(information.camera_model),
@@ -451,9 +472,31 @@ class ZedCameraBackend(CameraBackend):
                 "body_fitting": profile.enable_body_fitting,
                 "input_type": str(information.input_type),
                 "left_camera_calibration": calibration,
+                "stereo_calibration": self._stereo_calibration(configuration),
+                "effective_capture_profile": profile.to_dict(),
+                "sdk_reported_init_parameters": effective,
                 "quaternion_order": "xyzw",
             },
         )
+
+    @staticmethod
+    def _stereo_calibration(configuration: Any) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for name in ("calibration_parameters", "calibration_parameters_raw"):
+            calibration = getattr(configuration, name, None)
+            if calibration is None:
+                continue
+            block: dict[str, Any] = {}
+            for side in ("left_cam", "right_cam"):
+                cam = getattr(calibration, side, None)
+                if cam is not None:
+                    block[side] = {key: float(getattr(cam, key)) for key in ("fx", "fy", "cx", "cy")}
+                    block[side]["distortion"] = np.asarray(cam.disto).tolist()
+            transform = getattr(calibration, "stereo_transform", None)
+            if transform is not None:
+                block["stereo_transform"] = np.asarray(transform.m).tolist()
+            result[name] = block
+        return result
 
     def start_preview(self) -> None:
         if self._camera is None:
@@ -518,6 +561,11 @@ class ZedCameraBackend(CameraBackend):
 
         status = camera.grab(self._runtime)
         if status != sl.ERROR_CODE.SUCCESS:
+            if self._svo_path is not None:
+                if status == sl.ERROR_CODE.END_OF_SVOFILE_REACHED:
+                    raise EOFError("End of SVO")
+                raise CameraError(f"SVO karesi okunamadı: {status}", code="svo_decode_failed")
+            self._grab_errors += 1
             if status == sl.ERROR_CODE.CAMERA_NOT_DETECTED:
                 raise CameraError(
                     "Kamera bağlantısı koptu.",
@@ -559,6 +607,14 @@ class ZedCameraBackend(CameraBackend):
         bodies = self._retrieve_bodies(sl, camera)
 
         image_timestamp = camera.get_timestamp(sl.TIME_REFERENCE.IMAGE)
+        if self._body_tracking_enabled:
+            stamp = getattr(self._bodies, "timestamp", None)
+            if stamp is not None and int(stamp.get_nanoseconds()) != int(image_timestamp.get_nanoseconds()):
+                self._body_issues.append("sdk_body_image_timestamp_mismatch")
+                bodies = ()
+            if getattr(self._bodies, "is_new", True) is False:
+                self._body_issues.append("sdk_body_result_not_new")
+                bodies = ()
         index = self._frame_index
         self._frame_index += 1
 
@@ -567,6 +623,9 @@ class ZedCameraBackend(CameraBackend):
             host_timestamp_ns=time.time_ns(),
             camera_timestamp_ns=int(image_timestamp.get_nanoseconds()),
             color_frame=color,
+            source_position=int(camera.get_svo_position()) if self._svo_path is not None else None,
+            integrity_issues=tuple(getattr(self, "_body_issues", ())),
+            recording_status=self.native_recording_stats() if self._recording else None,
             depth_frame=depth,
             bodies=bodies,
             capture_status=CaptureStatus.OK,
@@ -604,6 +663,7 @@ class ZedCameraBackend(CameraBackend):
             )
 
     def _retrieve_bodies(self, sl: Any, camera: Any) -> tuple[BodyPose, ...]:
+        self._body_issues: list[str] = []
         if not self._body_tracking_enabled or self._spec is None:
             return ()
         self._check_retrieval(
@@ -614,6 +674,7 @@ class ZedCameraBackend(CameraBackend):
         for body in self._bodies.body_list:
             joints = np.asarray(body.keypoint, dtype=np.float32)
             if joints.shape != (expected_joints, 3):
+                self._body_issues.append("sdk_body_joint_shape_invalid")
                 # Never silently reshape: a mismatch means the configured body
                 # format and the delivered data disagree, which would corrupt
                 # every downstream joint index.
@@ -626,6 +687,7 @@ class ZedCameraBackend(CameraBackend):
                 continue
             confidences = np.asarray(body.keypoint_confidence, dtype=np.float32)
             if confidences.shape != (expected_joints,):
+                self._body_issues.append("sdk_body_confidence_shape_invalid")
                 confidences = np.full(expected_joints, np.nan, dtype=np.float32)
             else:
                 # The SDK reports confidence on a 0..100 scale; the domain model
@@ -684,6 +746,8 @@ class ZedCameraBackend(CameraBackend):
     # ------------------------------------------------------ native recording
     def start_native_recording(self, path: Path) -> bool:
         """Start immutable SVO2 using the requested, explicitly named codec."""
+        if self._svo_path is not None:
+            raise CameraError("SVO kaynağına kayıt açılamaz.", code="source_read_only")
         camera = self._camera
         if camera is None:
             raise CameraNotConnectedError("ZED kamera bağlı değil.")
@@ -742,12 +806,16 @@ class ZedCameraBackend(CameraBackend):
             return {}
         return {
             "active": bool(getattr(status, "status", False)),
+            "status": bool(getattr(status, "status", False)),
             "frames_ingested": int(getattr(status, "number_frames_ingested", 0)),
             "frames_encoded": int(getattr(status, "number_frames_encoded", 0)),
             "average_compression_ratio": float(
                 getattr(status, "average_compression_ratio", 0.0)
             ),
             "path": str(self._recording_path) if self._recording_path else None,
+            "compression_requested_and_accepted": getattr(self, "_recording_codec", None),
+            "counters_verified": False,
+            "grab_errors_since_connect": self._grab_errors,
         }
 
 

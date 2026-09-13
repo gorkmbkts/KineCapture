@@ -71,9 +71,13 @@ def populated(qapp, tmp_path_factory):
     """
     import os
     import tempfile
+    from kinecapture.core import config as config_module
 
     from kinecapture.dataset.workspace import ProjectWorkspace
     from kinecapture.domain.enums import ConsentStatus
+
+    # Fail before any GUI operation if outer session isolation is removed.
+    assert config_module.USER_STATE_PATH.is_relative_to(tmp_path_factory.getbasetemp())
 
     os.environ["LOCALAPPDATA"] = tempfile.mkdtemp()
     root = tmp_path_factory.mktemp("viewports") / "datasets"

@@ -673,7 +673,9 @@ def load_take(
 ) -> LoadedTake:
     """Load a take's pose stream and (optionally) open its proxy video."""
     paths = workspace.take_paths(take)
-    stream = load_skeleton_stream(paths.skeleton_stream)
+    stream = load_skeleton_stream(
+        paths.raw_index if take.processing_status == "awaiting_processing" else paths.skeleton_stream
+    )
     spec = try_get_skeleton_spec(
         take.skeleton_format or stream.skeleton_format
     )
@@ -701,13 +703,14 @@ def recover_partial_take(
     from kinecapture.domain.enums import TakeState  # local: avoids a cycle at import
 
     paths = workspace.take_paths(take)
-    if not path_exists(paths.skeleton_stream):
+    recovery_source = paths.raw_index if take.processing_status == "awaiting_processing" else paths.skeleton_stream
+    if not path_exists(recovery_source):
         take.state = TakeState.FAILED
         take.notes = f"{take.notes}\n[Kurtarma: iskelet akışı bulunamadı]".strip()
         workspace.save_take(take)
         return take, 0
 
-    stream = load_skeleton_stream(paths.skeleton_stream)
+    stream = load_skeleton_stream(recovery_source)
     take.metrics.frames_written = stream.frame_count
     take.metrics.duration_s = stream.duration_s
     if stream.frame_count > 1 and stream.duration_s > 0:

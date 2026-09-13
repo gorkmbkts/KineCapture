@@ -285,9 +285,9 @@ def test_the_raw_manifest_states_what_svo2_does_not_hold(recorded) -> None:
 
     assert manifest["schema_version"]
     native = manifest["native_recording"]
-    # The honest statement this project exists to make.
-    assert "DEĞİLDİR" in native["does_not_store"]
-    assert native["lossless"] is False  # H264 default, stated plainly
+    assert "yeniden hesaplanır" in native["does_not_store"]
+    assert "Final metrik derinlik ve iskelet" in native["does_not_store"]
+    assert native["lossless"] is False  # This fixture explicitly uses legacy H264.
     depth = manifest["rgbd_archive"]["depth"]
     assert depth["lossless"] is True
     assert depth["unit"] == "meter"

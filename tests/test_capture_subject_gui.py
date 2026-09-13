@@ -17,6 +17,7 @@ from PySide6.QtGui import QMouseEvent
 from PySide6.QtWidgets import QApplication
 
 from kinecapture.core.config import AppConfig
+from kinecapture.domain.project import CaptureProfile
 from kinecapture.domain.activity import ActivityState
 from kinecapture.domain.enums import ConsentStatus, TakeQuality
 from kinecapture.gui.pages.capture import CapturePage
@@ -113,7 +114,8 @@ def capture_page(qt_app, workspace, dataset_root, isolated_user_state):
     from tests.conftest import authenticate_state
 
     participant = workspace.create_participant()
-    config = AppConfig(dataset_root=dataset_root, backend="mock")
+    # These tests exercise the retained live 3D workflow explicitly.
+    config = AppConfig(dataset_root=dataset_root, backend="mock", capture=CaptureProfile.legacy())
     state = AppState(config)
     authenticate_state(state, workspace)
     state.prepare_capture(participant)

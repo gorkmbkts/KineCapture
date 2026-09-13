@@ -1,9 +1,9 @@
 ---
 document_type: project_memory
 project_name: KineCapture Studio
-status: squat_offline_investigation_complete_awaiting_implementation_approval
-last_updated: 2026-09-10
-app_version: 0.10.0
+status: backend_capture_processing_architecture_implemented_awaiting_live_zed_validation
+last_updated: 2026-09-11
+app_version: 0.11.0
 ---
 
 # KineCapture Studio — Proje Hafızası
@@ -2311,6 +2311,251 @@ olarak kontrol edildi; belgedeki başka donanım FPS'i bu makineye taşınmadı.
 Görev talimatı gereği rapor tesliminden sonra duruldu. Uygulama geliştirmesi
 ayrı kullanıcı onayını bekler; bu tur onay için yeniden kamera bağlama şartı
 konmadı ve gereksiz veri/yol düzeltmesi yapılmadı.
+
+## 6U. İngilizce staj defteri gün 26–30 (2026-09-11)
+
+Kullanıcının devam isteği üzerine staj defterinin son beş günü İngilizce olarak
+hazırlandı ve
+`C:\Users\gorke\Desktop\KineSynthV3\staj_raporu\KineSynthV3_Internship_Report_Days_26_30_EN.docx`
+yoluna kaydedildi. Önceki raporun sade Word düzeni şablon olarak korundu; yeni
+belge 8 sayfa, 5 `Heading 1` gün başlığı ve 5 satır içi görsel içeriyor. Günlük
+metin uzunlukları sırasıyla 368, 357, 332, 352 ve 351 kelime. Günlerin açılışları
+ve anlatım akışı birbirinden farklı tutuldu; kronolojik bir laboratuvar özeti
+yerine o gün yapılan mühendislik işine odaklanıldı.
+
+Rapor kapsamı gerçek kod ve yerel kanıta dayanıyor: gün 26 kayıtlı squat
+verisindeki BODY_34 düz-bacak hatasının BODY_38 ile karşılaştırılması; gün 27
+değişmez SVO2 kaynağını merkeze alan raw-first kayıt profili; gün 28 kayıttan
+bağımsız, bounded latest-frame önizleme çalışanı; gün 29 hash korumalı,
+iptal/yeniden başlatma destekli ve atomik yayımlanan offline işleme; gün 30 ise
+checksum doğrulamalı review sınırı ve canonical source anchor kullanımı. Yerel
+Squat BODY_34 overlay karesiyle birlikte `CaptureProfile`, `LatestWorker`,
+`process_take` ve `ReviewDataset` gerçek kod parçalarından dört okunabilir görsel
+üretildi. Bu rapor turunda uygulama kaynak koduna veya şemalara değişiklik
+yapılmadı; kullanıcının mevcut working-tree çalışması korundu.
+
+Rapor hazırlanırken gerçek sürümler yeniden doğrulandı: app/package `0.11.0`,
+project `1.1.0`, session `2.0.0`, take/skeleton stream `1.2.0`, raw archive
+`1.1.0`, annotation/release `2.2.0`, label `2.0.0`, feature `1.0.0`, identity
+SQLite `1`. Seçilmiş mimari ve işleme testleri önce varsayılan uzun Windows temp
+yoluyla çalıştırıldı: 17 geçti, `Path.exists()` uzun türetilmiş yol sınırına
+takıldığı için 1 test kaldı. Aynı kapsam kısa ve izole
+`--basetemp C:\Users\gorke\AppData\Local\Temp\kc_report_2630` ile tekrarlandı;
+18 test 5.50 saniyede geçti. Bu sonuç kısa çalışma yolundaki uygulama
+davranışını doğruluyor, Windows uzun-yol hassasiyetini ortadan kaldırmıyor.
+
+Belge kalite kontrolünde DOCX ZIP bütünlüğü geçti, beş başlık/beş görsel ve eski
+gün 16–25 metninin bulunmadığı doğrulandı. Sekiz sayfanın tamamı render edilip
+görsel olarak incelendi; kırpılma, üst üste binme, eksik görsel veya bozuk
+karakter görülmedi. Erişilebilirlik denetimi high/medium/low için `0/0/0`, görsel
+denetimi 5 inline şekil, heading denetimi 5 başlık verdi. Tam pytest paketi,
+uygulama self-test'i, wheel/package testi ve bağlı canlı ZED testi bu rapor
+turunda çalıştırılmadı.
+
+## 6V. Capture → Verileri Hesapla → Etiketleme backend devamı (2026-09-11)
+
+Bu bölüm, eski canlı zorunlu RGB-D ürün kararlarını yeni kayıtlar için geçersiz
+kılar. Kullanıcının “Tüm yeni kayıtlarda minimum ham kayıt varsayılan olsun”
+yanıtı ve `KINECAPTURE_BACKEND_YENI_MIMARI_DEVAM_PROMPTU.md` yönü uygulandı.
+`3706cbe` içindeki ownership/boundary/lifecycle düzeltmeleri korundu. Bu tur
+commit yapılmadı; yeni uygulama çalışma ağacındadır. Ayrıntılı teknik teslim:
+`KINECAPTURE_BACKEND_MIMARI_UYGULAMA_RAPORU_2026-09-11.md`.
+
+### Kalıcı kararlar ve gerçek uygulama
+
+- Yeni CaptureProfile: HD720/60, H264_LOSSLESS, policy 2; final canlı body/depth,
+  skeleton/proxy ve ayrı RGB/depth arşivi varsayılan kapalı. Kapalı ürünün SDK
+  modülü, retrieval/kopya, writer/encoding/sıkıştırması gerçekten devreden çıkar.
+  Kullanıcı dosyasını değiştirmeyen `for_new_capture` eski tercihleri bu yeni
+  başlangıca taşır; tarihsel take/session `from_dict` legacy profili korur.
+- ZED raw kaynak SVO2'dir. Mock, saklanan renk ve sentetik generator provenance'ı
+  üzerinden replay edilir. Doğrudan legacy mock test akışı ayrıca korunur.
+- Görüntüsüz FramePacket kaynak çözünürlüğünü taşır. RGB preview küçük ve
+  seyrektir; tüm çözünürlükte RGB ancak seçilen ürün gerektirirse kopyalanır.
+- `preview/LatestWorker` tek slot, bloklamayan offer, latest-frame-wins ile
+  inference ve kullanıcı frame listener'larını acquisition thread'inden ayırır.
+  `CpuPosePreview`, mevcut OpenCV DNN ile CPU'da hafif 2D kişi/pose gösterir.
+  Bu çıktı metrik iskelet veya participant identity değildir. OpenCV Zoo commit
+  `47534e27c9851bb1128ccc0102f1145e27f23f98`, Apache-2.0 lisans/NOTICE taşınır.
+  İki ONNX model ~/.cache/kinecapture/models altında checksum doğrulamalı veri
+  dosyasıdır. Yeni conda environment/paket kurulmadı veya yükseltilmedi.
+- Operatör seçimi gösterilen görüntünün source timestamp/resolution, nokta ve
+  bbox anchor'ıdır. Kayıt anında raw sidecar'a yazılır; capture lifecycle kilidi
+  kapanış/checksum sırasında değiştirilmesini önler. Düzeltme/reprocess için
+  yeni processing parametresi olarak anchor verilir, eski raw değiştirilmez.
+- SDK dizileri owned/read-only snapshot; RGB-D writer mutable dış girdiyi de
+  korur. Sonlu iskelet float32 değerleri JSON'da ondalık quantization olmadan
+  geri gelir. Body/image timestamp ve is_new kontrolü eski sonuç kullanımını
+  engeller. Malformed zorunlu SDK body alanları integrity issue üretir.
+- Kayıt start/stop, grab+enqueue ile aynı sınırda; kontrol işlemi önceliklidir.
+  Writer/codec işçisi bitmeden dosya kapatılmaz/finalize edilmez; timeout'ta
+  kaynak sahipliği korunur. Dolu kuyruğa sentinel beklenmez. JSONL fsync hatası
+  artık yutulmaz. Eksik/boş native SVO2, yazım hatası, queue/backend kaybı veya
+  bildirilen bütünlük hatası başarılı take sayılmaz. Checksum final take.json
+  commit'inden önce gelir; mutable curation dosyası checksum'a dahil değildir.
+- Canlı frame_index **successful-grab ordinal**; fiziksel kamera sayacı veya
+  SVO position değildir. Native ingested/encoded değerleri ham telemetridir,
+  doğrulanmış sayım değildir. Timestamp gap/jitter, queue loss ve backend delta
+  ayrı kaydedilir. `awaiting_processing` take export'a hazır sayılmaz.
+- `processing/process_take`: gerçek sıralı SVO replay, svo_real_time_mode=False,
+  varsayılan BODY_38/ACCURATE/NEURAL_PLUS/fitting/full precision. GUI/Qt bağımlılığı
+  yok. Her deneme farklı .partial dizin; kaynak SHA/provenance + parametreler +
+  calibration override SHA + SDK + job state/progress/hata tutulur. Complete
+  ancak dosyalar kapanıp kapsam/QC/checksum geçtikten sonra atomik rename ile
+  yayımlanır. Restart baştan replay eden yeni denemedir, tracker geçmişini
+  atlayarak append etmez. Kaynak değişmişse restart reddedilir.
+- Eşleme: tekil camera timestamp floor(ns/1000) eşitliği. Ne yakın komşu ne N−1
+  kaydırma kabul edilir. Declared/decode sayısı ve source/capture unmatched,
+  source ordinal/timestamp sürekliliği ayrıca denetlenir. Subject belirsiz/eksik
+  ise maskeler/NaN korunur. Aynı tracker ID büyük konum/anatomi çelişkisini
+  geçersiz kılamaz; belirsizlik onaysız otomatik kilitlenmez (association 1.1.0).
+- `ReviewDataset`: checksum'lı complete processing sürümü, hazır proxy/arrays/
+  skeleton/features. Yeni annotation sidecar source fingerprint + source
+  position + camera timestamp inclusive sınırlarına bağlıdır. Eski segments.json
+  anlamı otomatik değiştirilmez; production GUI yeni mimariye göre yeniden
+  geliştirilmedi. `tools/capture_diagnostic.py` bağımsız görünür test viewer'ıdır.
+
+### Sürümler
+
+App/package **0.11.0**, take/skeleton stream **1.2.0**, raw archive **1.1.0**,
+capture policy **2**, processing **1.0.0**, canonical annotation sidecar **1.0.0**,
+subject association **1.1.0**. Project **1.1.0**, session **2.0.0**, eski
+annotation/release **2.2.0**, label **2.0.0**, feature spec **1.0.0**, identity
+SQLite **1** kaldı. Scientific environment hâlâ KineSynth / Python 3.11.14,
+ZED SDK 5.4.1. Sürümleri ancak gerçekten kodda değişmiş oldukları için yazıyoruz.
+
+### Çalıştırılan kontroller ve sınırları
+
+Kanıt dizini `C:\Users\gorke\AppData\Local\Temp\kcb_8af98122`:
+
+- Backend/özellik/export/config kapsamı ilk çalışmada 244 passed + 2 eski
+  beklenti başarısız (246 toplam, backend10.xml). Bunlar eski BODY_34 default
+  ve artık hatalı depth açıklaması beklentisiydi; yeni kararlar için düzeltildi.
+  Takip kapsamı **63 passed / 11.87 s** (remaining13.xml).
+- Capture/genel GUI **56 passed / 22.18 s** (gui12.xml).
+- SDK BODY_18/34/38 → disk → playback eklem/timestamp bütünlüğü, config ve
+  offline anchor dahil **38 passed / 5.24 s** (final14.xml).
+- Preview/listener bloklanırken kayıt ilerlemesi, eksik SVO2, kayıt sınırları,
+  orta-akış iptali dahil **23 passed / 7.18 s** (closure16.xml).
+- Modül-fixture tercih izolasyonu ve user-state **6 passed / 3.96 s**
+  (isolation15.xml). Önceki ara sonuçlar/başarısız denemeler raporda belirtilir;
+  örtüşen test sayıları toplanmaz.
+- `python -B -m kinecapture --self-test` exit 0: 66 kare, playback, etiketleme,
+  RGB-D arşivi, iki hareket/bir sürekli örnek export doğrulaması geçti.
+- Yeni Python sürecinde processing/review import: PySide6/pyzed yüklenmedi.
+  `git diff --check` geçti. Tam pytest başladı fakat GUI uzun beklemelerinde
+  kesildi; **tam paket geçti denemez**. Wheel/install ve tam GUI matrisi yok.
+- Gerçek eski B SVO: yeni RGB/proxy processing yolu 230 declared / 229 decoded,
+  bütün okunabilir kareler işlendi; beklenen count/unmatched gerekçeleriyle
+  partial. Max timestamp gap 33.424 ms, std 0.05975 ms, büyük gap 0. Kaynak
+  immutable kaldı (svo_pipeline/.run_9562dcb98445424a.partial).
+- Sınırlı gerçek SDK üç-kare depth kontrolü: üç farklı hash, sonraki okumalar
+  önceki depth'i değiştirmedi, owned/read-only (bounded_depth_preview.json).
+  Aynı görüntülerde CPU hafif pose 1 kişi ve 153.9/99.3/99.3 ms. Canlı hız veya
+  tüm kişileri bulma garantisi değildir.
+- Üç gerçek BODY_38/full precision SVO karesi: her karede iki kişi/38 eklem,
+  timestamp/is_new integrity sorunu yok (bounded_sdk_body38.json).
+- İki saniyelik sentetik diagnostic finalized; ara örnek source 58.55 FPS,
+  queue loss 0; preview 14 tamamlanan / 45 atlanan. Bu ZED benchmark'ı değildir.
+
+### Testte kullanıcı tercih sızıntısı ve onarım
+
+Başlangıç baseline'ı 15 kullanıcı dosyasında karşılaştırıldı. 14 dosya (ham eski
+kayıtlar ve gerçek identity DB dahil) değişmemişti; `test_gui_viewports.py`
+module-scope fixture'ı function-scope autouse izolasyonundan önce çalışıp gerçek
+`~/.kinecapture/user_state.yaml` içine kcbtest07/viewports0 yolunu yazmıştı.
+Bu çalışma sırasında yakalanan gerçek yan etkidir; gizlenmedi.
+
+Bozuk sürüm kanıt dizinine yedeklendi. Aynı görevin önceki dosya okuma kaydından
+özgün byte'lar çıkarıldı; ancak önceki SHA-256
+`1df1e90ee374767b56a7e38174567e234baad218c80dd04db7c12ad647a1e2e0` ile birebir
+eşleştikten sonra dosya ve baseline mtime geri yüklendi. Session-scope dış
+izolasyon ve fixture başlamadan güvenli yol kontrolü eklendi. İlgili fixture
+yeniden çalıştırılıp geçti. Kullanıcının zaten eski pytest-386 yolunu içeren
+önceden bozulmuş dataset tercihine ayrıca ürün müdahalesi yapılmadı. Diagnostic
+bu yüzden açık output yolu ister ve kullanıcının tercih dosyasını okumaz.
+
+Son testlerden sonraki nihai kontrolde korunan 15 kullanıcı dosyasının tamamı
+başlangıç SHA-256 ve mtime değerleriyle birebir eşleşti; değişen dosya 0.
+Kanıt: `C:\Users\gorke\AppData\Local\Temp\kcb_8af98122\protected_data_final.json`.
+
+### Devam noktası — donanım bekleniyor
+
+Yeni canlı ZED kaydı henüz alınmadı. Gerçek 60 FPS, H264_LOSSLESS bilgi koruması,
+native sayaç doğruluğu, preview açık/kapalı ve display açık/kapalı etkisi,
+görüntüden kişi anchor seçimi, yeni düzgün kapanmış SVO'nun tam decoded/timestamp
+kapsamı ve BODY_38 offline sonucu ölçülecek. Mevcut evidence bunları kanıtlamaz.
+Kamera bağlanması istendiğinde burada durulur; kamera beklerken polling, yeni
+pahalı test veya eski uzun SVO deneyi yapılmaz. Sonraki adım küçük bağımsız
+diagnostic viewer ile kullanıcı eşliğinde kontrollü kısa kayıttır.
+
+## 6W. Staj defteri zamanlama dili denetimi ve portal metinleri (2026-09-11)
+
+Dört staj DOCX'i salt okunur olarak tarandı; ZIP bütünlükleri geçti ve toplam
+30 gün başlığı doğrulandı. Çıktı
+`C:\Users\gorke\Desktop\KineSynthV3\staj_raporu\Internship_Report_Form_Texts_and_Timing_Audit.txt`
+yoluna UTF-8 düz metin olarak yazıldı. Mevcut DOCX'ler değiştirilmedi.
+
+Günlük ana metinlerinin büyük bölümü o güne ait çalışma kaydı gibi okunuyor.
+Dokuz riskli/meta ifade konumuyla birlikte işaretlendi: ilk beş gün girişindeki
+`taslak bölüm`; gün 8 ve 10'daki sonradan bilinen modeli anlatan `later`
+ifadeleri; gün 16–25 ile 26–30 girişlerindeki `this section records...` ve
+sonradan görsel üretimini açıklayan cümle; gün 25'te `last day of this section`
+ve `ten-day period`; gün 30'da `I concluded the thirty-day report`. Her biri
+için günlük dilini koruyan kısa alternatif verildi. `today`, `yesterday` ve
+`the previous day` ifadeleri kronolojiyi desteklediği için sorun sayılmadı.
+Ek tutarlılık riski: gün 1–5 Türkçe, gün 6–30 İngilizcedir.
+
+Portal için kısa, resmî İngilizce `Table of Contents`, 129 sözcüklük `Abstract`,
+kurumun tam adı/adresi/tarihçesi/faaliyet alanı/organizasyon yapısı ve 120
+sözcüklük `Conclusion` hazırlandı. `Internship Activities, Job Descriptions and
+Content` yalnız içindekiler girdisi olarak geçer; kullanıcı talebi gereği bu
+bölüm için gövde metni yazılmadı, çünkü sistem günlük metin ve görsellerden
+otomatik üretecek. YTÜ resmî sayfalarından Davutpaşa Kampüsü A Blok adresi,
+üniversitenin 1911 kökeni, 1992 adı ve Kontrol ve Otomasyon Mühendisliği
+Bölümünün 2009'da bağımsız bölüm oluşu kontrol edildi.
+
+Bu turda uygulama kaynak/test/config dosyaları, kullanıcı kayıtları, şemalar ve
+dört DOCX değiştirilmedi. Uygulama pytest'i, self-test, wheel, GUI render'ı veya
+ZED donanım testi çalıştırılmadı; görev metin denetimi ve TXT üretimiydi. Gerçek
+sürüm sabitleri yeniden okundu: app/package `0.11.0`, project `1.1.0`, session
+`2.0.0`, take/skeleton stream `1.2.0`, raw archive `1.1.0`, annotation/release
+`2.2.0`, label `2.0.0`, feature `1.0.0`, identity SQLite `1`. Kullanıcının
+önceden var olan geniş backend/processing working-tree değişiklikleri korundu.
+
+## 6X. Tek kişiyle operatör kontrollü ZED testi — devam ediyor (2026-09-13)
+
+Kullanıcı ZED'i bağladı; testte yalnız kendisi var. Baş/ayak kadrajını görüp
+kaydı kendi başlatıp durdurmak istiyor. Yeni bağımsız
+`tools/live_validation.py` penceresi bu amaçla eklendi: kırpılmayan RGB,
+isteğe bağlı hafif 2D iskelet, model tahmini olduğu belirtilen kadraj ipucu,
+Başlat/R, Durdur/Esc, iptal edilebilir 8 saniye hazırlık, varsayılan 20 saniye
+kayıt üst sınırı ve Testi bitir. Ağır start/stop/finalize ayrı kontrol işçisinde;
+ham kayıt kullanıcı düğmesi olmadan başlamaz. Tek kişinin seçimi kullanıcının
+açık talebine dayanır; görüntü timestamp'li anchor yalnız kayıt başladıktan
+sonraki tek ve kadrajda görünen kişi karesine yazılır. Çok kişili doğrulama yok.
+
+Sentetik kontrol ilk turda 8 geçti / 1 hata: UI Take.duration_s yerine gerçek
+Take.metrics.duration_s okumalıydı. Düzeltildikten sonra canlı test penceresi
+ve capture architecture kapsamı **9 passed / 2.65 s**; JUnit
+`C:\Users\gorke\KineCapture\zed_20260913\ui_tests_retry.xml`.
+Geri sayımı iptal etmek kayıt yaratmıyor; manuel stop ve aktif kayıtta pencere
+bitirme iki ayrı finalized mock take üretiyor. Yeni environment/paket yok.
+App/package 0.11.0; take/skeleton 1.2.0, raw 1.1.0, processing 1.0.0,
+canonical annotation 1.0.0; diğer şemalar 6V ile aynı ve değiştirilmedi.
+
+SDK 5.4.1 ZED 2i S/N 31844341 AVAILABLE; 1280×720, 60 FPS, gerçek depth NONE,
+body kapalı bağlantı doğrulandı. Başlangıç boş disk yaklaşık 203 GB.
+İlk set `C:\Users\gorke\KineCapture\zed_20260913` altında 60 ve 40 saniyelik
+iki gerçek kayıt içeriyor. Kullanıcı görüntüleri beğenmediğini ve kullanım
+kesintisi yaşandığını belirterek **yeni set istedi**. İlk set silinmedi;
+asıl yeni değerlendirme `C:\Users\gorke\KineCapture\zed_20260913_b` altındadır.
+Yeni pencerede kullanıcı kontrollü çekim devam ediyor; GPU offline işi pencere
+Testi bitir ile kapatılmadan başlamayacak. İki ilk 20 saniyelik yeni kaydın
+ikisi de front_pose seçimiyle kaydedilmiş; ikinci çekimin gerçek yönü soruldu.
+Kaynaklar partial: native status false olayı var; tek başına başarı iddiası
+yok. SVO yeniden okuma ve nihai rapor henüz tamamlanmadı. Bu bölüm geçici devam
+noktasıdır; bitince gerçek ölçümler ve doğrulanamayanlar eklenmelidir.
 
 ## 7. Mimari sınırlar
 

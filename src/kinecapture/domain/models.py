@@ -255,9 +255,7 @@ class BodyPose:
     def to_record(self) -> dict[str, Any]:
         """Compact JSON projection used by the per-frame skeleton sidecar.
 
-        Coordinates are rounded to millimetre-scale precision (5 decimals in
-        metres) purely to keep the sidecar small; that is a storage decision on
-        already-raw values, not a normalisation of them. Non-finite values
+        Finite float32 values round-trip without decimal quantisation. Non-finite values
         become ``null`` so a missing joint stays missing after a round trip.
 
         Optional fields are written only when present, so a take recorded
@@ -265,7 +263,7 @@ class BodyPose:
         """
 
         def _clean(values: np.ndarray, decimals: int) -> list[Any]:
-            rounded = np.round(values.astype(np.float64), decimals)
+            rounded = values.astype(np.float64)
             return [None if not np.isfinite(v) else float(v) for v in rounded.ravel()]
 
         def _rows(values: np.ndarray, decimals: int) -> list[list[Any]]:
@@ -279,7 +277,7 @@ class BodyPose:
             "conf": _clean(self.joint_confidences, 4),
         }
         if np.isfinite(self.body_confidence):
-            record["body_conf"] = round(float(self.body_confidence), 3)
+            record["body_conf"] = float(self.body_confidence)
         if self.root_position is not None:
             record["root"] = _clean(self.root_position, 5)
         if self.joint_orientations is not None:
@@ -309,8 +307,10 @@ class BodyPose:
         """
 
         def _to_array(values: Any, shape: tuple[int, ...]) -> np.ndarray:
-            flat = [np.nan if v is None else float(v) for v in np.ravel(values).tolist()]
-            return np.asarray(flat, dtype=np.float32).reshape(shape)
+            array = np.asarray(values, dtype=np.float32)
+            if array.shape != shape:
+                raise ValueError(f"Stored shape {array.shape} does not match {shape}")
+            return array
 
         def _optional(key: str, shape: tuple[int, ...]) -> Optional[np.ndarray]:
             raw = payload.get(key)
@@ -370,6 +370,7 @@ class FramePacket:
     source_resolution: Optional[tuple[int, int]] = None
     source_position: Optional[int] = None
     integrity_issues: tuple[str, ...] = ()
+    recording_status: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         color = np.asarray(self.color_frame) if self.color_frame is not None else None

@@ -172,11 +172,13 @@ class TakePaths:
             f"derived/{SKELETON_STREAM_FILE}": self.skeleton_stream,
             f"derived/{PROXY_VIDEO_FILE}": self.proxy_video,
             TAKE_FILE: self.metadata,
+            "raw/subject_anchors.json": self.raw_dir / "subject_anchors.json",
         }
         # Every archive chunk is checksummed individually, so a single
         # corrupted chunk is identified rather than invalidating the take.
-        if self.rgbd_dir.is_dir():
-            for chunk in sorted(self.rgbd_dir.iterdir()):
+        archive_dir = Path(long_path(self.rgbd_dir))
+        if archive_dir.is_dir():
+            for chunk in sorted(archive_dir.iterdir()):
                 if chunk.suffix in (".kcd", ".kcc"):
                     targets[f"raw/{RGBD_DIR}/{chunk.name}"] = chunk
         return targets

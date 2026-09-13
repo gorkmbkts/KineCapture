@@ -38,7 +38,7 @@ log_dir: "~/KineCapture/logs"
 capture:
   name: "zed2i_hd720_30"
   resolution: "HD720"          # HD720 | HD1080 | HD1200 | SVGA | VGA ...
-  fps: 30
+  fps: 60
   depth_mode: "NEURAL_LIGHT"   # NEURAL_LIGHT | NEURAL | NEURAL_PLUS | ULTRA ...
   recording_policy_version: 2
   enable_depth: false

@@ -30,6 +30,7 @@ from __future__ import annotations
 import queue
 import threading
 import time
+from copy import deepcopy
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -50,6 +51,7 @@ from kinecapture.domain.models import BodyPose, CameraInfo, CaptureStatistics, F
 from kinecapture.domain.project import Session, Take
 from kinecapture.recording.rgbd_archive import DepthCodec, estimate_bytes_per_second
 from kinecapture.recording.take_writer import TakeWriter
+from kinecapture.preview.worker import LatestWorker
 from kinecapture.visualization.skeleton_spec import SkeletonSpec
 
 logger = get_logger(__name__)
@@ -78,6 +80,7 @@ class CaptureService:
         *,
         state_machine: Optional[CaptureStateMachine] = None,
         recording_queue_size: int = DEFAULT_RECORDING_QUEUE_SIZE,
+        preview_processor: Optional[Callable] = None,
     ) -> None:
         if recording_queue_size < 1:
             raise ValueError("recording_queue_size must be >= 1")
@@ -88,6 +91,10 @@ class CaptureService:
 
         self._preview_slot: Optional[FramePacket] = None
         self._preview_lock = threading.Lock()
+        self._preview_processor = preview_processor
+        self._preview_worker: Optional[LatestWorker] = None
+        self.pose_preview = None
+        self._subject_anchor: Optional[dict] = None
 
         self._recording_queue: "queue.Queue[Any]" = queue.Queue(
             maxsize=recording_queue_size
@@ -117,6 +124,7 @@ class CaptureService:
         self._shutdown = False
         self._last_error: Optional[KineCaptureError] = None
         self._acquisition_times: list[float] = []
+        self.last_recording_status: Optional[dict] = None
 
         # The lock lives here rather than in the GUI: it is a capture concern,
         # it has to be consulted on the writer thread, and it must survive a
@@ -271,7 +279,7 @@ class CaptureService:
         """
         import shutil
 
-        profile = session.capture_profile if session else None
+        profile = getattr(self._backend, "_profile", None) or (session.capture_profile if session else None)
         info = self._camera_info
         width, height = (info.resolution if info else (1280, 720)) or (1280, 720)
         fps = float(info.target_fps if info else 30.0) or 30.0
@@ -290,6 +298,7 @@ class CaptureService:
             depth_codec=codec,
             store_color=not native,
             native_recording=native,
+            native_megabytes_per_minute={"H264": 96.3, "H264_LOSSLESS": 1100.0, "LOSSLESS": 3000.0}.get(profile.native_compression if profile else "H264", 3000.0),
         )
         if not archives_depth:
             estimate["depth_mb_per_minute"] = 0.0
@@ -312,6 +321,7 @@ class CaptureService:
         estimate["depth_lossless"] = codec.is_lossless
         estimate["archives_depth"] = archives_depth
         estimate["color_source"] = "native_svo2" if native else "rgbd_chunks"
+        estimate["evidence"] = "historical size estimate scaled by resolution/FPS; not a live throughput guarantee"
         return estimate
 
 
@@ -444,6 +454,11 @@ class CaptureService:
                 self._fail(error)
                 raise error
         self._acquisition_thread = None
+        worker = self._preview_worker
+        if worker is not None:
+            if not worker.close():
+                raise CameraError("Önizleme işçisi henüz durmadı.", code="preview_close_pending")
+            self._preview_worker = None
 
         try:
             self._backend.stop_preview()
@@ -570,6 +585,9 @@ class CaptureService:
             skeleton_format=spec.name if spec else "",
             **extra,
         )
+        effective_profile = getattr(self._backend, "_profile", session.capture_profile)
+        take.capture_profile = deepcopy(effective_profile)
+        workspace.save_take(take)
 
         # A ZED keeps its stereo images in the SVO2, so colour is archived
         # separately only when the backend has no recording of its own.
@@ -618,6 +636,7 @@ class CaptureService:
                 subject_lock=self._subject_lock,
                 archive_color=not native_started,
                 native_recording_active=native_started,
+                backend_drop_baseline=self._statistics.backend_dropped_frames,
             )
         except Exception as exc:
             if native_started:
@@ -638,6 +657,8 @@ class CaptureService:
         with self._writer_guard:
             self._writer = writer
             self._active_take = take
+        if self._subject_anchor is not None:
+            self.set_subject_anchor(self._subject_anchor)
 
         self._drain_recording_queue()
         self._writer_stop.clear()
@@ -773,11 +794,6 @@ class CaptureService:
                 time.sleep(0.002)
                 continue
 
-            for listener in list(self._frame_listeners):
-                try:
-                    listener(packet)
-                except Exception:
-                    logger.exception("Kare dinleyicisi hata verdi")
         logger.debug("Yakalama thread'i durdu.")
 
     def _writer_loop(self) -> None:
@@ -836,13 +852,46 @@ class CaptureService:
         """Latest-wins preview slot. Overwriting is a preview drop, not data loss."""
         if packet.color_frame is None:
             return
+        profile = getattr(self._backend, "_profile", None)
+        if profile is not None and not profile.preview_enabled:
+            return
+        if self._preview_worker is None:
+            self._preview_worker = LatestWorker(self._process_preview, fps=profile.preview_fps if profile else 15.0)
+        self._preview_worker.offer(packet)
+
+    def _process_preview(self, packet: FramePacket):
+        if self._preview_processor is not None:
+            self.pose_preview = self._preview_processor(packet)
         with self._preview_lock:
             if self._preview_slot is not None:
                 with self._stats_lock:
                     self._statistics.preview_frames_dropped += 1
             self._preview_slot = packet
+        for listener in list(self._frame_listeners):
+            try:
+                listener(packet)
+            except Exception:
+                logger.exception("Kare dinleyicisi hata verdi")
+        return packet
+
+    def set_subject_anchor(self, anchor: dict) -> None:
+        """Store an operator selection on the displayed source image."""
+        with self._lifecycle_guard:
+            self._set_subject_anchor(anchor)
+
+    def _set_subject_anchor(self, anchor: dict) -> None:
+        from kinecapture.core.jsonio import write_json
+        if not all(k in anchor for k in ("camera_timestamp_ns", "source_resolution", "point_xy", "bbox_xyxy")):
+            raise ValueError("Subject anchor lacks source timestamp/image geometry")
+        self._subject_anchor = deepcopy(anchor)
+        writer = self._writer
+        if writer is not None:
+            writer.subject_anchors.append(deepcopy(anchor))
+            write_json(writer.paths.raw_dir / "subject_anchors.json", writer.subject_anchors, overwrite=True)
 
     def _note_acquisition(self, packet: FramePacket) -> None:
+        if packet.recording_status is not None:
+            self.last_recording_status = packet.recording_status
         now = time.perf_counter()
         self._acquisition_times.append(now)
         # Keep roughly the last two seconds so the number reacts to a stall.
@@ -878,6 +927,8 @@ class CaptureService:
         """Move to ERROR and notify listeners with a structured error."""
         logger.error("Yakalama hatası [%s]: %s", error.code, error.message)
         self._last_error = error
+        if self._writer is not None:
+            self._writer.note_raw_failure(f"{error.code}: {error.message}")
         self._stop_event.set()
         if self._state.can_transition(CaptureState.ERROR):
             self._state.transition(CaptureState.ERROR)

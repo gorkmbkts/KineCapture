@@ -246,16 +246,15 @@ class SettingsPage(Page):
         # the archive is mandatory and the only remaining choice is how it is
         # encoded.
         self._archive_note = make_label(
-            "Ham RGB-D arşivi ZORUNLUDUR ve kapatılamaz. SVO2 stereo "
-            "görüntüleri saklar; derinlik yeniden oynatmada YENİDEN HESAPLANIR "
-            "ve ölçülen derinlikle aynı değildir, bu yüzden ölçülen derinlik "
-            "ayrıca arşivlenir.",
+            "Yeni kayıtlar varsayılan olarak ham stereo SVO2 ve kayıt bilgilerini saklar. "
+            "Final derinlik ve iskelet, Verileri Hesapla aşamasında üretilir.",
             role="muted",
         )
         self._archive_note.setWordWrap(True)
         capture.add_widget(self._archive_note)
 
         self._depth_archive = QComboBox()
+        self._depth_archive.addItem("Kapalı — offline hesapla", "none")
         self._depth_archive.addItem(
             "Kayıpsız float32  (~3.5 GB/dk, ölçülen)", "float32_lossless"
         )
@@ -279,8 +278,7 @@ class SettingsPage(Page):
         ):
             self._native_compression.addItem(label, value)
         self._native_compression.setToolTip(
-            "SVO2 sıkıştırması. Varsayılan H264 KAYIPLIDIR; sürüm dosyasında "
-            "böyle yazılır."
+            "Varsayılan H264_LOSSLESS. Codec desteklenmezse kayıt hata verir; sessizce kayıplı codec'e geçilmez."
         )
         capture.add_widget(
             FieldRow("SVO2 sıkıştırması", self._native_compression, theme=theme)

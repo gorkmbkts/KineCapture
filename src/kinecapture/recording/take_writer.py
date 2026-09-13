@@ -1,48 +1,16 @@
-"""Take writer: turns a stream of frames into a durable, recoverable take.
+"""Durable capture writer with explicitly selected products.
 
-What gets written
------------------
-``derived/skeleton.jsonl``
-    One JSON record per frame: frame index, host and camera timestamps, and
-    every detected body. Append-safe and flushed per frame, so an interrupted
-    recording keeps everything written up to the moment it stopped. This is the
-    authoritative pose record.
+Minimum real capture stores immutable SVO2 stereo source, a per-grab timestamp
+index, calibration/provenance and integrity telemetry. The default codec is
+H264_LOSSLESS; acceptance by the SDK is not proof of decoded file coverage.
 
-``derived/proxy.mp4``
-    A reduced-width colour proxy used for scrubbing during review. It is a
-    *convenience* copy, never the raw record.
+Live skeleton, proxy, separate colour and measured depth archives are optional.
+The synthetic backend retains colour chunks and deterministic generator
+provenance. Offline processing produces separately versioned derived results.
 
-``raw/capture.svo2``
-    The ZED SDK's own recording of the *stereo images*, written by the SDK.
-    Immutable, and verified on this machine to give its colour back on replay.
-    It is **not** a depth archive: re-opening a fresh SVO2 and retrieving
-    ``MEASURE.DEPTH`` was measured to return a different map from the one the
-    camera produced live, differing by metres in places and not even agreeing
-    on which pixels are invalid. Depth is a read-time reconstruction that
-    depends on depth mode, SDK version and GPU.
-
-    The default compression is ``H264``, which is **lossy**. The SDK's lossless
-    modes were measured at roughly 12x (H264_LOSSLESS) and 30x (LOSSLESS) the
-    size. Whatever mode was used is recorded in the raw manifest rather than
-    being described as "lossless" in the abstract.
-
-``raw/rgbd/``
-    The exact colour and depth the recording measured, chunked so a power cut
-    costs one chunk rather than the take. Depth is always written, because it
-    cannot be recovered from the SVO2. Colour is written here only when the
-    backend has no native recording of its own.
-
-``raw/raw_capture_manifest.json``
-    What the raw archive is: formats, codecs, provenance, per-stream counts and
-    the synchronisation contract.
-
-Finalisation
-------------
-Finalising is staged: streams are closed and flushed, metrics are computed from
-what was actually written, checksums are taken, and only then is ``take.json``
-rewritten with ``state=FINALIZED``. A take that never reaches that point stays
-``PARTIAL`` and is offered for recovery at start-up instead of being mistaken
-for a complete recording.
+Stream closure and payload checksums precede the final take.json commit. Failed
+or interrupted closure never publishes a complete take. Mutable human curation
+is excluded from immutable payload checksums.
 """
 
 from __future__ import annotations
@@ -69,6 +37,7 @@ from kinecapture.core.paths import (
     is_too_long_for_external_tools,
     path_exists,
     safe_external_path,
+    long_path,
 )
 from kinecapture.dataset.workspace import ProjectWorkspace, TakePaths
 from kinecapture.domain.enums import TakeState
@@ -285,10 +254,11 @@ class TakeWriter:
         take: Take,
         paths: TakePaths,
         *,
-        write_proxy_video: bool = True,
+        write_proxy_video: Optional[bool] = None,
         subject_lock: Optional[SubjectLock] = None,
         archive_color: bool = False,
         native_recording_active: bool = False,
+        backend_drop_baseline: int = 0,
     ) -> None:
         self.workspace = workspace
         self.take = take
@@ -300,6 +270,12 @@ class TakeWriter:
         self._frames_written = 0
         self._frames_dropped = 0
         self._backend_dropped = 0
+        self._backend_drop_baseline = backend_drop_baseline
+        self._integrity_issues: set[str] = set()
+        self._recording_status: Optional[dict[str, Any]] = None
+        self._previous_timestamp: Optional[int] = None
+        self._timestamp_gaps = 0
+        self._gap_sum = self._gap_squared_sum = 0.0
         self._closed = False
         self._started_monotonic = time.perf_counter()
         self._write_proxy = write_proxy_video
@@ -308,11 +284,15 @@ class TakeWriter:
         self._native_recording_active = bool(native_recording_active)
         self._chunk_table: list[dict[str, Any]] = []
         self._external_raw_failure = ""
+        self.subject_anchors: list[dict] = []
+        take.processing_status = "live" if take.capture_profile.store_skeleton else "awaiting_processing"
+        workspace.save_take(take)
 
         paths.ensure_dirs()
-        self._skeleton = JsonlWriter(paths.skeleton_stream)
-        self._skeleton.write(self._stream_header())
-        if write_proxy_video:
+        if take.capture_profile.store_skeleton:
+            self._skeleton = JsonlWriter(paths.skeleton_stream)
+            self._skeleton.write(self._stream_header())
+        if take.capture_profile.store_proxy and write_proxy_video is not False:
             self._proxy = ProxyVideoWriter(
                 paths.proxy_video,
                 fps=float(take.capture_profile.fps),
@@ -325,7 +305,8 @@ class TakeWriter:
         # to return them, so a second copy would double the cost for nothing.
         profile = take.capture_profile
         self._archive: Optional[RgbdArchiveWriter] = None
-        self._archive_color = bool(archive_color)
+        archive_color = bool(archive_color or profile.store_color)
+        self._archive_color = archive_color
         self._raw_index: Optional[JsonlWriter] = None
         if profile.archives_depth or archive_color:
             codec = (
@@ -392,7 +373,7 @@ class TakeWriter:
         Two numbers in this project are easy to confuse and must never be: the
         *position* is where a frame sits in this recording's own sequence and is
         what annotation bounds refer to; the *camera frame index* is the
-        camera's own counter and skips when a frame is dropped. Both are here,
+        backend successful-grab ordinal, not a physical camera counter. Both are here,
         in every record, precisely so nothing downstream has to infer one from
         the other.
         """
@@ -434,7 +415,7 @@ class TakeWriter:
         # reads this answer instead of re-deriving one, which is how "which
         # skeleton is the participant?" stops having two possible answers.
         association: Optional[FrameAssociation] = None
-        if self.subject_lock is not None and self.subject_lock.is_selected:
+        if self._skeleton is not None and self.subject_lock is not None and self.subject_lock.is_selected:
             association = self.subject_lock.update(
                 packet.bodies,
                 frame_index=packet.frame_index,
@@ -448,25 +429,33 @@ class TakeWriter:
             "p": position,
             "host_ns": packet.host_timestamp_ns,
             "cam_ns": packet.camera_timestamp_ns,
-            "bodies": [body.to_record() for body in packet.bodies],
+            "bodies": [body.to_record() for body in packet.bodies] if self._skeleton else [],
+            "source_position": packet.source_position,
+            "integrity_issues": list(packet.integrity_issues),
         }
         if active_body_id is not None:
             record["active_id"] = int(active_body_id)
         if association is not None:
             record["subject"] = association.to_record()
-        assert self._skeleton is not None
-        self._skeleton.write(record)
+        if self._skeleton is not None:
+            self._skeleton.write(record)
 
         if self._proxy is not None:
+            if packet.color_frame is None:
+                raise StorageError("Proxy için RGB karesi eksik.", code="rgb_missing")
             self._proxy.write(packet.color_frame)
 
         # --- the immutable raw archive ---------------------------------
         color_ok = depth_ok = True
         if self._archive is not None:
+            if self._archive_color and packet.color_frame is None:
+                raise StorageError("Ham renk karesi eksik.", code="raw_color_missing")
+            if self.take.capture_profile.archives_depth and packet.depth_frame is None:
+                raise StorageError("İstenen derinlik karesi eksik.", code="raw_depth_missing")
             color_ok, depth_ok = self._archive.add_frame(
                 position,
                 packet.color_frame if self._archive_color else None,
-                packet.depth_frame,
+                packet.depth_frame if self.take.capture_profile.archives_depth else None,
             )
 
         if self._raw_index is not None:
@@ -476,10 +465,13 @@ class TakeWriter:
                 "i": packet.frame_index,
                 "host_ns": packet.host_timestamp_ns,
                 "cam_ns": packet.camera_timestamp_ns,
-                "skel": True,
+                "skel": self._skeleton is not None,
+                "source_position": packet.source_position,
+                "integrity_issues": list(packet.integrity_issues),
                 "color": bool(self._archive_color and color_ok),
                 "depth": bool(
                     packet.depth_frame is not None
+                    and self.take.capture_profile.archives_depth
                     and self._archive is not None
                     and depth_ok
                 ),
@@ -491,10 +483,27 @@ class TakeWriter:
             self._raw_index.write(index_record)
 
         self._accumulator.add(packet, active_body_id)
+        self._integrity_issues.update(packet.integrity_issues)
+        if packet.recording_status is not None:
+            self._recording_status = dict(packet.recording_status)
+            if packet.recording_status.get("status") is False:
+                self._integrity_issues.add("native_recording_status_failed")
+        ts = packet.camera_timestamp_ns
+        if ts < 0 or (ts == 0 and packet.origin.value != "synthetic"):
+            self._integrity_issues.add("camera_timestamp_missing")
+        if self._previous_timestamp is not None:
+            gap = (ts - self._previous_timestamp) / 1e6
+            self._gap_sum += gap
+            self._gap_squared_sum += gap * gap
+            if gap <= 0:
+                self._integrity_issues.add("camera_timestamp_non_monotonic")
+            if gap > 1500 / self.take.capture_profile.fps:
+                self._timestamp_gaps += 1
+        self._previous_timestamp = ts
         with self._lock:
             self._frames_written += 1
             self._backend_dropped = max(
-                self._backend_dropped, int(packet.backend_dropped_frames)
+                self._backend_dropped, max(0, int(packet.backend_dropped_frames) - self._backend_drop_baseline)
             )
 
     def note_raw_failure(self, reason: str) -> None:
@@ -504,10 +513,7 @@ class TakeWriter:
         recorder that would not stop cleanly, for instance. It is what stops
         such a take being finalised as complete.
         """
-        if self._archive is not None:
-            self._archive.depth.failure = self._archive.depth.failure or reason
-        else:
-            self._external_raw_failure = reason
+        self._external_raw_failure = self._external_raw_failure or reason
         logger.error("Ham kayıt sorunu: %s", reason)
 
     def record_marker(self, frame_index: int, label: str = "") -> dict[str, Any]:
@@ -569,6 +575,11 @@ class TakeWriter:
         state that says so, rather than being marked complete.
         """
         self.close_streams()
+        if self._native_recording_active and (
+            not path_exists(self.paths.native_recording)
+            or Path(long_path(self.paths.native_recording)).stat().st_size == 0
+        ):
+            self.note_raw_failure("SDK başladı dedi ancak kapatılmış SVO2 kaynağı eksik/boş.")
 
         take = self.take
         metrics = self._accumulator.metrics(
@@ -585,6 +596,9 @@ class TakeWriter:
         # It keeps every byte it did manage to write - nothing is deleted - but
         # it says PARTIAL, so it can never be mistaken for a reprocessable
         # recording later.
+        if self._frames_dropped or self._backend_dropped or self._integrity_issues or self._frames_written == 0:
+            self.note_raw_failure(f"Kayıt bütünlüğü: queue={self._frames_dropped}, backend={self._backend_dropped}, issues={sorted(self._integrity_issues)}, frames={self._frames_written}")
+            metrics.raw_archive_failure = self._external_raw_failure
         if state is TakeState.FINALIZED and metrics.has_raw_archive_loss:
             state = TakeState.PARTIAL
             reason = metrics.raw_archive_failure or (
@@ -596,6 +610,7 @@ class TakeWriter:
             ).strip()
             logger.error("Ham arşiv eksik, kayıt PARTIAL: %s", reason)
         take.state = state
+        take.processing_status = "live" if self._skeleton is not None else "awaiting_processing"
 
         files: dict[str, str] = {}
         if path_exists(self.paths.skeleton_stream):
@@ -693,6 +708,19 @@ class TakeWriter:
             "created_at": utc_now_iso(),
             "origin": take.origin.value,
             "frames_recorded": self._frames_written,
+            "capture_profile": profile.to_dict(),
+            "camera_info": camera.to_dict() if camera else None,
+            "integrity": {
+                "issues": sorted(self._integrity_issues),
+                "queue_frames_lost": self._frames_dropped,
+                "backend_drop_delta": self._backend_dropped,
+                "backend_drop_baseline": self._backend_drop_baseline,
+                "timestamp_gaps_over_1_5_intervals": self._timestamp_gaps,
+                "timestamp_gap_max_ms": metrics.max_frame_gap_ms,
+                "timestamp_gap_std_ms": (max(0.0, self._gap_squared_sum / max(1, self._frames_written - 1) - (self._gap_sum / max(1, self._frames_written - 1)) ** 2) ** 0.5),
+                "last_sdk_recording_status": self._recording_status,
+                "source_frame_mapping": "pending_offline_timestamp_reconciliation",
+            },
             "synchronisation": {
                 "index_file": "raw/rgbd/index.jsonl",
                 "position": (
@@ -700,7 +728,7 @@ class TakeWriter:
                     "derived/skeleton.jsonl bu konumu kullanır."
                 ),
                 "camera_frame_index": (
-                    "Kameranın kendi sayacı; kare düşünce konumla ayrışır."
+                    "Backend successful-grab ordinal; fiziksel kamera sayacı değildir."
                 ),
                 "camera_timestamp_ns": (
                     "Görüntünün kamera zaman damgası. SVO2 içine mikrosaniye "
@@ -720,16 +748,10 @@ class TakeWriter:
                 "lossless": str(profile.native_compression).upper().endswith("LOSSLESS"),
                 "stores": "stereo görüntüler ve sensör verisi",
                 "does_not_store": (
-                    "Metrik derinlik haritası. Derinlik yeniden oynatmada "
-                    "yeniden hesaplanır ve bu makinede ölçülerek doğrulandı: "
-                    "aynı SVO2'nin aynı konumlarından okunan derinlik, kayıt "
-                    "anındaki derinlikle ayni DEĞİLDİR (yer yer metrelerce "
-                    "fark, geçersiz piksel maskesi bile farklı). Bu yüzden "
-                    "derinlik ayrıca arşivlenir."
+                    "Final metrik derinlik ve iskelet. Bunlar kayıtlı stereo kaynak, SDK ve işleme parametrelerinden sürümlü olarak yeniden hesaplanır."
                 ),
                 "replay_verified": (
-                    "RGB yeniden oynatmada geri okunabiliyor (SDK 5.4.1, "
-                    "ZED 2i üzerinde doğrulandı)."
+                    "Bu take için henüz doğrulanmadı; offline işleme kaynak kapsamını kontrol eder."
                 ),
             },
             "rgbd_archive": {

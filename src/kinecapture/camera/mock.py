@@ -221,7 +221,7 @@ class MockCameraBackend(CameraBackend):
             self._next_frame_time += interval
             if self._next_frame_time < now:
                 skipped = int((now - self._next_frame_time) / interval) + 1
-                self._backend_drops += skipped
+                # No source frame is skipped: this is pacing lateness only.
                 self._next_frame_time = now + interval
 
         index = self._frame_index

@@ -29,8 +29,24 @@ from kinecapture.domain.project import CaptureProfile, Participant, Session  # n
 setup_logging("WARNING", None)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def isolated_session_state(tmp_path_factory):
+    """Module-scoped GUI fixtures run BEFORE function-scoped isolation.
+
+    Keep a second outer boundary so their setup and teardown can never write
+    real preferences/identity data. Individual tests still get their own path.
+    """
+    root = tmp_path_factory.mktemp("session_state")
+    with pytest.MonkeyPatch.context() as patch:
+        for module in ("kinecapture.core.config", "kinecapture.gui.pages.settings"):
+            patch.setattr(f"{module}.USER_STATE_PATH", root / "user_state.yaml", raising=False)
+        patch.setattr("kinecapture.core.config.USER_STATE_DIR", root, raising=False)
+        patch.setenv("LOCALAPPDATA", str(root / "local_app_data"))
+        yield root
+
+
 @pytest.fixture(autouse=True)
-def isolated_user_state(tmp_path, monkeypatch):
+def isolated_user_state(tmp_path, monkeypatch, isolated_session_state):
     """Never let a test write to the real user's settings file.
 
     ``AppState`` persists preferences whenever the theme or the open project

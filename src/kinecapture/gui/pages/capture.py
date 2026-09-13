@@ -816,6 +816,7 @@ class CapturePage(Page):
         service = self.state.capture
         spec = service.skeleton_spec if service else None
         active_id = service.active_body_id if service else None
+        self._video.set_joint_space(packet.resolution)
 
         if self._view_selector.currentData() == "depth":
             if packet.depth_frame is not None:
@@ -1311,6 +1312,9 @@ class CapturePage(Page):
             except KineCaptureError as exc:
                 self.state.report_error(exc)
         self.state.notify_take_saved(take)
+        if take.processing_status == "awaiting_processing":
+            self.state.notify("Ham kayıt saklandı. Etiketleme öncesinde Verileri Hesapla aşaması gerekli.", 7000)
+            return
         if accepted and dialog.review_requested:
             self.state.request_review(take)
         elif accepted and take.quality is TakeQuality.RETAKE:

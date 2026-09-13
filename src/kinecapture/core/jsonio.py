@@ -183,8 +183,6 @@ class JsonlWriter:
         try:
             stream.flush()
             os.fsync(stream.fileno())
-        except OSError:  # pragma: no cover - best effort during shutdown
-            pass
         finally:
             stream.close()
 

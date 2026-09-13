@@ -62,7 +62,8 @@ def test_user_state_overlays_shipped_defaults(
     assert config.theme == "light"
     assert config.preview_fps == 15
     # Values the overlay did not mention keep the shipped default.
-    assert config.capture.body_format == "BODY_34"
+    assert config.capture.body_format == "BODY_38"
+    assert not config.capture.computes_body
 
 
 def test_capture_profile_is_not_a_global_preference(

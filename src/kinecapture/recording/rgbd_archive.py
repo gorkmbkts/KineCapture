@@ -404,11 +404,9 @@ class _ChunkPool:
 class RgbdArchiveWriter:
     """Persists the exact colour and depth a recording measured.
 
-    Colour is only written here when the backend cannot produce its own
-    immutable recording. For a ZED, ``capture.svo2`` holds the stereo images and
-    replay was verified to return them, so duplicating colour would double the
-    cost for nothing. Depth is always written, because replay was verified *not*
-    to return the depth that was measured.
+    Colour is required for the synthetic backend and otherwise optional.
+    Measured live depth is an explicitly selected product; a reconstruction
+    made later from stereo source belongs to a separate processing version.
     """
 
     def __init__(
@@ -684,7 +682,7 @@ def estimate_bytes_per_second(
     if store_color:
         # PNG on real colour measured close to 1 MB per 720p frame.
         color_per_minute = 1.0 * 30.0 * 60.0 * scale
-    native_per_minute = native_megabytes_per_minute if native_recording else 0.0
+    native_per_minute = native_megabytes_per_minute * scale if native_recording else 0.0
     total = depth_per_minute + color_per_minute + native_per_minute
     return {
         "depth_mb_per_minute": depth_per_minute,

@@ -80,13 +80,14 @@ class CaptureProfile:
 
     name: str = "default"
     resolution: str = "HD720"
-    fps: int = 30
+    fps: int = 60
     depth_mode: str = "NEURAL_LIGHT"
     enable_depth: bool = False
     enable_body_tracking: bool = False
     body_format: str = "BODY_38"
     body_tracking_model: str = "HUMAN_BODY_ACCURATE"
     enable_body_fitting: bool = True
+    allow_reduced_precision_inference: bool = False
     detection_confidence: int = 40
     coordinate_system: str = "RIGHT_HANDED_Y_UP"
     length_unit: str = "METER"
@@ -104,13 +105,13 @@ class CaptureProfile:
     preview_enabled: bool = True
     preview_fps: float = 15.0
     preview_width: int = 640
+    calibration_file: Optional[str] = None
     proxy_video_width: int = 640
     #: Refuse to start a recording that could not run this long on the free
     #: space of the target disk.
     min_free_disk_minutes: float = 3.0
 
-    #: Historical name for the depth archive switch. Kept only so an old
-    #: ``take.json`` still loads; the archive itself is no longer optional.
+    #: Historical alias retained only for provenance; depth_archive is authoritative.
     store_depth_frames: bool = False
 
     def __post_init__(self) -> None:
@@ -154,17 +155,18 @@ class CaptureProfile:
     def legacy(cls, **overrides: Any) -> "CaptureProfile":
         """Explicit pre-policy-2 behavior, used to read historical provenance."""
         values = dict(
-            recording_policy_version=1, enable_depth=True, enable_body_tracking=True,
+            recording_policy_version=1, fps=30, enable_depth=True, enable_body_tracking=True,
             store_skeleton=True, store_proxy=True, depth_archive="float32_lossless",
             body_format="BODY_34", body_tracking_model="HUMAN_BODY_MEDIUM",
             native_compression="H264", store_depth_frames=True, preview_fps=30.0,
+            allow_reduced_precision_inference=True,
         )
         values.update(overrides)
         return cls(**values)
 
     @classmethod
     def for_new_capture(cls, payload: Mapping[str, Any]) -> "CaptureProfile":
-        """Old preferences retain camera parameters, but adopt minimum products.
+        """Old preferences adopt HD720/60 and minimum capture products.
 
         Reading an old take instead uses from_dict and never changes its policy.
         No preference file is written by this upgrade.
@@ -172,7 +174,7 @@ class CaptureProfile:
         values = dict(payload)
         if "recording_policy_version" not in values:
             for key in (
-                "enable_depth", "enable_body_tracking", "depth_archive",
+                "resolution", "fps", "enable_depth", "enable_body_tracking", "depth_archive",
                 "store_depth_frames", "store_native_recording", "native_compression",
             ):
                 values.pop(key, None)
