@@ -5,7 +5,7 @@
 > Kaynak görev: `CLAUDE_PYSIDE6_YENI_BACKEND_ENTEGRASYON_PROMPT.md`.
 > Mevcut durum tespiti: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 
-Oluşturuldu: 2026-09-13 · **F0–F6 tamamlandı, F7 sırada.**
+Oluşturuldu: 2026-09-13 · **F0–F7 tamamlandı, F8 sırada (onay bekliyor).**
 Güncel durum için bölüm 7 (İlerleme kaydı).
 
 ---
@@ -130,7 +130,7 @@ Promptun orijinal sırasından iki sapma var ve ikisi de ölçüme dayanıyor:
 | ~~F4~~ ✅ | Projeler · Katılımcılar · Ayarlar | Sanallaştırılmış listeler, 1000 kayıtla takılma yok (ölçüm), ayarlar atomik, geçersiz değer kilitlemiyor | F2 |
 | ~~F5~~ ✅ | Yakalama | Mock ile tam tur; hafif 2B pose kaplaması; anchor gösterilen kareye yazılıyor; önizleme/kayıt kaybı ayrı | F3 |
 | ~~F6~~ ✅ | Verileri Hesapla | İşleme ayrı süreçte, ilerleme gerçek, iptal/duraklat/restart çalışıyor, GUI bloklanmıyor | F3 |
-| **F7** | İşlenen Videolar | Kütüphane, thumbnail önbelleği, sürüm karşılaştırma, filtreler | F3, F6 |
+| ~~F7~~ ✅ | İşlenen Videolar | Kütüphane, thumbnail önbelleği, sürüm karşılaştırma, filtreler | F3, F6 |
 | **F8** | Etiketleme — timeline, senkron, canonical sidecar 1.1.0 | **Bütçeler ölçülüp raporlandı** (≤8 ms boşta, ≤16 ms timeline, ≤50 ms scrub, ≤1,5 GB) | F3, F7 |
 | **F9** | Etiketleme — 3B iskelet (`QOpenGLWidget`, offline veri) | OpenGL çizim, timestamp senkronu, kamera kalıcı, 60 Hz korunuyor | F8 |
 | **F10** | Sporcu seçimi ve belirsiz aralık onayı | Sessiz fallback yok, onay revizyonu yazılıyor | F8 |
@@ -345,9 +345,10 @@ ayrıca işaretlenir.
 | F3 | ✅ | 2026-09-13 | `add23cd` |
 | F4 | ✅ | 2026-09-13 | `f869940` |
 | F5 | ✅ | 2026-09-13 | `1cc99ce` |
-| F6 | ✅ | 2026-09-13 | aşağıda |
-| F7 | ⏳ sırada | | |
-| F8–F15 | — | | |
+| F6 | ✅ | 2026-09-13 | `1b2db3f` |
+| F7 | ✅ | 2026-09-13 | aşağıda |
+| F8 | ⏳ sırada | | |
+| F9–F15 | — | | |
 
 ### F2 sonucu (2026-09-13)
 
@@ -578,3 +579,42 @@ kaynakla alınmıştır ve donanım doğrulaması yerine geçmez.
 
 **Not:** `psutil` ortamda zaten kurulu ve duraklatma onu kullanıyor; bağımlılık
 olarak **eklenmedi**, yokluğunda arayüz bunu söyleyip iptali öneriyor.
+
+
+### F7 sonucu (2026-09-13)
+
+**Teslim edilen**
+
+- Tamamlanmış `run_<id>` sürümlerinin kütüphanesi. Her satır: katılımcı, tarih,
+  süre, kare, model, durum, sürüm sayısı, etiket var mı.
+- **Bir satır hiçbir şey açmıyor.** Sürümü açmak içindeki her dosyanın
+  checksum'ını doğrulamak demek — etiketlemeden önce doğru bir bedel, liste
+  kaydırırken yanlış. Satırlar yalnız türetilmiş indeksten ve her `run`'ın
+  kendi `job.json`'undan kuruluyor.
+- Önizleme görüntüleri F3'te işleme anında üretilmişti; ekran yalnız dosya
+  okuyor. Liste kaydırırken **hiç** üretim yapılmıyor (ölçüldü).
+- Aynı kaydın birden fazla sürümü varsa **yan yana** gösteriliyor: kapak
+  görüntüsü, model, kare sayısı, kapsam durumu.
+- Altı filtre: tümü · etiketlemeye hazır · kişi seçilmemiş · kapsam
+  doğrulanamadı · etiketlenmiş · birden fazla sürüm. Filtre değişimi projeyi
+  **yeniden okumuyor** (testle sabit).
+- "Etiketle" seçili sürümü F8'e taşıyor. Kapsamı doğrulanamamış bir sürüm
+  etiketlenebilir, fakat **önce uyarı çıkıyor** — bir saatlik iş, uyarıyı hak
+  eder.
+
+**Ölçülen** (1200×700 tablo, `windows` platformu)
+
+| Ölçüm | 100 sürüm | 500 sürüm |
+|---|---|---|
+| Liste doldurma | 29,4 ms | **30,7 ms** |
+| Kaydırmada viewport çizimi | medyan 20,6 ms · p95 22,4 ms | medyan 20,6 ms · p95 22,8 ms |
+| Arama | 4,4 ms | 8,9 ms |
+| **Kaydırırken `thumbnail()` çağrısı** | **0** | **0** |
+
+Uçtan uca: kayıt → iki kez işleme (aynı take, iki sürüm) → kütüphanede
+3 sürüm, karşılaştırma şeridinde 2 kapak, "Etiketle" ile Etiketleme ekranına
+geçiş — hepsi gerçekten çalıştırıldı.
+
+**Not:** F2'de yazılan "yapılmamış ekran yer tutucu gösterir" testi her fazda
+kırılıyordu; artık hangi ekranların yapılmadığını kayıttan soruyor ve bir
+sonraki fazda güncellenmesi gerekmeyecek.

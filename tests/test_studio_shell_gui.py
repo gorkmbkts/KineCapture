@@ -127,11 +127,21 @@ def test_window_title_names_the_open_screen(window, app: QApplication) -> None:
 
 
 def test_unbuilt_screens_say_which_phase_delivers_them(window, app: QApplication) -> None:
-    window.viewmodel.navigate("library")
+    """A screen that is not built yet stands in its place and names its phase.
+
+    Asks the registry which destinations are still pending rather than naming
+    one, so delivering a screen does not break this test.
+    """
+    from kinecapture.studio.views.pages import PAGE_TYPES
+
+    pending = [d for d in window.viewmodel.destinations if d.key not in PAGE_TYPES]
+    assert pending, "her ekran yapıldı; bu test kaldırılabilir"
+    destination = pending[0]
+    window.viewmodel.navigate(destination.key)
     app.processEvents()
-    page = window.page("library")
+    page = window.page(destination.key)
     assert isinstance(page, PlaceholderPage)
-    assert "F7" in page.accessibleDescription()
+    assert destination.phase in page.accessibleDescription()
 
 
 # ------------------------------------------------------------------ theming

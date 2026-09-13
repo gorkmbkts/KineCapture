@@ -30,6 +30,7 @@ from kinecapture.studio.services.window_state import WindowState, save_window_st
 from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import CaptureViewModel
+from kinecapture.studio.viewmodels.library import LibraryViewModel
 from kinecapture.studio.viewmodels.processing import ProcessingViewModel
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
 from kinecapture.studio.viewmodels.settings import SettingsViewModel
@@ -67,6 +68,9 @@ class StudioWindow(QMainWindow, BoundView):
         # the GUI thread. Viewmodels see only the TaskRunner interface.
         self.runner = QtTaskRunner(self)
         self._viewmodels: dict[str, object] = {}
+        #: Set by the library when a version is chosen; read by the labelling
+        #: screen when it opens. F8 turns this into the real handover.
+        self.pending_review: object = None
         self._settings_service = SettingsService(viewmodel.session.config)
         self.auth_viewmodel = AuthViewModel(viewmodel.session)
 
@@ -236,12 +240,21 @@ class StudioWindow(QMainWindow, BoundView):
             viewmodel = ProcessingViewModel(
                 self.viewmodel.session, runner=self.runner, settings=self._settings_service
             )
+        elif key == "library":
+            viewmodel = LibraryViewModel(self.viewmodel.session, runner=self.runner)
+            # "Etiketle" on a version is what takes the user to the next step.
+            viewmodel.open_for_review.subscribe(self._review_version)
         elif key == "settings":
             viewmodel = SettingsViewModel(self._settings_service)
         else:  # pragma: no cover - every attachable page is listed above
             return
         self._viewmodels[key] = viewmodel
         attach(viewmodel)
+
+    def _review_version(self, row) -> None:  # noqa: ANN001 - VersionRow
+        """Carry the chosen version to the labelling screen."""
+        self.pending_review = row
+        self.viewmodel.navigate("review")
 
     def _resume_jobs(self) -> None:
         processing = self._viewmodels.get("processing")
