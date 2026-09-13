@@ -1,0 +1,31 @@
+"""Destination pages.
+
+F2 ships the shell and one real page's worth of structure; the rest are
+:class:`PlaceholderPage` instances that name the phase which will build them.
+``build_page`` is the single registry the shell asks, so filling one in later
+is a one-line change here.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from PySide6.QtWidgets import QWidget
+
+from kinecapture.studio.theme import ThemeTokens
+from kinecapture.studio.viewmodels.navigation import Destination
+
+from .base import PlaceholderPage, StudioPage
+
+#: destination key -> page class. Empty until a phase delivers a real page.
+PAGE_TYPES: dict[str, type[StudioPage]] = {}
+
+
+def build_page(
+    destination: Destination, tokens: ThemeTokens, parent: Optional[QWidget] = None
+) -> StudioPage:
+    factory = PAGE_TYPES.get(destination.key, PlaceholderPage)
+    return factory(destination, tokens, parent)
+
+
+__all__ = ["PAGE_TYPES", "PlaceholderPage", "StudioPage", "build_page"]

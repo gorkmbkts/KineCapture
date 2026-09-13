@@ -188,12 +188,20 @@ class _Bodies:
         self.body_list = body_list
 
 
+#: Minimal stand-in for the ``sl`` module. The adapter checks every retrieval
+#: against ``sl.ERROR_CODE.SUCCESS``; handing it a bare ``object()`` would make
+#: these tests pass through a code path the real SDK never takes.
+_SL = SimpleNamespace(ERROR_CODE=SimpleNamespace(SUCCESS="SUCCESS"))
+
+
 class _Camera:
-    def __init__(self, bodies):
+    def __init__(self, bodies, status=_SL.ERROR_CODE.SUCCESS):
         self._bodies = bodies
+        self._status = status
 
     def retrieve_bodies(self, target, runtime):  # noqa: ARG002
         target.body_list = self._bodies
+        return self._status
 
 
 @pytest.fixture
@@ -207,7 +215,18 @@ def zed_backend() -> ZedCameraBackend:
 
 
 def _convert(backend, bodies):
-    return backend._retrieve_bodies(object(), _Camera(bodies))
+    return backend._retrieve_bodies(_SL, _Camera(bodies))
+
+
+def test_adapter_refuses_to_convert_a_failed_retrieval(zed_backend) -> None:
+    """A failed retrieval must raise, never return the previous body list."""
+    from kinecapture.core.errors import CameraError
+
+    with pytest.raises(CameraError) as excinfo:
+        zed_backend._retrieve_bodies(
+            _SL, _Camera([_fake_zed_body()], status="CAMERA_NOT_DETECTED")
+        )
+    assert excinfo.value.code == "zed_retrieval_failed"
 
 
 def test_adapter_carries_every_verified_sdk_field(zed_backend) -> None:

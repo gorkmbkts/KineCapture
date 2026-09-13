@@ -85,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--legacy-gui",
+        action="store_true",
+        help=(
+            "eski arayüzü aç. Raw-first kayıt politikasından önce alınmış "
+            "kayıtları açabilen tek arayüz budur; o kayıtlar korunuyor."
+        ),
+    )
+    parser.add_argument(
         "--version", action="version", version=f"{APP_NAME} {APP_VERSION}"
     )
     return parser
@@ -346,8 +354,26 @@ def run_self_test(config: AppConfig) -> int:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def run_studio(config: AppConfig) -> int:
+    """Start the Studio interface (the one built on the offline architecture)."""
+    logger = get_logger(__name__)
+    try:
+        from kinecapture.studio.app import run_studio as start
+    except ImportError as exc:
+        logger.debug("Studio import failed", exc_info=True)
+        print(
+            "PySide6 bu ortamda bulunamadı.\n"
+            "Bağımlılıkları KineSynth environment içine kurun:\n"
+            '  conda run -n KineSynth python -m pip install -e ".[dev]"\n'
+            f"(ayrıntı: {exc})",
+            file=sys.stderr,
+        )
+        return 1
+    return int(start(config))
+
+
 def run_gui(config: AppConfig) -> int:
-    """Start the Qt application. Returns a process exit code."""
+    """Start the legacy Qt application. Returns a process exit code."""
     logger = get_logger(__name__)
     try:
         from PySide6.QtWidgets import QApplication
@@ -402,7 +428,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return run_diagnostics(config)
         if args.self_test:
             return run_self_test(config)
-        return run_gui(config)
+        if args.legacy_gui:
+            return run_gui(config)
+        return run_studio(config)
     except KeyboardInterrupt:
         print("Kesildi.", file=sys.stderr)
         return 130

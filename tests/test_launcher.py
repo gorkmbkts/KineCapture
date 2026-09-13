@@ -89,3 +89,36 @@ def test_the_declared_minimum_is_the_smallest_supported_viewport(qapp, config):
     finally:
         window.close()
         window.deleteLater()
+
+
+# ------------------------------------------------------- which interface opens
+
+
+def test_starting_without_a_flag_opens_the_studio(monkeypatch):
+    """The Studio is the product now; the old interface is opt-in.
+
+    It is kept and still launchable because it is the only thing that can open
+    recordings made before the raw-first capture policy, and those recordings
+    are being kept.
+    """
+    import kinecapture.app as app_module
+
+    started: list[str] = []
+    monkeypatch.setattr(app_module, "run_studio", lambda _c: started.append("studio") or 0)
+    monkeypatch.setattr(app_module, "run_gui", lambda _c: started.append("legacy") or 0)
+    monkeypatch.setattr(app_module, "load_config", lambda _p: AppConfig())
+
+    assert app_module.main([]) == 0
+    assert started == ["studio"]
+
+
+def test_legacy_gui_flag_opens_the_old_interface(monkeypatch):
+    import kinecapture.app as app_module
+
+    started: list[str] = []
+    monkeypatch.setattr(app_module, "run_studio", lambda _c: started.append("studio") or 0)
+    monkeypatch.setattr(app_module, "run_gui", lambda _c: started.append("legacy") or 0)
+    monkeypatch.setattr(app_module, "load_config", lambda _p: AppConfig())
+
+    assert app_module.main(["--legacy-gui"]) == 0
+    assert started == ["legacy"]

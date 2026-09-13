@@ -39,6 +39,11 @@ where = ["src"]
 [tool.setuptools.package-data]
 "kinecapture.gui.assets" = ["*.png"]
 "kinecapture.preview.vendor" = ["LICENSE", "NOTICE.md"]
+# Design tokens are data, not code: one file generates the Qt stylesheet today
+# and can generate a WinUI ResourceDictionary later.
+"kinecapture.studio.theme" = ["tokens.json", "studio.qss.tmpl"]
+# Lucide icons, ISC licensed, shipped verbatim with their licence text.
+"kinecapture.studio.views.icons" = ["*.svg", "LICENSE.lucide.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
