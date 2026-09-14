@@ -301,10 +301,11 @@ class ProcessingService:
 
     def _read_progress(self, job: Job) -> Optional[JobProgress]:
         directory = job.attempt_dir
-        candidates: Iterable[Path] = ()
+        candidates: tuple[Path, ...] = ()
         if directory is not None:
             published = directory.parent / directory.name.lstrip(".").removesuffix(".partial")
             candidates = (directory / "job.json", published / "job.json")
+        published_dir = candidates[1].parent if candidates else None
         for candidate in candidates:
             if not path_exists(candidate):
                 continue
@@ -312,6 +313,18 @@ class ProcessingService:
                 payload = dict(read_json(candidate))
             except Exception:  # noqa: BLE001 - caught mid-write; try next poll
                 return None
+            staged = candidate.parent.name.startswith(".")
+            if (
+                staged
+                and str(payload.get("state")) == "complete"
+                and published_dir is not None
+                and not path_exists(published_dir)
+            ):
+                # The child writes "complete", then the checksums, then renames
+                # the folder. Reporting complete here sends the user to a
+                # version that is not there yet, so the row keeps running until
+                # the rename lands.
+                payload["state"] = "running"
             return _progress_from(payload, candidate.parent)
         return None
 

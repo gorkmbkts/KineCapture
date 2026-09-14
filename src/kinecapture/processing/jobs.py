@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Sequence
 import os
 import time
 import uuid
@@ -22,6 +22,7 @@ from kinecapture.core.jsonio import read_json, read_jsonl, write_json, JsonlWrit
 from kinecapture.core.paths import long_path, ensure_dir, path_exists
 from kinecapture.dataset.workspace import TakePaths
 from kinecapture.domain.project import CaptureProfile, Take
+from kinecapture.features.base import SourceField
 from kinecapture.features.compute import FeatureContext, compute_features, FEATURE_FUNCTIONS, column_names
 from kinecapture.recording.take_writer import ProxyVideoWriter
 from kinecapture.recording.rgbd_archive import encode_depth_chunk, write_chunk, DEPTH_MAGIC, DepthCodec
@@ -62,7 +63,18 @@ class ProcessingConfig:
     #: Preview images for the library screen. Generated from the review proxy
     #: after it is closed, so a list never decodes video while it scrolls.
     thumbnail_count: int = DEFAULT_THUMBNAIL_COUNT
-    feature_ids: tuple[str, ...] = ("validity_masks", "frame_timing", "joint_angles_degrees")
+    #: ``tracker_joint_positions_2d`` is in the default set because the
+    #: labelling screen draws the skeleton over the review video, and pixels
+    #: cannot be recovered from 3D without the intrinsics the raw source may
+    #: not carry. It is a raw passthrough - NaN when the tracker has none - so
+    #: a run that cannot produce it still completes, and the screen then says
+    #: the overlay is unavailable instead of inventing one.
+    feature_ids: tuple[str, ...] = (
+        "validity_masks",
+        "frame_timing",
+        "joint_angles_degrees",
+        "tracker_joint_positions_2d",
+    )
     # Optional SDK OpenCV calibration override is identified by content, not just path.
     calibration_file: Optional[str] = None
     subject_anchors: tuple[dict, ...] = ()
@@ -80,6 +92,51 @@ class ProcessingConfig:
             store_proxy=self.store_proxy, preview_enabled=False, proxy_video_width=self.proxy_width,
             coordinate_system=take.capture_profile.coordinate_system,
             length_unit=take.capture_profile.length_unit, calibration_file=self.calibration_file)
+
+
+#: Optional tracker fields a body may carry, as ``BodyPose`` attribute ->
+#: :class:`SourceField` key. Processing holds the selected bodies in memory, so
+#: these are stacked directly instead of re-reading the skeleton stream.
+_OPTIONAL_BODY_FIELDS: tuple[tuple[str, str], ...] = (
+    ("joint_orientations", SourceField.JOINT_ORIENTATIONS.value),
+    ("joint_positions_2d", SourceField.JOINT_POSITIONS_2D.value),
+    ("joint_position_covariances", SourceField.JOINT_POSITION_COVARIANCES.value),
+    ("local_joint_positions_xyz", SourceField.LOCAL_JOINT_POSITIONS.value),
+    ("root_position", SourceField.ROOT_POSITION.value),
+    ("root_orientation", SourceField.ROOT_ORIENTATION.value),
+    ("tracker_root_velocity_xyz", SourceField.ROOT_VELOCITY.value),
+    ("root_position_covariance", SourceField.ROOT_POSITION_COVARIANCE.value),
+)
+
+
+def _optional_body_arrays(selected: Sequence[Any]) -> dict[str, Optional[np.ndarray]]:
+    """Stack each optional tracker field over frames, or report it absent.
+
+    A field is ``None`` when *no* frame carried it - the tracker or the body
+    format simply does not produce it, and the feature that wants it then says
+    so with a reason. When some frames have it, the array is written with NaN
+    in the frames that do not, so a gap stays a gap instead of being filled in.
+    """
+    arrays: dict[str, Optional[np.ndarray]] = {}
+    for attribute, key in _OPTIONAL_BODY_FIELDS:
+        sample = next(
+            (getattr(b, attribute) for b in selected
+             if b is not None and getattr(b, attribute) is not None),
+            None,
+        )
+        if sample is None:
+            arrays[key] = None
+            continue
+        template = np.asarray(sample, dtype=np.float32)
+        stacked = np.full((len(selected), *template.shape), np.nan, dtype=np.float32)
+        for index, body in enumerate(selected):
+            value = getattr(body, attribute, None) if body is not None else None
+            if value is not None:
+                candidate = np.asarray(value, dtype=np.float32)
+                if candidate.shape == template.shape:
+                    stacked[index] = candidate
+        arrays[key] = stacked
+    return arrays
 
 
 def source_identity(paths: TakePaths, take: Take) -> dict:
@@ -379,9 +436,14 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
                     joints[i], confidences[i] = body.joint_positions_xyz, body.joint_confidences
             indices = np.asarray(positions, dtype=np.int64)
             stamps = np.asarray(timestamps, dtype=np.int64)
-            context = FeatureContext(spec, joints, stamps, indices, processing_info.target_fps, confidences=confidences)
-            features = compute_features(context, config.feature_ids)
+            # Optional tracker fields were being dropped here: without them the
+            # raw-passthrough features could only ever emit NaN, so a run that
+            # really did have 2D joints reported it as "not produced".
             present = np.array([b is not None for b in selected])
+            context = FeatureContext(spec, joints, stamps, indices, processing_info.target_fps,
+                confidences=confidences, raw=_optional_body_arrays(selected),
+                body_present=present)
+            features = compute_features(context, config.feature_ids)
             # One uncompressed .npy per array: a review screen reads the window
             # it is showing instead of decompressing the whole session (1.1.0).
             job["arrays"] = write_arrays(stage, {

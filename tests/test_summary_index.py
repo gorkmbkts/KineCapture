@@ -14,9 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from kinecapture.core.jsonio import write_json
 from kinecapture.dataset.summary_index import (
     TAKE_INDEX_SCHEMA_VERSION,
     TakeIndex,
+    _read_runs,
     build_index,
 )
 
@@ -229,3 +231,31 @@ def test_index_can_be_built_without_writing_a_cache(project: Path) -> None:
 
 def test_load_of_a_project_that_was_never_indexed_is_empty(project: Path) -> None:
     assert len(TakeIndex.load(project)) == 0
+
+
+def test_a_staging_run_claiming_complete_is_not_offered(tmp_path: Path) -> None:
+    """Processing writes "complete", then checksums, then renames.
+
+    A reader that trusts the claim before the rename gets a version whose
+    directory does not exist - which is what the library screen used to list.
+    """
+    take_dir = tmp_path / "takes" / "take_x"
+    staging = take_dir / "derived" / "processing" / ".run_abc.partial"
+    staging.mkdir(parents=True)
+    write_json(staging / "job.json", {
+        "run_id": "run_abc", "state": "complete", "frames_processed": 10,
+        "schema_version": "1.1.0", "skeleton_format": "BODY_38",
+    })
+    write_json(take_dir / "take.json", {"take_id": "take_x", "state": "finalized"})
+
+    runs = _read_runs(take_dir)
+    assert len(runs) == 1
+    assert runs[0].state == "complete"      # the claim is reported as it is
+    assert not runs[0].promoted
+    assert not runs[0].is_complete          # ...but it is not a result yet
+    assert runs[0].folder == ".run_abc.partial"
+
+    promoted = staging.parent / "run_abc"
+    staging.rename(promoted)
+    runs = _read_runs(take_dir)
+    assert runs[0].is_complete and runs[0].folder == "run_abc"

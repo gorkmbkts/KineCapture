@@ -20,6 +20,7 @@ from .capture import CapturePage
 from .library import LibraryPage
 from .processing import ProcessingPage
 from .projects import ProjectsPage
+from .review import ReviewPage
 from .settings import SettingsPage
 
 #: destination key -> page class. Missing keys fall back to the placeholder.
@@ -28,6 +29,7 @@ PAGE_TYPES: dict[str, type[StudioPage]] = {
     "capture": CapturePage,
     "library": LibraryPage,
     "processing": ProcessingPage,
+    "review": ReviewPage,
     "settings": SettingsPage,
 }
 
@@ -46,6 +48,7 @@ __all__ = [
     "PlaceholderPage",
     "ProcessingPage",
     "ProjectsPage",
+    "ReviewPage",
     "SettingsPage",
     "StudioPage",
     "build_page",

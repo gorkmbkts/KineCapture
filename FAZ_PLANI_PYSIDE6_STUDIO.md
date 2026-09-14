@@ -618,3 +618,79 @@ geçiş — hepsi gerçekten çalıştırıldı.
 **Not:** F2'de yazılan "yapılmamış ekran yer tutucu gösterir" testi her fazda
 kırılıyordu; artık hangi ekranların yapılmadığını kayıttan soruyor ve bir
 sonraki fazda güncellenmesi gerekmeyecek.
+
+### F8 sonucu (2026-09-14)
+
+**Teslim edilen — kanonik etiket katmanı (backend)**
+
+- `processing/annotations.py`: kanonik şema **1.1.0**. Bir etiketin zamanı
+  `(source_fingerprint, source_position, camera_timestamp_ns)` üçlüsüyle
+  çapalanır; sınırlar **kapsayıcı**. `Correctness` türetilir, seçilmez:
+  incelenmemişse `unreviewed`, sınıflı hata varsa `incorrect`, yoksa `correct`.
+- `studio/services/annotation_store.py`: tek yazıcı. **Bir karar = bir geri
+  alma adımı** ve doğrulama **bütün belge** üzerinde çalışır; reddedilen bir
+  düzenleme hiçbir iz bırakmaz (geri alma yığınından da düşer).
+- `studio/services/review.py`: bir sürümü etiketlemeye hazır açar. Hiçbir şey
+  bütün kaydı belleğe almaz — kareler proxy'den tek tek, eklemler `.npy`
+  bellek haritasından pencere pencere okunur.
+
+**Teslim edilen — Etiketleme ekranı**
+
+- Video editörü düzeni: üstte görüntü + 2B iskelet, altta zaman çizelgesi,
+  yanda seçime göre değişen denetçi. Sürükleyerek aralık çiz, kenarından
+  tut ve kırp, tekerlekle yakınlaş.
+- **Canlı kırpma önizlemesi**: bir kenar sürüklenirken görüntü o kareye
+  gider, oynatma çizgisi yerinde kalır, köşede "kare N" rozeti çıkar.
+- **1–9 sayı tuşları** ilk dokuz hareket sınıfını atar; "Sınıfsızların hepsine
+  uygula" bir seansın tekrarlarını tek tuşla etiketler ve **sınıfı olanı asla
+  değiştirmez**.
+- **"Sonraki eksik"** hâlâ bir şeyi eksik olan ilk harekete atlar ve neyin
+  eksik olduğunu söyler.
+- Seçili hata aralığının işaretlediği eklemler görüntüde kırmızı vurgulanır;
+  düşük güvenli eklem içi boş çizilir; **tracker'ın üretmediği eklem hiç
+  çizilmez** (orijine sabitlenmiş sahte iskelet yok).
+
+**GUI geliştirirken kapatılan backend açıkları**
+
+| Açık | Neydi | Ne yapıldı |
+|---|---|---|
+| 2B eklemler hiç üretilmiyordu | `FeatureContext.raw` işleme tarafında **hiç doldurulmuyordu**; `tracker_joint_positions_2d` gerçekte veri varken bile NaN çıkıyordu | `jobs.py` seçili bedenlerin bütün opsiyonel tracker alanlarını istifliyor; 2B eklemler varsayılan özellik setine girdi |
+| Kaynak haritası 222 MB | 216000 karelik harita dict listesi + tuple anahtarlı indeks olarak tutuluyordu | İki `int64` dizi + sıralıysa ikili arama → **4,8 MB** |
+| Tekrarlanan kare kimliği sessizce çözülüyordu | Aynı `(pozisyon, zaman)` iki kez geçerse dict'te **son satır kazanıyordu** | Belirsizlik tespit ediliyor ve çözüm **reddediliyor** |
+| Hata aralığı sessizce kırpılıyordu | Hareketin tamamen dışına çizilen aralık sınır karesine sıfır uzunlukta yapıştırılıyordu | Örtüşen aralık kırpılır, **örtüşmeyen reddedilir** |
+| Eklem durumu sessizce yükseltiliyordu | Eklem işaretlenince `joint_status` kendiliğinden `selected` oluyordu — yapılmamış bir inceleme kaydı | Çelişkili bileşim **reddediliyor** |
+| Kütüphane var olmayan sürüm listeliyordu | İşleme önce `complete` yazıp sonra klasörü yeniden adlandırıyor; okuyucu aradaki anı görüyordu | "Tamamlandı" artık **terfi etmiş** demek; satır terfiye kadar çalışıyor görünüyor |
+| İskelet akışı boşuna okunuyordu | `ReviewDataset` açılışta bütün `skeleton.jsonl`'i ayrıştırıyordu | Tembel özellik; etiketleme ekranı ona hiç dokunmuyor |
+
+**Ölçülen** (60 dk / 60 FPS / BODY_38 = 216000 kare, 1600 px çizelge, `windows`)
+
+| Ölçüm | Bütçe | Sonuç |
+|---|---|---|
+| Boşta kare (çizelge + görüntü) | ≤ 8 ms | medyan **0,38 ms** · p95 0,74 ms |
+| Tarama (veri okuma + iki çizim) | ≤ 50 ms | medyan **0,64 ms** · p95 1,20 ms |
+| Çizelge çizimi, 600 aralık | ≤ 16 ms | medyan **12,13 ms** · p95 14,56 ms |
+| Çizelge, oynatma çizgisi hareketi | ≤ 16 ms | medyan **0,11 ms** |
+| 600 karelik 3B pencere okuma | ≤ 50 ms | medyan **0,12 ms** |
+| 60 dakikalık oturumda zirve RSS | ≤ 1,5 GB | **139 MB** |
+
+Çizelge çizimi F1 tabanında 292–323 ms idi; per-bin `fillRect` döngüleri
+numpy ile kurulup tek `drawImage` ile basılan şerit görüntülerine dönüştü.
+
+**Uçtan uca gerçekten çalıştırıldı**: kayıt → işleme (`complete`, sorun yok) →
+kütüphane → Etiketleme. 4 hareket çizildi, biri tek tek diğerleri toplu
+etiketlendi, bir hata aralığı sınıf + eklem ile işaretlendi, sınıfsız bırakılan
+bir hata aralığı hareketi **hazır olmaktan çıkardı** (4/4 → 3/4) ve "Sonraki
+eksik" tam o harekete gitti. Sidecar yazıldı, yeniden okundu, bütün çapalar
+aynı karelere çözüldü.
+
+**Ekran boyutu**: denetçi kaydırma alanına alındı; ekranın istediği en küçük
+pencere 880×923'ten **880×672**'ye indi — 1366×768 bir dizüstüne sığıyor.
+
+**Testler**: `test_studio_review.py` (22) + `test_studio_review_gui.py` (9).
+Ağırlık doğruluk tarafında: çapa gidiş-dönüşü, kapsayıcı sınır, yabancı
+kayda ait sidecar reddi, en yakın kareye kaydırmama, belirsiz kimlik reddi,
+bir karar = bir geri alma, türetilmiş doğruluk, sınıfsız hatanın hareketi
+bloklaması, reddedilen düzenlemenin iz bırakmaması.
+
+**Yapılmadı (F9'a kalan)**: 3B iskelet görünümü. `joints_3d_window()` hazır ve
+ölçüldü; görünümü F9 kuracak.

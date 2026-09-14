@@ -124,7 +124,10 @@ class LibraryService:
     def _row(
         self, take: TakeSummary, run: ProcessingRunSummary, siblings: int
     ) -> VersionRow:
-        directory = Path(take.directory) / "derived" / "processing" / run.run_id
+        # The folder the run really sits in, not one rebuilt from its id.
+        directory = (
+            Path(take.directory) / "derived" / "processing" / (run.folder or run.run_id)
+        )
         sidecar = (
             Path(take.directory) / "annotations" / "processing" / f"{run.run_id}.json"
         )

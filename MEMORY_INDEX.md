@@ -1,12 +1,12 @@
 # MEMORY_INDEX — KineCapture Studio
 
-Her görevde **yalnız bu dosya** okunur. `MEMORY.md` arşivdir; dizinden yalnız
-ilgili bölüm hedefli açılır. Kod hafızadan önceliklidir.
+Her görevde **yalnız bu dosya** okunur. `MEMORY.md` arşivdir; yalnız ilgili
+bölüm hedefli açılır. Kod hafızadan önceliklidir.
 
 ## Güncel faz
 
-Yeni arayüz `kinecapture/studio/` altında yeniden yazılıyor (**F0–F7 bitti,
-F8 sırada**: Etiketleme + timeline). Plan ve ilerleme: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** — yeni bir
+Yeni arayüz `kinecapture/studio/` altında yeniden yazılıyor (**F0–F8 bitti,
+F9 sırada**). Plan ve ilerleme: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** — yeni bir
 oturumda sıra oradan alınır. `python -m kinecapture` Studio'yu, `--legacy-gui`
 eski arayüzü açar. Kullanıcı kararı: **geriye dönük veri uyumluluğu aranmıyor;
 mevcut veri silinmiyor.**
@@ -19,14 +19,16 @@ mevcut veri silinmiyor.**
 | project / session | 1.1.0 / 2.0.0 |
 | take / skeleton stream | 1.2.0 / 1.2.0 |
 | raw archive · capture policy | 1.1.0 · 2 |
-| processing · canonical annotation | **1.1.0** · 1.0.0 |
+| processing · canonical annotation | **1.1.0** · **1.1.0** |
 | subject association | 1.1.0 |
 | eski annotation / release | 2.2.0 / 2.2.0 |
 | label / feature spec | 2.0.0 / 1.0.0 |
 | identity SQLite schema | 1 |
 
 Ortam: `KineSynth` / Python 3.11.14, PySide6 6.10.1, numpy 2.4.6, opencv 4.12,
-pyzed 5.4 / SDK 5.4.1. Donanım: RTX 2060 6 GB, i7-10750H, ~16 GB RAM.
+pyzed 5.4 / SDK 5.4.1. RTX 2060 6 GB, i7-10750H, ~16 GB RAM. **PyOpenGL kurulu
+ama hızlandırıcısı numpy 2.x ile uyumsuz — 3B görünüm yalnız Qt GL sınıflarını
+kullanır.**
 
 ## Modül haritası (`src/kinecapture/`, ~42,7k satır)
 
@@ -35,23 +37,23 @@ pyzed 5.4 / SDK 5.4.1. Donanım: RTX 2060 6 GB, i7-10750H, ~16 GB RAM.
 | `core/` | errors, ids, jsonio (atomik), paths (uzun yol), config, fingerprint |
 | `domain/` | enums, models, project, labels, arrays |
 | `camera/` | `base` · `mock` · `zed` (pyzed yalnız burada, gecikmeli import) |
-| `capture/` | `service.py` acquisition+writer; `subject_lock.py` |
-| `preview/` | `worker.py` LatestWorker; `pose.py` CPU 2B pose |
-| `recording/` | `take_writer.py`; `rgbd_archive.py` |
-| `processing/` | **offline katman**: `jobs.py` · `sources.py` · `review.py` · `arrays.py` memmap · `summary.py` piramit · `thumbnails.py` · `depth.py` |
-| `playback/` | `take_reader.py` iskelet akışı + proxy video, kurtarma |
-| `annotations/` | `repository.py` undo/redo, autosave |
-| `dataset/` | `workspace.py` · `index.py` · `deletion.py` · `summary_index.py` (türetilmiş) |
-| `export/` | `release.py` staging → atomik yayın |
+| `capture/` | `service` acquisition+writer; `subject_lock` |
+| `preview/` | `worker` LatestWorker; `pose` CPU 2B pose |
+| `recording/` | `take_writer`; `rgbd_archive` |
+| `processing/` | **offline katman**: `jobs` · `sources` · `review` · `annotations` · `arrays` memmap · `summary` piramit · `thumbnails` · `depth` |
+| `playback/` | `take_reader` iskelet akışı + proxy video, kurtarma |
+| `annotations/` | `repository` undo/redo, autosave (eski) |
+| `dataset/` | `workspace` · `index` · `deletion` · `summary_index` (türetilmiş) |
+| `export/` | `release` staging → atomik yayın |
 | `features/` | sürümlü seçilebilir özellik katmanı (31 özellik) |
 | `identity/` | SQLite, scrypt, auth |
-| `visualization/` | `skeleton_spec.py` ZED tabloları |
+| `visualization/` | `skeleton_spec` ZED tabloları |
 | `studio/` | **yeni arayüz**: `services/` · `viewmodels/` · `theme/` (Qt'siz) · `views/` |
-| `gui/` | eski arayüz; `--legacy-gui` ile açılır, eski kayıtlar için korunuyor |
+| `gui/` | eski arayüz; `--legacy-gui`, eski kayıtlar için korunuyor |
 | `tools/` | verify_zed_topology, extract_raw, capture_diagnostic |
 
-Durum makinesi: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING →
-REVIEWING`; `ERROR` her yerden erişilir.
+Durum: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING → REVIEWING`;
+`ERROR` her yerden erişilir.
 
 ## `MEMORY.md` bölüm dizini (satır no)
 
@@ -68,17 +70,18 @@ REVIEWING`; `ERROR` her yerden erişilir.
 | 6H–6I | 1197 / 1289 | Proje silme; **türetilmiş correctness** |
 | 6J–6K | 1505 / 1560 | Eklem kanıtı: kanonik roller, `JointAnnotationStatus` |
 | 6L | 1715 | Dialogda sınıf oluşturma düzeltmesi |
-| 6M–O, 6Q–R, 6U, 6W | 1756+ | Staj raporu turları — kodu ilgilendirmez |
+| 6M–W (seyrek) | 1756+ | Staj raporu turları — kodu ilgilendirmez |
 | 6P | 1872 | Squat düz-bacak tanısı: BODY_34 hatası, BODY_38 adayı |
 | 6S–6T | 2071 / 2141 | Squat/offline: **SDK depth tampon alias hatası** |
-| 6V | 2375 | **BACKEND MİMARİSİ:** minimum ham kayıt, anchor, process_take |
+| 6V | 2375 | **BACKEND MİMARİSİ:** min ham kayıt, anchor, process_take |
 | 6X | 2546 | Canlı ZED tek kişi testi — **devam ediyor**, tamamlanmadı |
 | 6Y | 2580 | **F0/F1:** arayüz-backend kopukluğu, ölçülen performans açıkları |
-| 6Z | 2666 | **F2:** studio/ katmanları, tokens.json, kabuk, offscreen font uyarısı |
-| 6AA | 2748 | **F3:** processing 1.1.0 — memmap, özet, thumbnail, derinlik, indeks |
-| 6AB | 2858 | **F4–F7 (en güncel):** ekranlar, TaskRunner, alt süreç, kütüphane, ölçümler |
-| 7–9 | 2937 · 2964 · 2978 | Mimari sınırlar; test komutları; geçmiş doğrulamalar |
-| 10–12 | 3228 · 3249 · 3272 | Bilinen sorunlar; uygulanmayanlar; önerilen adımlar |
+| 6Z | 2666 | **F2:** studio/ katmanları, tokens.json, kabuk, offscreen font |
+| 6AA | 2748 | **F3:** processing 1.1.0 — memmap, özet, thumbnail, derinlik |
+| 6AB | 2858 | **F4–F7:** ekranlar, TaskRunner, alt süreç, kütüphane, ölçümler |
+| 6AC | 3305 | **F8 (en güncel):** Etiketleme, kanonik sidecar, 7 backend açığı, bütçeler |
+| 7–9 | 2937 · 2964 · 2978 | Mimari sınırlar; test komutları; doğrulamalar |
+| 10–12 | 3228 · 3249 · 3272 | Bilinen sorunlar; uygulanmayanlar; adımlar |
 
 Plan ve faz sonuçları: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** (bölüm 7).
 Tespit: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
@@ -86,25 +89,24 @@ Tespit: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 ## Bilinen açıklar (ölçümler 6Y'de)
 
 - Studio'da Projeler · Yakalama · Verileri Hesapla · İşlenen Videolar ·
-  Ayarlar çalışıyor. **Etiketleme, Veri Seti ve Dışa Aktarım yer tutucu.**
-- **Timeline bütçesi (≤16 ms) henüz ölçülmedi — F8'e ait.** Eski timeline
-  292–323 ms çiziyordu; veri tarafı F3'te hazırlandı.
+  **Etiketleme** · Ayarlar çalışıyor. **Veri Seti ve Dışa Aktarım yer tutucu.**
+- F8 bütçeleri ölçüldü ve karşılandı (6AC). **Altı yardımcı pencere yok**;
+  kişi seçimi akışı F10'da bağlanacak.
 - Python tablo modeli çizimde C++ `QTableWidget`'tan pahalı (21/15 ms);
   karşılığında doldurma satır sayısından bağımsız. Bu bir takas.
-- OpenGL 3B görünüm ve altı yardımcı pencere yok.
-- `pytest tests/` tek süreçte tamamlanmıyor; dosya dosya çalıştırılmalı.
+- **`pytest tests/` tek süreçte tamamlanmıyor**; dosya dosya çalıştırılmalı.
 - **`offscreen` Qt platformunda font ailesi yok**: genişlik/yerleşim ölçümleri
   orada anlamsız, `QT_QPA_PLATFORM=windows` gerekir (bkz. 6Z).
-- Canlı ZED doğrulaması eksik: 60 FPS sürdürülebilirliği, H264_LOSSLESS bilgi
-  koruması, native sayaç güvenilirliği, çok kişili anchor.
-- SDK ilk model optimizasyonu (dakikalar) bağlan düğmesini bloklar; proxy
-  video Windows uzun yolda (OpenCV) kullanılamaz.
-- Kullanıcı tercihindeki `dataset_root` var olmayan eski pytest yolunu
-  gösteriyor; iki identity proje kaydı yetim. Proje kilidi yok.
+- Canlı ZED doğrulaması eksik: 60 FPS, H264_LOSSLESS bilgi koruması, native
+  sayaç güvenilirliği, çok kişili anchor.
+- SDK ilk model optimizasyonu (dakikalar) bağlan düğmesini bloklar; proxy video
+  Windows uzun yolda (OpenCV) kullanılamaz — uzun `pytest` kökünde koşu
+  dürüstçe `partial` olur (6AC).
+- `dataset_root` tercihi eski pytest yolunu gösteriyor; iki identity proje
+  kaydı yetim. Proje kilidi yok.
 
 ## Sonraki adım
 
-**F8 — Etiketleme: timeline ve senkronizasyon.** F3'teki çok çözünürlüklü
-özetten çizim, statik katman pixmap önbelleği, timestamp üzerinden senkron,
-canonical sidecar 1.1.0. **Performans bütçeleri burada ölçülüp raporlanacak.**
-Ayrıntı `FAZ_PLANI_PYSIDE6_STUDIO.md` bölüm 4'te.
+**F9 — 3B iskelet görünümü** (`QOpenGLWidget`): offline veriden beslenen,
+timestamp ile senkron, kalıcı kamera. `ReviewSession.joints_3d_window()` hazır
+ve ölçüldü (600 kare / 0,12 ms). Ayrıntı `FAZ_PLANI_PYSIDE6_STUDIO.md` bölüm 4.

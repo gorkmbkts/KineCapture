@@ -16,17 +16,23 @@ from typing import Any, Optional
 
 import numpy as np
 
-from kinecapture.core.jsonio import read_json, read_jsonl, write_json
-from kinecapture.core.paths import long_path, ensure_dir, path_exists
+from kinecapture.core.jsonio import read_json, read_jsonl
+from kinecapture.core.paths import long_path, path_exists
 from kinecapture.core.fingerprint import verify_checksum_manifest
 from kinecapture.playback.take_reader import load_skeleton_stream, ProxyVideoReader
 
+from .annotations import (
+    CANONICAL_ANNOTATION_SCHEMA_VERSION,
+    Anchor,
+    AnnotationDocument,
+    annotation_path,
+    load_annotations,
+    save_annotations,
+)
 from .arrays import ArrayStore
 from .depth import DepthReader, has_depth
 from .summary import TimelineSummary
 from .thumbnails import ThumbnailIndex
-
-CANONICAL_ANNOTATION_SCHEMA_VERSION = "1.0.0"
 
 
 class ReviewDataset:
@@ -37,19 +43,54 @@ class ReviewDataset:
             raise ValueError("Only a complete processing version can be annotated")
         if verify and verify_checksum_manifest(read_json(self.directory / "checksums.json"), self.directory):
             raise ValueError("Derived checksum verification failed")
-        self.mapping = [r for r in read_jsonl(self.directory / "source_map.jsonl", strict=True) if r.get("record") == "frame"]
-        # Position lookup built once. The linear scan it replaces cost a pass
-        # over the whole map per annotation boundary, which is two per interval.
-        self._by_anchor = {
-            (int(row["source_position"]), int(row["cam_ns"])): index
-            for index, row in enumerate(self.mapping)
-        }
-        self.stream = load_skeleton_stream(self.directory / "skeleton.jsonl")
+        # The source map is kept as two integer arrays rather than as parsed
+        # rows. An hour at 60 FPS is 216000 frames; as dicts plus a tuple-keyed
+        # index that measured 222 MB, and as arrays it is 3.5 MB. The rows
+        # themselves are still available through :attr:`mapping`, re-read on
+        # demand for the rare caller that wants the capture columns.
+        positions: list[int] = []
+        stamps: list[int] = []
+        for row in read_jsonl(self.directory / "source_map.jsonl", strict=True):
+            if row.get("record") != "frame":
+                continue
+            positions.append(int(row["source_position"]))
+            stamps.append(int(row["cam_ns"]))
+        self._positions = np.asarray(positions, dtype=np.int64)
+        self._stamps = np.asarray(stamps, dtype=np.int64)
+        # Strictly increasing source positions are the normal case and make
+        # every anchor unique, so lookup is a binary search over the array. A
+        # damaged source that repeats a position falls back to a dictionary
+        # which *records* the repeat instead of letting the last row win.
+        self._ordered = bool(
+            self._positions.size and np.all(np.diff(self._positions) > 0)
+        )
+        self._by_anchor: Optional[dict[tuple[int, int], int]] = None
+        self._ambiguous: frozenset[tuple[int, int]] = frozenset()
+        self._stream: Optional[Any] = None
         self.video: Optional[ProxyVideoReader] = None
         self._arrays: Optional[ArrayStore] = None
         self._summary: Optional[TimelineSummary] = None
         self._thumbnails: Optional[ThumbnailIndex] = None
         self._depth: Optional[DepthReader] = None
+
+    # ---------------------------------------------------------------- stream
+    @property
+    def stream(self):  # noqa: ANN201 - SkeletonStream
+        """Every body in every frame, parsed on first use.
+
+        Deliberately lazy. Parsing an hour of ``skeleton.jsonl`` costs seconds
+        and hundreds of megabytes, and the labelling screen never needs it: it
+        reads windows out of the memory-mapped arrays instead. Only a caller
+        that genuinely wants per-body detail (subject selection, audit) pays
+        for it.
+        """
+        if self._stream is None:
+            self._stream = load_skeleton_stream(self.directory / "skeleton.jsonl")
+        return self._stream
+
+    @property
+    def stream_loaded(self) -> bool:
+        return self._stream is not None
 
     # ----------------------------------------------------------------- basics
     @property
@@ -58,7 +99,20 @@ class ReviewDataset:
 
     @property
     def frames(self) -> int:
-        return len(self.mapping)
+        return int(self._positions.size)
+
+    @property
+    def mapping(self) -> list[dict[str, Any]]:
+        """The source map rows, re-read from disk.
+
+        Not held in memory: the two columns anchoring needs are kept as arrays,
+        and everything else in a row is wanted only by an audit view.
+        """
+        return [
+            row
+            for row in read_jsonl(self.directory / "source_map.jsonl", strict=True)
+            if row.get("record") == "frame"
+        ]
 
     @property
     def processing_schema_version(self) -> str:
@@ -128,38 +182,86 @@ class ReviewDataset:
         return self._depth
 
     # ---------------------------------------------------------------- anchors
-    def anchor_at(self, position: int) -> dict:
-        if not 0 <= position < len(self.mapping):
-            raise IndexError("Preview position outside source map")
-        row = self.mapping[position]
-        return {"source_fingerprint": self.job["source"]["fingerprint"],
-                "source_position": row["source_position"], "camera_timestamp_ns": row["cam_ns"]}
+    @property
+    def source_fingerprint(self) -> str:
+        return str(self.job["source"]["fingerprint"])
 
-    def position_of_anchor(self, anchor: dict) -> int:
-        if anchor["source_fingerprint"] != self.job["source"]["fingerprint"]:
+    @property
+    def take_dir(self) -> Path:
+        return Path(self.job["take_dir"])
+
+    def anchor_at(self, position: int) -> Anchor:
+        """The canonical identity of one frame: raw source, position and time."""
+        if not 0 <= position < self.frames:
+            raise IndexError("Preview position outside source map")
+        return Anchor(
+            source_fingerprint=self.source_fingerprint,
+            source_position=int(self._positions[position]),
+            camera_timestamp_ns=int(self._stamps[position]),
+        )
+
+    def position_of_anchor(self, anchor) -> int:  # noqa: ANN001 - Anchor or mapping
+        """Resolve an anchor **exactly**, or refuse.
+
+        There is no nearest-neighbour fallback and no positional correction. A
+        label whose moment cannot be found in this version belongs to a
+        different one, and moving it to the closest frame would quietly change
+        what a coach said.
+        """
+        if not isinstance(anchor, Anchor):
+            anchor = Anchor.from_dict(anchor)
+        if anchor.source_fingerprint != self.source_fingerprint:
             raise ValueError("Annotation belongs to another raw source")
-        key = (int(anchor["source_position"]), int(anchor["camera_timestamp_ns"]))
+        key = (anchor.source_position, anchor.camera_timestamp_ns)
+        if self._ordered:
+            index = int(np.searchsorted(self._positions, anchor.source_position))
+            if (
+                0 <= index < self._positions.size
+                and int(self._positions[index]) == anchor.source_position
+                and int(self._stamps[index]) == anchor.camera_timestamp_ns
+            ):
+                return index
+            raise ValueError("Canonical annotation boundary is not uniquely mapped")
+
+        if self._by_anchor is None:
+            self._build_fallback_index()
+        if key in self._ambiguous:
+            # Two frames of this version carry the same identity, so there is
+            # no single frame this label refers to. Picking either one would be
+            # a guess presented as a fact.
+            raise ValueError("Canonical annotation boundary is ambiguous in this version")
         position = self._by_anchor.get(key)
         if position is None:
             raise ValueError("Canonical annotation boundary is not uniquely mapped")
         return position
 
-    def save_annotations(self, samples: list[dict]) -> Path:
-        """New sidecar contract; legacy segments.json is never migrated implicitly."""
-        for sample in samples:
-            start, end = (self.position_of_anchor(sample[k]) for k in ("start", "end"))
-            if start > end:
-                raise ValueError("Annotation interval is reversed")
-            for interval in sample.get("errors", []):
-                a, b = (self.position_of_anchor(interval[k]) for k in ("start", "end"))
-                if not start <= a <= b <= end:
-                    raise ValueError("Error interval is outside its movement sample")
-        directory = ensure_dir(Path(self.job["take_dir"]) / "annotations" / "processing")
-        target = directory / (self.job["run_id"] + ".json")
-        write_json(target, {"schema_version": CANONICAL_ANNOTATION_SCHEMA_VERSION,
-                           "contract": "canonical_source_boundaries_inclusive",
-                           "processing_run": self.job["run_id"], "samples": samples}, overwrite=True)
-        return target
+    def _build_fallback_index(self) -> None:
+        """Index a source map whose positions are not strictly increasing."""
+        index: dict[tuple[int, int], int] = {}
+        ambiguous: set[tuple[int, int]] = set()
+        for i in range(self._positions.size):
+            key = (int(self._positions[i]), int(self._stamps[i]))
+            if key in index:
+                ambiguous.add(key)
+            else:
+                index[key] = i
+        self._by_anchor = index
+        self._ambiguous = frozenset(ambiguous)
+
+    # ------------------------------------------------------------ annotations
+    @property
+    def annotation_file(self) -> Path:
+        return annotation_path(self.take_dir, self.run_id)
+
+    def load_annotations(self) -> AnnotationDocument:
+        """This version's labels, or an empty document. Never another version's."""
+        return load_annotations(self.take_dir, self.run_id, self.source_fingerprint)
+
+    def save_annotations(self, document: AnnotationDocument) -> Path:
+        """Write the canonical sidecar. ``segments.json`` is never touched."""
+        document.processing_run = self.run_id
+        document.source_fingerprint = self.source_fingerprint
+        return save_annotations(self.take_dir, document)
 
     def close(self):
         if self.video:
@@ -179,4 +281,4 @@ class ReviewDataset:
         self.close()
 
 
-__all__ = ["CANONICAL_ANNOTATION_SCHEMA_VERSION", "ReviewDataset"]
+__all__ = ["CANONICAL_ANNOTATION_SCHEMA_VERSION", "Anchor", "AnnotationDocument", "ReviewDataset"]

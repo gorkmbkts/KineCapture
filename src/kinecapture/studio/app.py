@@ -74,7 +74,14 @@ def install_exception_hook(window) -> None:  # noqa: ANN001 - StudioWindow
 
 def run_studio(config: AppConfig) -> int:
     """Open the Studio window and run the event loop."""
+    from PySide6.QtGui import QSurfaceFormat
     from PySide6.QtWidgets import QApplication
+
+    from .views.skeleton3d import default_surface_format
+
+    # Must be set before the first GL context exists: the 3D skeleton view
+    # needs a depth buffer, and asking for one afterwards is ignored.
+    QSurfaceFormat.setDefaultFormat(default_surface_format())
 
     application = QApplication.instance() or QApplication(sys.argv)
     application.setApplicationName(APP_NAME)

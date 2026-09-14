@@ -31,6 +31,7 @@ from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import CaptureViewModel
 from kinecapture.studio.viewmodels.library import LibraryViewModel
+from kinecapture.studio.viewmodels.review import ReviewViewModel
 from kinecapture.studio.viewmodels.processing import ProcessingViewModel
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
 from kinecapture.studio.viewmodels.settings import SettingsViewModel
@@ -244,6 +245,8 @@ class StudioWindow(QMainWindow, BoundView):
             viewmodel = LibraryViewModel(self.viewmodel.session, runner=self.runner)
             # "Etiketle" on a version is what takes the user to the next step.
             viewmodel.open_for_review.subscribe(self._review_version)
+        elif key == "review":
+            viewmodel = ReviewViewModel(self.viewmodel.session, runner=self.runner)
         elif key == "settings":
             viewmodel = SettingsViewModel(self._settings_service)
         else:  # pragma: no cover - every attachable page is listed above

@@ -54,10 +54,24 @@ class ProcessingRunSummary:
     has_thumbnails: bool = False
     has_summary: bool = False
     has_depth: bool = False
+    #: The folder this run actually lives in, relative to ``derived/processing``.
+    #: Recorded rather than rebuilt from ``run_id`` because a run in progress
+    #: sits in ``.<run_id>.partial`` until it is promoted.
+    folder: str = ""
+    #: False while the run is still in its staging folder.
+    promoted: bool = True
 
     @property
     def is_complete(self) -> bool:
-        return self.state == "complete"
+        """Finished **and** promoted to its final folder.
+
+        A staging folder can already contain a job file claiming ``complete``:
+        processing writes the state, then the checksums, then renames. Trusting
+        that claim gave the library a version whose directory did not exist
+        yet. Promotion is the event that makes a version real, so it is what
+        this asks about.
+        """
+        return self.state == "complete" and self.promoted
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -169,9 +183,12 @@ def _read_runs(take_dir: Path) -> tuple[ProcessingRunSummary, ...]:
         except Exception as exc:  # noqa: BLE001 - a bad job file must not hide the take
             logger.warning("İş dosyası okunamadı (%s): %s", child.name, exc)
             continue
+        promoted = not child.name.startswith(".")
         runs.append(
             ProcessingRunSummary(
                 run_id=str(job.get("run_id", child.name)),
+                folder=child.name,
+                promoted=promoted,
                 state=str(job.get("state", "unknown")),
                 frames=int(job.get("frames_processed", 0) or 0),
                 issues=tuple(job.get("issues") or ()),

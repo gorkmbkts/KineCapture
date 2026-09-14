@@ -13,6 +13,7 @@ from kinecapture.domain.project import CaptureProfile
 from kinecapture.domain.enums import TakeState
 from kinecapture.recording.take_writer import TakeWriter
 from kinecapture.processing import ProcessingConfig, process_take, restart_job
+from kinecapture.processing.annotations import MovementSample
 from kinecapture.processing.jobs import source_identity
 from kinecapture.processing.sources import SyntheticSource
 from kinecapture.processing.review import ReviewDataset
@@ -39,8 +40,8 @@ def test_minimal_source_has_no_derived_work(raw_take):
     assert take.state is TakeState.FINALIZED
     assert take.processing_status == "awaiting_processing"
     assert not take.usable_for_export
-    assert not paths.skeleton_stream.exists()
-    assert not paths.proxy_video.exists()
+    assert not path_exists(paths.skeleton_stream)
+    assert not path_exists(paths.proxy_video)
     assert not list(paths.rgbd_dir.glob("*.kcd"))
     rows = list(read_jsonl(paths.raw_index))[1:]
     assert len(rows) == 12 and not any(row["skel"] or row["depth"] for row in rows)
@@ -57,7 +58,7 @@ def test_offline_all_frames_immutable_versioned_review(raw_take):
     assert len(job["depth_chunks"]) == 2
     assert source_identity(paths, take) == before
     second = process_take(paths.root, replace(config, store_depth=False))
-    assert first != second and first.exists()
+    assert first != second and path_exists(first)
     review = ReviewDataset(second)
     assert len(review.mapping) == 12
     arrays = review.arrays()
@@ -65,10 +66,21 @@ def test_offline_all_frames_immutable_versioned_review(raw_take):
     assert not arrays["subject_present"].any()  # no implicit best-body identity
     anchor = review.anchor_at(4)
     assert review.position_of_anchor(anchor) == 4
-    target = review.save_annotations([{"exercise": "squat", "start": anchor, "end": review.anchor_at(8)}])
-    assert target.exists() and not paths.segments.exists()
+    document = review.load_annotations()
+    document.samples = (
+        MovementSample(
+            sample_id="s1", start=anchor, end=review.anchor_at(8), exercise="squat"
+        ),
+    )
+    target = review.save_annotations(document)
+    assert path_exists(target) and not path_exists(paths.segments)
+    # The sidecar is the only thing written; the raw segments file stays absent.
+    reloaded = review.load_annotations()
+    assert [s.sample_id for s in reloaded.samples] == ["s1"]
+    assert review.position_of_anchor(reloaded.samples[0].start) == 4
+    assert review.position_of_anchor(reloaded.samples[0].end) == 8
     with pytest.raises(ValueError, match="another raw source"):
-        review.position_of_anchor({**anchor, "source_fingerprint": "wrong"})
+        review.position_of_anchor(replace(anchor, source_fingerprint="wrong"))
 
 
 def test_cancel_and_restart_keep_partial_and_raw(raw_take):
