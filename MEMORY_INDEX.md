@@ -5,9 +5,9 @@ bölüm hedefli açılır. Kod hafızadan önceliklidir.
 
 ## Güncel faz
 
-Yeni arayüz `kinecapture/studio/` altında yeniden yazılıyor (**F0–F8 bitti,
-F9 sırada**). Plan ve ilerleme: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** — yeni bir
-oturumda sıra oradan alınır. `python -m kinecapture` Studio'yu, `--legacy-gui`
+Yeni arayüz `kinecapture/studio/` altında **tamamlandı (F0–F15)**. Sekiz
+ekranın hepsi gerçek; uçtan uca tur mock ile çalıştırıldı. Plan ve faz
+sonuçları: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** bölüm 7. `python -m kinecapture` Studio'yu, `--legacy-gui`
 eski arayüzü açar. Kullanıcı kararı: **geriye dönük veri uyumluluğu aranmıyor;
 mevcut veri silinmiyor.**
 
@@ -20,6 +20,7 @@ mevcut veri silinmiyor.**
 | take / skeleton stream | 1.2.0 / 1.2.0 |
 | raw archive · capture policy | 1.1.0 · 2 |
 | processing · canonical annotation | **1.1.0** · **1.1.0** |
+| subject review · canonical release | **1.0.0** · **1.0.0** |
 | subject association | 1.1.0 |
 | eski annotation / release | 2.2.0 / 2.2.0 |
 | label / feature spec | 2.0.0 / 1.0.0 |
@@ -52,8 +53,8 @@ kullanır.**
 | `gui/` | eski arayüz; `--legacy-gui`, eski kayıtlar için korunuyor |
 | `tools/` | verify_zed_topology, extract_raw, capture_diagnostic |
 
-Durum: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING → REVIEWING`;
-`ERROR` her yerden erişilir.
+Durum: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING →
+REVIEWING`; `ERROR` her yerden.
 
 ## `MEMORY.md` bölüm dizini (satır no)
 
@@ -66,11 +67,8 @@ Durum: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING → REV
 | 6C | 393 | Seçilebilir özellik katmanı, registry, export |
 | 6D | 600 | **Ölçüm:** SVO2 depth'i geri vermez, H264 kayıplı; RGB-D arşivi |
 | 6E | 790 | Kimlik/SQLite, tek Sistem Sahibi, proje erişimi |
-| 6F–6G | 955 / 1033 | Capture+Review sadeleştirme; bindirme hizası |
 | 6H–6I | 1197 / 1289 | Proje silme; **türetilmiş correctness** |
 | 6J–6K | 1505 / 1560 | Eklem kanıtı: kanonik roller, `JointAnnotationStatus` |
-| 6L | 1715 | Dialogda sınıf oluşturma düzeltmesi |
-| 6M–W (seyrek) | 1756+ | Staj raporu turları — kodu ilgilendirmez |
 | 6P | 1872 | Squat düz-bacak tanısı: BODY_34 hatası, BODY_38 adayı |
 | 6S–6T | 2071 / 2141 | Squat/offline: **SDK depth tampon alias hatası** |
 | 6V | 2375 | **BACKEND MİMARİSİ:** min ham kayıt, anchor, process_take |
@@ -79,7 +77,8 @@ Durum: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING → REV
 | 6Z | 2666 | **F2:** studio/ katmanları, tokens.json, kabuk, offscreen font |
 | 6AA | 2748 | **F3:** processing 1.1.0 — memmap, özet, thumbnail, derinlik |
 | 6AB | 2858 | **F4–F7:** ekranlar, TaskRunner, alt süreç, kütüphane, ölçümler |
-| 6AC | 3305 | **F8 (en güncel):** Etiketleme, kanonik sidecar, 7 backend açığı, bütçeler |
+| 6AC | 3305 | **F8:** Etiketleme, kanonik sidecar, 7 backend açığı, bütçeler |
+| 6AD | 3401 | **F9–F15 (en güncel):** 3B, sporcu, dışa aktarım, cila, ölçümler |
 | 7–9 | 2937 · 2964 · 2978 | Mimari sınırlar; test komutları; doğrulamalar |
 | 10–12 | 3228 · 3249 · 3272 | Bilinen sorunlar; uygulanmayanlar; adımlar |
 
@@ -90,23 +89,23 @@ Tespit: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
 
 - Studio'da Projeler · Yakalama · Verileri Hesapla · İşlenen Videolar ·
   **Etiketleme** · Ayarlar çalışıyor. **Veri Seti ve Dışa Aktarım yer tutucu.**
-- F8 bütçeleri ölçüldü ve karşılandı (6AC). **Altı yardımcı pencere yok**;
-  kişi seçimi akışı F10'da bağlanacak.
-- Python tablo modeli çizimde C++ `QTableWidget`'tan pahalı (21/15 ms);
-  karşılığında doldurma satır sayısından bağımsız. Bu bir takas.
+- Bütçeler ölçüldü ve karşılandı (6AD). **Gerçek ZED ile tam tur yok**; iki
+  kişinin karıştığı kayıt mock ile üretilemedi.
+- Python tablo modeli çizimde `QTableWidget`'tan pahalı (21/15 ms);
+  karşılığında doldurma satır sayısından bağımsız — bilinçli takas.
 - **`pytest tests/` tek süreçte tamamlanmıyor**; dosya dosya çalıştırılmalı.
 - **`offscreen` Qt platformunda font ailesi yok**: genişlik/yerleşim ölçümleri
   orada anlamsız, `QT_QPA_PLATFORM=windows` gerekir (bkz. 6Z).
 - Canlı ZED doğrulaması eksik: 60 FPS, H264_LOSSLESS bilgi koruması, native
   sayaç güvenilirliği, çok kişili anchor.
 - SDK ilk model optimizasyonu (dakikalar) bağlan düğmesini bloklar; proxy video
-  Windows uzun yolda (OpenCV) kullanılamaz — uzun `pytest` kökünde koşu
-  dürüstçe `partial` olur (6AC).
-- `dataset_root` tercihi eski pytest yolunu gösteriyor; iki identity proje
-  kaydı yetim. Proje kilidi yok.
+  Windows uzun yolda (OpenCV) açılamaz — uzun `pytest` kökünde koşu dürüstçe
+  `partial` olur (6AC).
+- `dataset_root` tercihi eski pytest yolunu gösteriyor; proje kilidi yok.
 
 ## Sonraki adım
 
-**F9 — 3B iskelet görünümü** (`QOpenGLWidget`): offline veriden beslenen,
-timestamp ile senkron, kalıcı kamera. `ReviewSession.joints_3d_window()` hazır
-ve ölçüldü (600 kare / 0,12 ms). Ayrıntı `FAZ_PLANI_PYSIDE6_STUDIO.md` bölüm 4.
+**Gerçek ZED ile doğrulama.** Kamera karşısında tek kişilik bir kayıt alıp
+yakalama → işleme → etiketleme → dışa aktarım turunu gerçek veriyle tekrarlamak;
+60 FPS sürdürülebilirliği ve canlı iskeletin doğruluğu ancak orada ölçülebilir.
+Ayrıca yakalama ekranının tıkla-seç kişi akışı uçtan uca bağlanmalı (6AD).

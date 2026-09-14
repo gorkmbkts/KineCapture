@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from kinecapture.studio.services.messages import Message, Severity
 from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.export import ExportViewModel, PreflightRow
 from kinecapture.studio.viewmodels.library import LibraryViewModel
@@ -103,15 +104,23 @@ class ExportPage(StudioPage):
             lambda on: self._set_option(store_dense_error_targets=on)
         )
         bar.addWidget(self.dense_box)
-        bar.addStretch(1)
+        bar.addSpacing(tokens.metric("KcSpacingLg"))
 
+        # Given the remaining width rather than a stretch's leftovers: this
+        # label is the screen's answer ("1/2 sürüm hazır · 3 hareket") and it
+        # was being elided down to "1/…".
         self.summary = ElidedLabel("Henüz kontrol edilmedi.")
         self.summary.setProperty("kcRole", "contextValue")
-        bar.addWidget(self.summary)
+        self.summary.setMinimumWidth(260)
+        self.summary.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        bar.addWidget(self.summary, 1)
         self.body_layout.addLayout(bar)
 
         self.model = RowTableModel(_columns())
-        self.proxy = SearchProxy(self.model)
+        self.proxy = SearchProxy(self)
+        self.proxy.setSourceModel(self.model)
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -156,9 +165,29 @@ class ExportPage(StudioPage):
 
     # --------------------------------------------------------------- slots
     def _check(self) -> None:
+        """Check every finished version - once the list of them exists.
+
+        Pressing this while the library is still reading the project would
+        otherwise check an empty list and report "nothing to export", which is
+        the most misleading thing this screen could say.
+        """
         if self.viewmodel is None or self.library is None:
             return
-        self.viewmodel.check(tuple(self.library.all_rows))
+        if self.library.busy.value:
+            self.summary.setText("Sürüm listesi okunuyor…")
+            QTimer.singleShot(200, self._check)
+            return
+        rows = tuple(self.library.all_rows)
+        if not rows:
+            self.show_message(
+                Message(
+                    headline="Kontrol edilecek tamamlanmış sürüm yok.",
+                    severity=Severity.WARNING,
+                    detail="Önce İşlenen Videolar ekranında bir sürüm görünmeli.",
+                )
+            )
+            return
+        self.viewmodel.check(rows)
 
     def _build(self) -> None:
         if self.viewmodel is not None:

@@ -383,3 +383,28 @@ def test_the_widest_screens_are_the_ones_with_two_viewports(qapp) -> None:
         assert review.minimumSizeHint().width() <= 900
     finally:
         review.close()
+
+
+# ------------------------------------------------------------------ tables
+@pytest.mark.parametrize("key", sorted(PAGE_TYPES))
+def test_a_table_shows_what_its_model_holds(qapp, key) -> None:
+    """A proxy that was never given its source reports zero rows forever.
+
+    Two screens shipped that way: the model was full, every model-level test
+    passed, and the table on screen was blank. So this asks the *view* what it
+    would draw, not the model what it contains.
+    """
+    from PySide6.QtCore import QSortFilterProxyModel
+    from PySide6.QtWidgets import QTableView
+
+    page = PAGE_TYPES[key](destination(key), load_tokens("dark"))
+    try:
+        for view in page.findChildren(QTableView):
+            model = view.model()
+            assert model is not None, f"{key}: tabloya model verilmemiş"
+            if isinstance(model, QSortFilterProxyModel):
+                assert model.sourceModel() is not None, (
+                    f"{key}: proxy'ye kaynak model verilmemiş"
+                )
+    finally:
+        page.close()

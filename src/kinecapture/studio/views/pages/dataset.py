@@ -113,7 +113,8 @@ class DatasetPage(StudioPage):
         self.body_layout.addLayout(bar)
 
         self.model = RowTableModel(_columns())
-        self.proxy = SearchProxy(self.model)
+        self.proxy = SearchProxy(self)
+        self.proxy.setSourceModel(self.model)
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)

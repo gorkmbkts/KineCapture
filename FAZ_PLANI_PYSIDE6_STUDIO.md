@@ -916,3 +916,121 @@ Veri Seti filtreleri de adsızdı. Hepsine erişilebilir ad verildi.
 ikincil metin, üç durum rengi ve odak halkası ≥ 3,0. Stil şablonunda `:focus`
 kuralı olduğu da doğrulanıyor — klavyeyle çalışmak, nerede olduğunu görmeyi
 gerektirir.
+
+### F15 sonucu (2026-09-14) — uçtan uca tur ve final rapor
+
+**Tam tur, gerçek uygulama penceresi üzerinden, mock backend ile.** Betik:
+proje aç → iki kayıt al → ikisini de işle → kütüphanede gör → birini etiketle
+→ sporcuyu seç → veri setinde gör → kontrol et → paketi yaz → paketi dışarıdan
+oku ve etiketlerle karşılaştır → altı yardımcı pencereyi aç.
+
+**Her adım doğrulandı** (32 kontrol, hepsi geçti). Kritik olanlar:
+
+| Kontrol | Sonuç |
+|---|---|
+| Kayıt sırasında kare kaybı | **0** (önizlemede atlanan 38 — ayrı sayılır) |
+| İki sürüm de `complete` | ✓ |
+| Etiketleme: video · 2B iskelet · 3B görünüm | üçü de açıldı |
+| Hatalı tekrar "hatalı" diyor (türetilmiş) | ✓ |
+| Sporcu önceden seçilmemiş | ✓ (seçimi insan yaptı) |
+| Sidecar yeniden okundu, çapalar aynı karelere çözüldü | (5,51) (55,101) (105,151) |
+| Veri Seti: biri hazır, diğeri değil | ✓ |
+| Kontrol iki sürümü de gösterdi, reddedilen nedenini söyledi | "Sürümün sporcusu seçilmemiş" |
+| **Etiketlenen kareler pakete birebir taşındı** | ✓ aynı üç aralık |
+| Bir örnek hatalı, ikisi doğru | ✓ |
+| Hata aralığı göreli ve kapsayıcı | 2..7 |
+| Dizi örnek uzunluğunda | (47, 16, 3) / 47 kare |
+| Paket kökeni taşıyor (run, parmak izi, revizyonlar) | ✓ |
+| Altı pencere açıldı, hiçbiri modal değil | ✓ |
+
+**Uçtan uca turun bulduğu açık**: Dışa Aktarım ekranında "Sürümleri kontrol et"
+düğmesine kütüphane hâlâ okunurken basılınca boş liste kontrol ediliyor ve
+"dışa aktarılacak bir şey yok" deniyordu — bu ekranın söyleyebileceği en
+yanıltıcı şey. Artık liste hazır olana kadar bekliyor, gerçekten sürüm yoksa
+bunu ayrı bir mesajla söylüyor.
+
+## 8. Final bütçe tablosu
+
+60 dk / 60 FPS / BODY_38 = 216000 kare. `QT_QPA_PLATFORM=windows`,
+RTX 2060 / i7-10750H / 16 GB.
+
+| Ölçüm | Bütçe | Sonuç | Durum |
+|---|---|---|---|
+| Boşta kare (çizelge + görüntü) | ≤ 8 ms | medyan 0,72 · p95 1,51 ms | ✓ |
+| Zaman çizelgesi, 100 aralık | ≤ 16 ms | medyan 5,6 · p95 8,3 ms | ✓ |
+| Zaman çizelgesi, 600 aralık | ≤ 16 ms | medyan 13,9 ms · p95 20,5 ms | medyan ✓, **p95 aşıyor** |
+| Oynatma çizgisi hareketi | ≤ 16 ms | medyan 0,11 ms | ✓ |
+| Tarama (veri okuma + iki çizim) | ≤ 50 ms | medyan 0,84 · p95 1,73 ms | ✓ |
+| 600 karelik 3B pencere okuma | ≤ 50 ms | medyan 0,17 ms | ✓ |
+| 3B iskelet çizimi | ≤ 16 ms | medyan 2,1–2,3 ms | ✓ |
+| 60 dk oturumda zirve RSS | ≤ 1,5 GB | **144 MB** | ✓ |
+| Sürüm açma (arka planda) | — | 1,1 s (216000 satırlık kaynak haritası) | GUI bloklanmıyor |
+
+**600 aralık uyarısı dürüstçe**: tek görünümde 300 hareket + 300 hata aralığı,
+yani bir saatlik seansın tamamı etiketlenmiş ve hepsi aynı anda ekranda.
+Medyan bütçe içinde, p95 makine meşgulken 20 ms'e çıkıyor. Tipik kullanım
+(100 aralık) 5,6/8,3 ms. Bunu bir "geçti" satırı gibi yazmak yanlış olurdu.
+
+**Ekran boyutu** (gerçek fontlarla): Etiketleme 822×500, Yakalama 802×406,
+İşlenen Videolar 359×417, diğerleri daha küçük. 1366×768'de %100/%125/%150
+hepsi sığıyor; %200'de o panelde üç ekran taşıyor, yüksek çözünürlüklü bir
+ekranda (%200'ün normal kullanıldığı yer) hepsi sığıyor.
+
+## 9. Donanım gerektirdiği için yapılamayanlar
+
+Bunların hiçbiri mock ile doğrulanamaz ve hiçbiri "çalışıyor" diye yazılmadı.
+
+1. **Gerçek ZED ile tam tur.** Kamera bağlıydı ama karanlık bir odada ve
+   önünde kimse yoktu; bağlantı ve FPS ötesinde bir şey ölçülemezdi.
+2. **60 FPS sürdürülebilirliği ve gerçek kayıtta kare kaybı.** Mock ile 0
+   kayıp ölçüldü; bu ZED hakkında bir şey söylemez.
+3. **Canlı iskeletin 2B/3B görünümdeki doğruluğu.** Sentetik iskelet doğru
+   çiziliyor; gerçek bir insanın üzerine oturması ayrı bir doğrulama.
+4. **Gerçek derinlik.** `reconstructed_offline` yolu yazıldı ve işaretlendi,
+   gerçek SVO ile karşılaştırılmadı.
+5. **İki kişinin gerçekten karıştığı kayıt.** Mock iki bedeni temiz izliyor,
+   tracker hiç kararsız kalmıyor; belirsiz aralık akışı yalnız sentetik
+   akışlarla test edildi. F10'un en önemli yolu gerçek kayıt bekliyor.
+6. **Yakalama ekranının tıkla-seç kişi akışı.** `select_subject` viewmodel'de
+   var ama uçtan uca betikte tetiklenemedi; çapa dosyası elle yazıldı.
+   Gerçek kamerayla önizlemede birine tıklayarak sınanmalı.
+
+### Uçtan uca turun bulduğu ikinci açık (F15 sırasında düzeltildi)
+
+**Dışa Aktarım ve Veri Seti tablolarına kaynak model hiç verilmemişti.**
+İkisi de `SearchProxy(self.model)` yazıyordu; `SearchProxy.__init__`'in ilk
+parametresi *parent*, kaynak model değil. Proxy'nin kaynağı boş kaldığı için
+tablo **her zaman boş çiziliyordu** — model doluyken, model seviyesindeki
+bütün testler geçerken. Ekran görüntüsünde fark edildi.
+
+Neden testler yakalamadı: hepsi `page.model.rowCount()` soruyordu, yani
+verinin modelde olup olmadığını. Ekranda görünüp görünmediğini soran yoktu.
+Artık var: `test_a_table_shows_what_its_model_holds` her tablo sayfası için
+görünüme model verilmiş mi ve proxy'nin kaynağı var mı diye soruyor.
+
+Aynı turda düzeltilen üçüncü küçük hata: özet etiketi (`1/2 sürüm hazır · 3
+hareket · 1 sürüm dışarıda`) esnek boşluğun artığına sıkışıp `1/…` diye
+kırpılıyordu; artık kalan genişliği o alıyor.
+
+## 10. Kapanış
+
+**F0–F15 tamamlandı.** Sekiz ekranın hepsi gerçek, yer tutucu kalmadı. Tam tur
+(yakalama → işleme → kütüphane → etiketleme → veri seti → dışa aktarım →
+yardımcı pencereler) mock backend ile gerçek uygulama penceresi üzerinden
+çalıştırıldı ve 32 kontrolün hepsi geçti.
+
+**Testler**: 59 dosya, 0 başarısız (dosya dosya çalıştırıldı). Bu çalışmada
+eklenenler: `test_studio_review.py` (22), `test_studio_review_gui.py` (9),
+`test_studio_skeleton3d.py` (18), `test_studio_subject.py` (24),
+`test_studio_subject_gui.py` (10), `test_export_canonical.py` (14),
+`test_studio_export_gui.py` (7), `test_studio_windows.py` (19),
+`test_studio_robustness.py` (9), `test_studio_polish.py` (68).
+
+**GUI yazarken kapatılan backend açıkları** — toplam on bir tanesi bu
+çalışmada bulundu ve kapatıldı; hepsi §7'de F8, F10 ve F15 başlıkları altında
+tek tek yazılı. Üçü doğrudan yanlış etiket üretebilecek cinstendi:
+tekrarlanan kare kimliğinin sessizce çözülmesi, hata aralığının sessizce
+kırpılması ve eklem durumunun sessizce "seçildi"ye yükseltilmesi.
+
+**Sırada**: gerçek ZED ile doğrulama (§9). Mock'un söyleyemeyeceği her şey
+orada ölçülecek.
