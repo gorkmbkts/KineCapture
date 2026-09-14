@@ -694,3 +694,73 @@ bloklaması, reddedilen düzenlemenin iz bırakmaması.
 
 **Yapılmadı (F9'a kalan)**: 3B iskelet görünümü. `joints_3d_window()` hazır ve
 ölçüldü; görünümü F9 kuracak.
+
+### F9 sonucu (2026-09-14) — F8 ile aynı commit'te
+
+3B iskelet görünümü Etiketleme ekranının içinde yaşadığı için F8 ile birlikte
+commit edildi; ayırmak import edilemeyen bir ara commit bırakırdı.
+
+- `studio/services/skeleton3d.py` (Qt'siz): yörünge kamerası, çerçeveleme,
+  kemik parçaları, zemin ızgarası. Ölçülebilir olan her şey burada.
+- `studio/views/skeleton3d.py`: `QOpenGLWidget`. Köşe verisi **VBO'ya** bir kez
+  ayrılıp sonra içine yazılıyor; sahne kare başına yeniden kurulmuyor.
+- Video ve 3B **yan yana**: antrenörün sorduğu asıl soru "izlenen iskelet
+  kameranın gördüğüyle uyuşuyor mu", ve bu ancak ikisi aynı karedeyken
+  yanıtlanabilir. Aynı kare indeksi ikisini de sürüyor.
+- Sürükle: döndür · orta düğme: kaydır · tekerlek: yakınlaş · R: sıfırla.
+  Kamera açısı sürüm değiştirince korunuyor.
+- **Yukarı ekseni kayıttan okunuyor** (`right_handed_y_up` / `..._z_up`);
+  varsayılsaydı bir z-up kaydı yan yatardı ve eğilme hakkındaki her yargı
+  yanlış olurdu.
+- Tracker'ın üretmediği eklem çizilmez; ucu eksik kemik **atılır**, orijine
+  çekilmez.
+
+**PyOpenGL tuzağı**: ortamda kurulu ama hızlandırıcısı numpy 2.x ile ikili
+uyumsuz (`numpy.dtype size changed`) ve ilk dizide patlıyor. 3B görünüm yalnız
+Qt'nin kendi GL sınıflarını kullanıyor — bir bağımlılık eksildi, bir kırılma
+noktası da.
+
+**Ölçüm**: 3B çizim medyan **2,07 ms** (16 ms bütçesinin içinde).
+**Testler**: `test_studio_skeleton3d.py` (17 geometri + 1 GL widget).
+
+### F10 sonucu (2026-09-14)
+
+Sporcu seçimi ve belirsiz aralık onayı.
+
+**Teslim edilen**
+
+- `processing/subject_review.py`: kanonik **kişi kararı** kaydı 1.0.0.
+  Adaylar (`scan_candidates`) ve tracker'ın kararsız kaldığı aralıklar
+  (`scan_unsettled`) sürümün kendi iskelet akışından çıkarılıyor.
+- `studio/services/subject_store.py`: tek yazıcı, bir karar = bir geri alma,
+  bütün belge doğrulanmadan hiçbir şey uygulanmıyor.
+- Aday kartları: her kişinin **kendi** aralığından üç kare, ne kadar görüldüğü,
+  kaç kez koptuğu. Başlık "Kişi 1"; tracker kimliği en küçük yazı, çünkü o
+  kimlik yalnız bu kaydın içinde bir şey ifade eder.
+- Her belirsiz aralık için üç yanıt ve **varsayılan yok**: "Aynı sporcu" /
+  "Diğer kişi…" / "Bu bölümde sporcu yok". "Diğer kişi" hangi kişi olduğunu
+  sorar — kim olduğu söylenmeyen bir "başkası" o kareleri kimseye ait bırakır.
+- Toplu yanıt yalnız "aynı sporcu" ve "sporcu yok" için var; "diğer kişi"
+  toplu verilemez, çünkü kimsenin bakmadığı kareleri bir kişiye atfederdi.
+- Yeniden tarama, karşılığı kalmayan yanıtları **düşürür**: eski bir yanıt asla
+  başka bir zaman aralığının üstüne oturmaz.
+
+**GUI yazarken bulunan açık**
+
+`subject_status == "needs_subject_selection"` olan bir sürümde bütün diziler
+NaN'dır ve etiketleme ekranında sporcu seçmek bunu **düzeltemez** — diziler
+işleme anında yazıldı ve yalnız seçili bedenin eklemlerini taşıyor. Ekran artık
+bunu bir soru listesi gibi göstermek yerine açıkça söylüyor: *"Bu sürüm
+işlenirken hiçbir kişi seçilmemiş; eklem dizileri boş. Kaydı, sporcu
+işaretlenmiş hâlde yeniden işleyin."* Böyle bir sürüm sporcu seçilse bile
+`settled` olmuyor.
+
+**Testler**: `test_studio_subject.py` (24) + `test_studio_subject_gui.py` (10).
+Ağırlık reddetme tarafında: kimse önceden seçilmiyor, "diğer kişi" kimsiz
+kabul edilmiyor, sürümde olmayan kişi seçilemiyor, reddedilen karar geri alma
+adımı tüketmiyor, yeniden tarama eski yanıtı taşımıyor.
+
+**Yapılamayan**: iki kişinin gerçekten karıştığı bir kayıt mock backend ile
+üretilemedi (iki beden temiz izleniyor, tracker hiç kararsız kalmıyor), bu
+yüzden belirsiz aralık akışı sentetik akışlarla test edildi. Gerçek ZED
+kaydıyla iki kişili doğrulama hâlâ açık.

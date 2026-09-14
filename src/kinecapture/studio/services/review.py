@@ -267,6 +267,31 @@ class ReviewSession:
             source_fingerprint=self.source_fingerprint,
         )
 
+    # ---------------------------------------------------------------- subject
+    @property
+    def subject_status(self) -> str:
+        """What processing concluded about who this version is about."""
+        return str(self._job.get("subject_status", ""))
+
+    @property
+    def has_subject_data(self) -> Availability:
+        """Whether this version actually contains one person's movement.
+
+        A run where the tracker never locked onto anybody produces a full set
+        of arrays that are entirely NaN. Choosing an athlete in the labelling
+        screen cannot repair that: the arrays were written at processing time
+        and hold only the *selected* body's joints. The honest answer is that
+        the version has to be processed again with the athlete marked, and
+        saying that is much better than letting someone label an empty take.
+        """
+        if self.subject_status == "needs_subject_selection":
+            return Availability(
+                False,
+                "Bu sürüm işlenirken hiçbir kişi seçilmemiş; eklem dizileri boş. "
+                "Kaydı, sporcu işaretlenmiş hâlde yeniden işleyin.",
+            )
+        return Availability(True)
+
     # ------------------------------------------------------------------ misc
     @property
     def issues(self) -> tuple[str, ...]:

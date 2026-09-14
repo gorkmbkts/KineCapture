@@ -46,6 +46,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QSplitter,
     QStackedWidget,
+    QTabWidget,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -58,6 +59,7 @@ from kinecapture.studio.services.skeleton3d import up_axis_for
 from kinecapture.processing.annotations import JointStatus
 from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.navigation import Destination
+from kinecapture.studio.viewmodels.subject import SubjectViewModel
 from kinecapture.studio.viewmodels.review import (
     READINESS_TEXT,
     ErrorRow,
@@ -67,6 +69,7 @@ from kinecapture.studio.viewmodels.review import (
 
 from ..timeline import Interval, TimelineView, Tool
 from ..skeleton3d import Skeleton3DView
+from ..subject import SubjectPanel
 from ..viewer import ReviewViewer
 from ..widgets import label, mono_label, separator
 from .base import StudioPage
@@ -103,6 +106,7 @@ class ReviewPage(StudioPage):
     ) -> None:
         super().__init__(destination, tokens, parent)
         self.viewmodel: Optional[ReviewViewModel] = None
+        self.subject: Optional[SubjectViewModel] = None
         self._suppress = False
         self._resume_position: Optional[int] = None
         self._roles: dict[str, Optional[int]] = {}
@@ -309,7 +313,24 @@ class ReviewPage(StudioPage):
         frame.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         frame.setMinimumWidth(tokens.metric("KcInspectorMinWidth"))
         frame.setMinimumHeight(tokens.metric("KcControlHeightLarge") * 4)
-        return frame
+
+        # Two tabs, because they are two different jobs: "which movement is
+        # this" and "who is this". Mixing them into one column made neither
+        # readable, and the athlete question has to be answerable before the
+        # labels underneath it mean anything.
+        self.side_tabs = QTabWidget()
+        self.side_tabs.addTab(frame, "Etiket")
+        self.subject_panel = SubjectPanel(tokens)
+        subject_scroll = QScrollArea()
+        subject_scroll.setWidget(self.subject_panel)
+        subject_scroll.setWidgetResizable(True)
+        subject_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        subject_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.side_tabs.addTab(subject_scroll, "Sporcu")
+        self.side_tabs.setMinimumWidth(tokens.metric("KcInspectorMinWidth"))
+        return self.side_tabs
 
     def _build_empty_inspector(self) -> QWidget:
         page = QWidget()
@@ -501,6 +522,19 @@ class ReviewPage(StudioPage):
     # ------------------------------------------------------------------ bind
     def attach(self, viewmodel: ReviewViewModel) -> None:
         self.viewmodel = viewmodel
+        self.subject = SubjectViewModel(runner=viewmodel._runner)
+        self.subject_panel.athlete_chosen.connect(self.subject.choose)
+        self.subject_panel.answered.connect(self._answer_subject)
+        self.subject_panel.cleared.connect(self.subject.clear_answer)
+        self.subject_panel.show_requested.connect(self.subject.show_question)
+        self.subject_panel.answer_all.connect(self.subject.answer_remaining)
+        self.bind(self.subject.candidates, self.subject_panel.show_candidates)
+        self.bind(self.subject.questions, self.subject_panel.show_questions)
+        self.bind(self.subject.progress, self._show_subject_status)
+        self.bind(self.subject.settled, lambda _s: self._show_subject_status())
+        self.bind(self.subject.blocker, lambda _b: self._show_subject_status())
+        self.bind_event(self.subject.message, self.show_message)
+        self.bind_event(self.subject.go_to, self._seek)
         self.bind(viewmodel.movements, self._movements_changed)
         self.bind(viewmodel.errors, self._errors_changed)
         self.bind(viewmodel.selected_movement, lambda _key: self._selection_changed())
@@ -535,6 +569,8 @@ class ReviewPage(StudioPage):
         if self.viewmodel is not None:
             self.viewmodel.playing.set(False)
             self.viewmodel.flush()
+        if getattr(self, "subject", None) is not None:
+            self.subject.flush()
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming
         self._clock.stop()
@@ -575,6 +611,11 @@ class ReviewPage(StudioPage):
         ):
             self.skeleton.set_note("Bu surumde 3B eklem verisi yok.")
         self.skeleton_button.setEnabled(self.skeleton.is_available)
+
+        self.subject_panel.set_context(
+            review.frame, self.subject.candidate_title, viewmodel.fps.value
+        )
+        self.subject.open(review, annotator=viewmodel.store.annotator if viewmodel.store else "")
         self._render_frame(viewmodel.position.value)
 
     def _show_nothing(self) -> None:
@@ -653,6 +694,25 @@ class ReviewPage(StudioPage):
     def _remember_camera(self) -> None:
         """Keep the angle across version switches; it is the user's viewpoint."""
         self._camera = self.skeleton.camera
+
+    def _answer_subject(self, interval_id: str, verdict, tracker_id) -> None:  # noqa: ANN001
+        """The panel never guesses the tracker; it is passed or it is None."""
+        self.subject.answer(interval_id, verdict, tracker_id=tracker_id)
+
+    def _show_subject_status(self, _text: str = "") -> None:
+        """Say plainly whether this version may be exported yet."""
+        settled = self.subject.settled.value
+        text = self.subject.progress.value
+        blocker = self.subject.blocker.value
+        if blocker:
+            # A version with no skeleton at all is not an unfinished checklist;
+            # say what actually has to happen instead of counting questions.
+            text = blocker
+        elif not settled:
+            text += "  ·  bu sürüm dışa aktarılamaz"
+        self.subject_panel.set_status(text, settled)
+        index = self.side_tabs.indexOf(self.side_tabs.widget(1))
+        self.side_tabs.setTabText(index, "Sporcu" if settled else "Sporcu  !")
 
     # ------------------------------------------------- live trim preview
     def _edit_started(self) -> None:
@@ -1086,6 +1146,7 @@ class ReviewPage(StudioPage):
         super().apply_tokens(tokens)
         self.viewer.set_tokens(tokens)
         self.skeleton.set_tokens(tokens)
+        self.subject_panel.set_tokens(tokens)
         self.timeline.set_tokens(tokens)
 
 
