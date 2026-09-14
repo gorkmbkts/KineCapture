@@ -843,3 +843,37 @@ Denetimi · Köken · Ham Parametreler.**
   olmuyor.
 
 **Testler**: `test_studio_windows.py` (19).
+
+### F13 sonucu (2026-09-14)
+
+Dayanıklılık. Bu projede pahalı olan arızalar sessiz olanlar: bir saatlik
+etiketleme çalışmasının çökmede kaybolması, yarım yazılmış bir paketin
+bitmiş görünmesi, ekran "kaydedildi" derken yazamamış olmak.
+
+**Etiketler kayıpsız**
+
+- **Otomatik kayıt**: son değişiklikten 4 sn sonra sidecar yazılıyor. Önceden
+  etiketler yalnız ekrandan çıkarken diske gidiyordu; arada gelen bir çöküş
+  bütün oturumu götürürdü. Ctrl+S hemen yazar.
+- Zaman çizelgesi çubuğunda **kaydedildi / kaydedilmedi** göstergesi var ve
+  mağazanın gerçek durumunu izliyor, son kullanıcı eylemini değil.
+- **Başarısız yazma işi kaybetmiyor**: `flush()` hata durumunda `False`
+  dönüyor, kayıt "kirli" kalıyor, otomatik kayıt yeniden deniyor ve kullanıcı
+  nedenini görüyor. Diskin dolduğu senaryo testle sabit.
+- Bozuk (ayrıştırılamayan) bir sidecar ekranı açılmaktan alıkoymuyor ama
+  **sessizce boş başlamıyor**: kullanıcıya söyleniyor. Sessiz bir boş başlangıç
+  "henüz etiket yok" ile karıştırılabilirdi.
+
+**Beklenmeyen istisna arayüzü çökertmiyor**
+
+`install_exception_hook` istisnayı kullanıcıya okunur bir mesaja ve günlüğe
+çeviriyor, sonra önceki hook'u çağırıyor — traceback yutulmuyor. Raporlayıcının
+kendisi patlarsa bu da yutuluyor: son savunma hattı, çökme sebebi olamaz.
+
+**Uzun yol**
+
+260 karakteri aşan bir yolda `Path.exists()` sessizce `False` dönüyor;
+uygulamanın hiçbir yerde bunu sormamasının sebebi bu. Test bunu açıkça
+gösteriyor: aynı dosya için `path_exists()` `True`, `Path.exists()` `False`.
+
+**Testler**: `test_studio_robustness.py` (9).

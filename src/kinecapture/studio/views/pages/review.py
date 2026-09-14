@@ -78,6 +78,11 @@ from .base import StudioPage
 #: digits there are above the letters.
 QUICK_SLOTS = 9
 
+#: How long after the last edit the labels are written. Short enough that
+#: almost nothing is lost to a crash, long enough that holding an arrow key
+#: does not write once per frame.
+AUTOSAVE_MS = 4000
+
 _JOINT_STATUS_TEXT = (
     (JointStatus.SELECTED, "Eklemler seçildi"),
     (JointStatus.NOT_APPLICABLE, "Eklem ilişkisi yok"),
@@ -115,6 +120,15 @@ class ReviewPage(StudioPage):
         self._clock = QTimer(self)
         self._clock.setTimerType(Qt.TimerType.PreciseTimer)
         self._clock.timeout.connect(self._tick)
+
+        # Labels reach disk shortly after the last edit, not only when the
+        # screen is left. An hour of labelling lost to a crash is an hour a
+        # coach will not spend again, and the write is small enough that
+        # doing it often costs nothing.
+        self._autosave = QTimer(self)
+        self._autosave.setSingleShot(True)
+        self._autosave.setInterval(AUTOSAVE_MS)
+        self._autosave.timeout.connect(self._save_now)
 
         split = QSplitter(Qt.Orientation.Vertical, self)
         split.setChildrenCollapsible(False)
@@ -264,6 +278,14 @@ class ReviewPage(StudioPage):
         bar.addWidget(self.undo_button)
         bar.addWidget(self.redo_button)
 
+        bar.addWidget(separator(Qt.Orientation.Vertical))
+        self.save_state = label("kaydedildi", role="contextValue")
+        self.save_state.setProperty("kcStatus", "ready")
+        self.save_state.setToolTip(
+            "Etiketler son değişiklikten kısa süre sonra kendiliğinden yazılır "
+            "(Ctrl+S hemen yazar)."
+        )
+        bar.addWidget(self.save_state)
         bar.addWidget(separator(Qt.Orientation.Vertical))
         self.progress_label = label("—", role="contextValue")
         bar.addWidget(self.progress_label)
@@ -510,7 +532,7 @@ class ReviewPage(StudioPage):
         add("Ctrl+Z", self._undo)
         add("Ctrl+Y", self._redo)
         add("Ctrl+Shift+Z", self._redo)
-        add("Ctrl+S", self._flush)
+        add("Ctrl+S", self._save_now)
         add("Delete", self._delete_selected)
         add("Ctrl+0", lambda: self.timeline.zoom_all())
         add("R", self.skeleton.reset_view)
@@ -541,6 +563,7 @@ class ReviewPage(StudioPage):
         self.bind(viewmodel.selected_error, lambda _key: self._selection_changed())
         self.bind(viewmodel.progress, self.progress_label.setText)
         self.bind(viewmodel.title, self._subtitle.setText)
+        self.bind(viewmodel.dirty, self._changes_pending)
         self.bind(viewmodel.can_undo, self.undo_button.setEnabled)
         self.bind(viewmodel.can_redo, self.redo_button.setEnabled)
         self.bind(viewmodel.exercise_options, lambda _o: self._refill_classes())
@@ -574,6 +597,9 @@ class ReviewPage(StudioPage):
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming
         self._clock.stop()
+        self._autosave.stop()
+        if getattr(self, "subject", None) is not None:
+            self.subject.close()
         if self.viewmodel is not None:
             self.viewmodel.close()
         super().closeEvent(event)
@@ -713,6 +739,28 @@ class ReviewPage(StudioPage):
         self.subject_panel.set_status(text, settled)
         index = self.side_tabs.indexOf(self.side_tabs.widget(1))
         self.side_tabs.setTabText(index, "Sporcu" if settled else "Sporcu  !")
+
+    def _changes_pending(self, dirty: bool) -> None:
+        """Restart the autosave countdown, and say plainly what is unsaved."""
+        if dirty:
+            self._autosave.start()
+            self.save_state.setText("kaydedilmedi")
+            self.save_state.setProperty("kcStatus", "warning")
+        else:
+            self._autosave.stop()
+            self.save_state.setText("kaydedildi")
+            self.save_state.setProperty("kcStatus", "ready")
+        self.save_state.style().unpolish(self.save_state)
+        self.save_state.style().polish(self.save_state)
+
+    def _save_now(self) -> None:
+        """Autosave. A failed write keeps the labels and tries again."""
+        if self.viewmodel is None:
+            return
+        if not self.viewmodel.flush():
+            self._autosave.start()
+        if getattr(self, "subject", None) is not None:
+            self.subject.flush()
 
     # ------------------------------------------------- live trim preview
     def _edit_started(self) -> None:

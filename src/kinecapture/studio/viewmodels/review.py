@@ -137,6 +137,8 @@ class ReviewViewModel:
         self.progress: Observable[str] = Observable("", name="progress")
         self.can_undo: Observable[bool] = Observable(False, name="can_undo")
         self.can_redo: Observable[bool] = Observable(False, name="can_redo")
+        #: True while a decision is in memory but not yet on disk.
+        self.dirty: Observable[bool] = Observable(False, name="dirty")
         self.exercise_options: Observable[tuple[tuple[str, str], ...]] = Observable(
             (), name="exercises"
         )
@@ -416,13 +418,24 @@ class ReviewViewModel:
         if self.store is not None and self.store.redo():
             self._refresh()
 
-    def flush(self) -> None:
+    def flush(self) -> bool:
+        """Write the labels. Keeps them in memory if the write fails.
+
+        A failed save must not also lose the work: the store stays dirty, so
+        the next autosave tries again and leaving the screen tries once more.
+        """
         if self.store is None:
-            return
+            return True
         try:
             self.store.flush()
         except (KineCaptureError, OSError) as exc:
-            self.message.emit(from_error(exc, headline="Etiketler kaydedilemedi."))
+            self.message.emit(
+                from_error(exc, headline="Etiketler kaydedilemedi.")
+            )
+            self.dirty.set(self.store.is_dirty)
+            return False
+        self.dirty.set(self.store.is_dirty)
+        return True
 
     # ------------------------------------------------------------- vocabulary
     def create_exercise(self, name: str) -> Optional[str]:
@@ -549,6 +562,7 @@ class ReviewViewModel:
         self.progress.set(f"{ready}/{total} hareket hazır" if total else "Henüz hareket yok")
         self.can_undo.set(store.can_undo)
         self.can_redo.set(store.can_redo)
+        self.dirty.set(store.is_dirty)
 
     def movement_row(self, sample_id: str) -> Optional[MovementRow]:
         return next((r for r in self.movements.value if r.sample_id == sample_id), None)
