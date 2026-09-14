@@ -100,6 +100,8 @@ class DatasetPage(StudioPage):
         bar.addWidget(self.search, 1)
 
         self.filter_box = QComboBox()
+        self.filter_box.setAccessibleName("Durum filtresi")
+        self.filter_box.setToolTip("Listeyi hazırlık durumuna göre daraltır")
         for key, text in FILTERS:
             self.filter_box.addItem(text, key)
         self.filter_box.currentIndexChanged.connect(lambda _i: self._apply_filter())

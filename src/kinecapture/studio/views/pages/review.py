@@ -387,6 +387,12 @@ class ReviewPage(StudioPage):
         class_row = QHBoxLayout()
         class_row.setSpacing(tokens.metric("KcSpacingSm"))
         self.exercise_combo = QComboBox()
+        # Named explicitly: it is empty until a project's vocabulary loads, so
+        # its contents cannot be what announces it.
+        self.exercise_combo.setAccessibleName("Hareket sınıfı")
+        self.exercise_combo.setToolTip(
+            "Seçili hareketin sınıfı. 1-9 tuşları ilk dokuz sınıfı atar."
+        )
         self.exercise_combo.activated.connect(self._exercise_chosen)
         class_row.addWidget(self.exercise_combo, 1)
         self.new_exercise_button = QPushButton("Yeni…")
@@ -408,10 +414,12 @@ class ReviewPage(StudioPage):
         bounds.setSpacing(tokens.metric("KcSpacingSm"))
         bounds.addWidget(label("Başlangıç"))
         self.movement_start = QSpinBox()
+        self.movement_start.setAccessibleName("Hareket başlangıç karesi")
         self.movement_start.setToolTip("Değiştirirken görüntü o kareye gider")
         bounds.addWidget(self.movement_start)
         bounds.addWidget(label("Bitiş"))
         self.movement_end = QSpinBox()
+        self.movement_end.setAccessibleName("Hareket bitiş karesi")
         bounds.addWidget(self.movement_end)
         column.addLayout(bounds)
         self.movement_start.valueChanged.connect(self._movement_bounds_typed)
@@ -419,6 +427,7 @@ class ReviewPage(StudioPage):
 
         column.addWidget(label("Not"))
         self.movement_note = QPlainTextEdit()
+        self.movement_note.setAccessibleName("Hareket notu")
         self.movement_note.setMaximumHeight(56)
         column.addWidget(self.movement_note)
 
@@ -464,6 +473,8 @@ class ReviewPage(StudioPage):
         class_row = QHBoxLayout()
         class_row.setSpacing(tokens.metric("KcSpacingSm"))
         self.error_combo = QComboBox()
+        self.error_combo.setAccessibleName("Hata sınıfı")
+        self.error_combo.setToolTip("Seçili hata aralığının sınıfı.")
         self.error_combo.activated.connect(self._error_class_chosen)
         class_row.addWidget(self.error_combo, 1)
         self.new_error_button = QPushButton("Yeni…")
@@ -473,6 +484,7 @@ class ReviewPage(StudioPage):
 
         column.addWidget(label("Eklem durumu"))
         self.joint_status_combo = QComboBox()
+        self.joint_status_combo.setAccessibleName("Eklem durumu")
         for status, text in _JOINT_STATUS_TEXT:
             self.joint_status_combo.addItem(text, status.value)
         self.joint_status_combo.activated.connect(self._commit_error)
@@ -488,9 +500,11 @@ class ReviewPage(StudioPage):
         bounds.setSpacing(tokens.metric("KcSpacingSm"))
         bounds.addWidget(label("Başlangıç"))
         self.error_start = QSpinBox()
+        self.error_start.setAccessibleName("Hata aralığı başlangıç karesi")
         bounds.addWidget(self.error_start)
         bounds.addWidget(label("Bitiş"))
         self.error_end = QSpinBox()
+        self.error_end.setAccessibleName("Hata aralığı bitiş karesi")
         bounds.addWidget(self.error_end)
         column.addLayout(bounds)
         self.error_start.valueChanged.connect(self._error_bounds_typed)
@@ -498,6 +512,7 @@ class ReviewPage(StudioPage):
 
         column.addWidget(label("Not"))
         self.error_note = QPlainTextEdit()
+        self.error_note.setAccessibleName("Hata aralığı notu")
         self.error_note.setMaximumHeight(48)
         column.addWidget(self.error_note)
 

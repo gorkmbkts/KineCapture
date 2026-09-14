@@ -877,3 +877,42 @@ uygulamanın hiçbir yerde bunu sormamasının sebebi bu. Test bunu açıkça
 gösteriyor: aynı dosya için `path_exists()` `True`, `Path.exists()` `False`.
 
 **Testler**: `test_studio_robustness.py` (9).
+
+### F14 sonucu (2026-09-14)
+
+Cila. Üç tür denetim, hepsi testle sabit (`test_studio_polish.py`, 68 test).
+
+**Hiçbir şey yokken de çizilir.** Yeni parçaların hepsi boş kayıt, tek karelik
+kayıt, tamamı NaN iskelet ve kullanılamayacak kadar küçük bir alanla
+çiziliyor — bunlar gerçek bir oturumun kötü gününde ulaştığı durumlar. Boş
+kalan yer boş bırakılmıyor, **nedeni yazılıyor**.
+
+**Renk asla tek sinyal değil.** `READINESS_TEXT`, `VERDICT_TEXT`, `REFUSAL_TEXT`
+sözlükleri kendi enum'larıyla birebir eşleşiyor ve hepsi dolu; bir durumu
+yalnız renkle anlatan yer kalmadı. Hareket satırı da durumunu kelimeyle
+taşıyor ("Squat · hatalı").
+
+**Klavye ve okunabilirlik.** Her ekrandaki her denetim klavyeyle erişilebilir
+ve kendini tanıtıyor (metin, ipucu veya erişilebilir ad). Bu test iki gerçek
+açık buldu: Etiketleme'deki sınıf açılır kutuları proje sözlüğü yüklenene
+kadar boş oldukları için **hiçbir şey duyurmuyorlardı**; İşlenen Videolar ve
+Veri Seti filtreleri de adsızdı. Hepsine erişilebilir ad verildi.
+
+**Ölçek** (gerçek fontlarla, `QT_QPA_PLATFORM=windows`):
+
+| Ekran | En küçük | %100 | %125 | %150 | %200 (1366×768) |
+|---|---|---|---|---|---|
+| Yakalama | 802×406 | ✓ | ✓ | ✓ | taşar |
+| Etiketleme | 822×500 | ✓ | ✓ | ✓ | taşar |
+| İşlenen Videolar | 359×417 | ✓ | ✓ | ✓ | taşar |
+| Diğer beş ekran | ≤541×352 | ✓ | ✓ | ✓ | ✓ |
+
+1366×768 bir dizüstünde %100/%125/%150 hepsi sığıyor. %200 o panelde
+683×384 mantıksal alan bırakıyor ve üç ekran sığmıyor; %200 normalde yüksek
+çözünürlüklü bir ekranda kullanılır ve orada (4K'da 1920×1080 mantıksal alan)
+**hepsi sığıyor** — ayrı bir testle sabit. Bu sınır gizlenmiyor, yazılıyor.
+
+**Kontrast** (WCAG): her temada `KcTextPrimary` üç yüzeyin hepsinde ≥ 4,5;
+ikincil metin, üç durum rengi ve odak halkası ≥ 3,0. Stil şablonunda `:focus`
+kuralı olduğu da doğrulanıyor — klavyeyle çalışmak, nerede olduğunu görmeyi
+gerektirir.

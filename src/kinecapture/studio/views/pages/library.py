@@ -140,6 +140,8 @@ class LibraryPage(StudioPage):
         top = QHBoxLayout()
         top.setSpacing(tokens.metric("KcSpacingMd"))
         self.filter_box = QComboBox()
+        self.filter_box.setAccessibleName("Sürüm filtresi")
+        self.filter_box.setToolTip("Listeyi duruma göre daraltır")
         self.search = QLineEdit()
         self.search.setPlaceholderText("Ara")
         self.search.setClearButtonEnabled(True)
