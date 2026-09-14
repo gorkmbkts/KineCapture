@@ -31,6 +31,8 @@ from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import CaptureViewModel
 from kinecapture.studio.viewmodels.library import LibraryViewModel
+from kinecapture.studio.viewmodels.dataset import DatasetViewModel
+from kinecapture.studio.viewmodels.export import ExportViewModel
 from kinecapture.studio.viewmodels.review import ReviewViewModel
 from kinecapture.studio.viewmodels.processing import ProcessingViewModel
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
@@ -247,6 +249,18 @@ class StudioWindow(QMainWindow, BoundView):
             viewmodel.open_for_review.subscribe(self._review_version)
         elif key == "review":
             viewmodel = ReviewViewModel(self.viewmodel.session, runner=self.runner)
+        elif key == "dataset":
+            viewmodel = DatasetViewModel(self.viewmodel.session, runner=self.runner)
+        elif key == "export":
+            viewmodel = ExportViewModel(self.viewmodel.session, runner=self.runner)
+            # The set of versions to consider is the library's; building it a
+            # second time here would be a second answer to the same question.
+            library = self._viewmodels.get("library")
+            if library is None:
+                library = LibraryViewModel(self.viewmodel.session, runner=self.runner)
+                library.open_for_review.subscribe(self._review_version)
+                self._viewmodels["library"] = library
+            page.use_library(library)
         elif key == "settings":
             viewmodel = SettingsViewModel(self._settings_service)
         else:  # pragma: no cover - every attachable page is listed above

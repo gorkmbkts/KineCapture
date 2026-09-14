@@ -17,6 +17,8 @@ from kinecapture.studio.viewmodels.navigation import Destination
 
 from .base import PlaceholderPage, StudioPage
 from .capture import CapturePage
+from .dataset import DatasetPage
+from .export import ExportPage
 from .library import LibraryPage
 from .processing import ProcessingPage
 from .projects import ProjectsPage
@@ -30,6 +32,8 @@ PAGE_TYPES: dict[str, type[StudioPage]] = {
     "library": LibraryPage,
     "processing": ProcessingPage,
     "review": ReviewPage,
+    "export": ExportPage,
+    "dataset": DatasetPage,
     "settings": SettingsPage,
 }
 
@@ -44,6 +48,8 @@ def build_page(
 __all__ = [
     "PAGE_TYPES",
     "CapturePage",
+    "DatasetPage",
+    "ExportPage",
     "LibraryPage",
     "PlaceholderPage",
     "ProcessingPage",

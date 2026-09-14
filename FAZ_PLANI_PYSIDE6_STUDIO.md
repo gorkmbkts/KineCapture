@@ -764,3 +764,52 @@ adımı tüketmiyor, yeniden tarama eski yanıtı taşımıyor.
 üretilemedi (iki beden temiz izleniyor, tracker hiç kararsız kalmıyor), bu
 yüzden belirsiz aralık akışı sentetik akışlarla test edildi. Gerçek ZED
 kaydıyla iki kişili doğrulama hâlâ açık.
+
+### F11 sonucu (2026-09-14)
+
+Veri Seti + Dışa Aktarım. Bu, bir etiket hatasının kalıcı hâle geldiği son
+nokta: paket yazıldıktan sonra model onunla eğitiliyor ve etiketlere bir daha
+bakan olmuyor.
+
+**`export/canonical.py` — dört kapı**
+
+1. İşleme sürümü tamamlanmış **ve terfi etmiş** olmalı; türetilmiş dosyalar
+   kendi checksum'ına uymalı.
+2. Sürümün sporcusu seçilmiş ve **her belirsiz aralık yanıtlanmış** olmalı.
+3. Etiket belgesi o sürüme karşı doğrulanmalı — her çapa gerçek bir kareye
+   çözülmeli, her hata aralığı kendi hareketinin içinde olmalı.
+4. Her hareket hazır olmalı: sınıflı, onaylı, yarım hata aralığı olmadan.
+
+**Sessizce hiçbir şey dışa aktarılmaz.** Reddedilen sürüm pakete
+`refused_versions` olarak nedeniyle birlikte yazılıyor — "bu sporcu veri
+setinde neden yok" sorusu paketin kendisinden yanıtlanabilmeli.
+
+Diziler **dilimleniyor, yeniden hesaplanmıyor**; sürüm özellikleri bütün kayıt
+üzerinde hesaplamıştı ve pencereyi yalıtılmış hâlde yeniden hesaplamak aynı
+şey değil. Manifest hangisinin olduğunu yazıyor. Hata aralıkları örneğin
+kendi başlangıcına **göreli** ve iki ucu da dahil; mutlak çapalar da girdide
+duruyor, böylece ikisi her zaman karşılaştırılabilir.
+
+Paket atomik: staging dizinine yazılıp sonuncu adımda yeniden adlandırılıyor.
+Yarıda kalan bir dışa aktarım, üzerinde eğitim yapılabilecek yarım bir sürüm
+bırakmıyor (testle sabit).
+
+**Ekranlar**
+
+- **Veri Seti**: her sürüm için hareket/hazır sayısı, hata aralığı, sporcu
+  durumu ve **neyi beklediği**. Sürüm açmıyor, sidecar okuyor — bu yüzden
+  "hazır" değil **"hazır görünüyor"** diyor. Yetkili kontrol Dışa Aktarım'da.
+- **Dışa Aktarım**: önce kontrol, sonra yazma. Kontrol her sürümü gerçekten
+  açıp checksum ve etiket doğrulaması yapıyor; kullanıcı **yazmadan önce**
+  hangi sürümün girip hangisinin girmediğini ve nedenini görüyor. Reddedilen
+  satır listeden düşmüyor.
+
+**Testler**: `test_export_canonical.py` (14) + `test_studio_export_gui.py` (7).
+Ağırlık yine reddetme ve içerik doğruluğunda: sporcusu seçilmemiş sürüm pakete
+giremiyor, sınıfsız hata aralığı bütün sürümü bloke ediyor, örnek tam olarak
+işaretlenen kareleri taşıyor (5..20 → 16 kare), hata aralığı göreli indeksleri
+kapsayıcı, yoğun hedef aralıkla birebir örtüşüyor, sınıf indeksleri iki ayrı
+derlemede aynı, başarısız derleme hiçbir iz bırakmıyor.
+
+**Not**: F2'den beri koşan "yapılmamış ekran yer tutucu gösterir" testi artık
+ters çevrildi — bütün destinasyonların gerçek bir ekranı olduğunu doğruluyor.

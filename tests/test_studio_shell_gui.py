@@ -126,22 +126,25 @@ def test_window_title_names_the_open_screen(window, app: QApplication) -> None:
     assert "Verileri Hesapla" in window.windowTitle()
 
 
-def test_unbuilt_screens_say_which_phase_delivers_them(window, app: QApplication) -> None:
-    """A screen that is not built yet stands in its place and names its phase.
+def test_every_destination_has_a_real_screen(window, app: QApplication) -> None:
+    """Every step in the workflow opens something you can work in.
 
-    Asks the registry which destinations are still pending rather than naming
-    one, so delivering a screen does not break this test.
+    This replaced the placeholder test that ran from F2 to F10. While screens
+    were still being delivered it asked the registry which ones were pending
+    and checked that each stood in its own place naming its phase; now that
+    the last one has landed, the useful invariant is the opposite one - that
+    nothing in the navigation leads to a stub.
     """
     from kinecapture.studio.views.pages import PAGE_TYPES
 
     pending = [d for d in window.viewmodel.destinations if d.key not in PAGE_TYPES]
-    assert pending, "her ekran yapıldı; bu test kaldırılabilir"
-    destination = pending[0]
-    window.viewmodel.navigate(destination.key)
-    app.processEvents()
-    page = window.page(destination.key)
-    assert isinstance(page, PlaceholderPage)
-    assert destination.phase in page.accessibleDescription()
+    assert pending == [], f"hâlâ yer tutucu: {[d.key for d in pending]}"
+
+    for destination in window.viewmodel.destinations:
+        window.viewmodel.navigate(destination.key)
+        app.processEvents()
+        page = window.page(destination.key)
+        assert not isinstance(page, PlaceholderPage), destination.key
 
 
 # ------------------------------------------------------------------ theming
