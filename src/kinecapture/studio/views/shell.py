@@ -10,6 +10,7 @@ Pages are built lazily: opening the application constructs one page, not eight.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import Qt, QTimer
@@ -17,9 +18,12 @@ from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
+    QHBoxLayout,
     QMainWindow,
+    QMenu,
     QSplitter,
     QStackedWidget,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -31,6 +35,16 @@ from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import CaptureViewModel
 from kinecapture.studio.viewmodels.library import LibraryViewModel
+from kinecapture.studio.services.inspectors import (
+    LogBuffer,
+    device_sections,
+    diagnostics_sections,
+    environment_sections,
+    log_file_section,
+    provenance_sections,
+    raw_parameter_sections,
+    source_audit_sections,
+)
 from kinecapture.studio.viewmodels.dataset import DatasetViewModel
 from kinecapture.studio.viewmodels.export import ExportViewModel
 from kinecapture.studio.viewmodels.review import ReviewViewModel
@@ -43,6 +57,12 @@ from .auth import AuthView
 from .contextbar import ContextBar
 from .navbar import NavBar
 from .pages import StudioPage, build_page
+from .windows import WINDOW_TITLES, LogWindow, ToolWindow
+
+
+def log_sections():  # noqa: ANN201 - tuple[Section, ...]
+    """Where the log file is; the lines come from the buffer."""
+    return (log_file_section(), *environment_sections())
 from .qt_bridge import BoundView
 from .tasks import QtTaskRunner
 from .widgets import label, separator
@@ -74,6 +94,9 @@ class StudioWindow(QMainWindow, BoundView):
         #: Set by the library when a version is chosen; read by the labelling
         #: screen when it opens. F8 turns this into the real handover.
         self.pending_review: object = None
+        #: Helper windows, built on first open and reused afterwards.
+        self._tool_windows: dict[str, object] = {}
+        self.log_buffer = LogBuffer().install()
         self._settings_service = SettingsService(viewmodel.session.config)
         self.auth_viewmodel = AuthViewModel(viewmodel.session)
 
@@ -125,8 +148,13 @@ class StudioWindow(QMainWindow, BoundView):
         outer.addWidget(self.splitter, 1)
 
         outer.addWidget(separator())
+        bottom = QHBoxLayout()
+        bottom.setContentsMargins(0, 0, 0, 0)
+        bottom.setSpacing(0)
         self.nav_bar = NavBar(self.viewmodel.destinations, self._tokens, self)
-        outer.addWidget(self.nav_bar)
+        bottom.addWidget(self.nav_bar, 1)
+        bottom.addWidget(self._build_tools_button())
+        outer.addLayout(bottom)
 
         # The gate: nothing of the workspace is built, shown or reachable
         # before somebody is signed in.
@@ -136,6 +164,84 @@ class StudioWindow(QMainWindow, BoundView):
         self.gate.addWidget(self.auth_view)
         self.gate.addWidget(self.shell_body)
         self.setCentralWidget(self.gate)
+
+    def _build_tools_button(self) -> QToolButton:
+        """The six helper windows, behind one button.
+
+        Out of the main flow on purpose: none of them is part of doing the
+        work, and all of them are wanted at the moment something looks wrong.
+        """
+        button = QToolButton(self)
+        button.setText("Araçlar")
+        button.setToolTip("Log, tanılama, cihaz, denetim, köken ve parametre pencereleri")
+        button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        button.setAutoRaise(True)
+        menu = QMenu(button)
+        for key, (title, subtitle) in WINDOW_TITLES.items():
+            action = menu.addAction(title)
+            action.setToolTip(subtitle)
+            action.triggered.connect(
+                lambda _checked=False, k=key: self.open_tool_window(k)
+            )
+        button.setMenu(menu)
+        self.tools_button = button
+        return button
+
+    def open_tool_window(self, key: str):  # noqa: ANN201 - ToolWindow
+        """Open (or raise) one helper window. Modeless: nothing is blocked."""
+        existing = self._tool_windows.get(key)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return existing
+
+        if key == "log":
+            window = LogWindow(self._tokens, self.log_buffer, log_sections)
+        else:
+            window = ToolWindow(key, self._tokens, self._tool_provider(key))
+        self._tool_windows[key] = window
+        window.show()
+        return window
+
+    def _tool_provider(self, key: str):  # noqa: ANN201
+        """What each window reads, resolved fresh every refresh."""
+        if key == "diagnostics":
+            return lambda: diagnostics_sections(self._diagnostics())
+        if key == "device":
+            return lambda: device_sections(self._camera_info())
+        if key == "audit":
+            return lambda: source_audit_sections(self._selected_run())
+        if key == "provenance":
+            return lambda: provenance_sections(self._selected_run())
+        if key == "parameters":
+            return lambda: raw_parameter_sections(self._selected_run())
+        return environment_sections
+
+    def _diagnostics(self):  # noqa: ANN201
+        from kinecapture.core.diagnostics import collect_diagnostics
+
+        try:
+            return collect_diagnostics(self.viewmodel.session.config)
+        except Exception as exc:  # noqa: BLE001 - a helper window never crashes
+            logger.warning("Tanılama toplanamadı: %s", exc)
+            return None
+
+    def _camera_info(self):  # noqa: ANN201
+        capture = self._viewmodels.get("capture")
+        service = getattr(capture, "service", None)
+        return getattr(service, "camera_info", None) if service else None
+
+    def _selected_run(self) -> Optional[Path]:
+        """The version the user is looking at, whichever screen they are on."""
+        review = self._viewmodels.get("review")
+        session = getattr(review, "review", None)
+        if session is not None:
+            return Path(session.dataset.directory)
+        library = self._viewmodels.get("library")
+        selected = getattr(library, "selected", None)
+        row = selected.value if selected is not None else None
+        return Path(row.directory) if row is not None else None
 
     def _build_inspector(self) -> QFrame:
         frame = QFrame(self)

@@ -813,3 +813,33 @@ derlemede aynı, başarısız derleme hiçbir iz bırakmıyor.
 
 **Not**: F2'den beri koşan "yapılmamış ekran yer tutucu gösterir" testi artık
 ters çevrildi — bütün destinasyonların gerçek bir ekranı olduğunu doğruluyor.
+
+### F12 sonucu (2026-09-14)
+
+Altı yardımcı pencere: **Log Konsolu · Tanılama · Cihaz Bilgisi · Kaynak
+Denetimi · Köken · Ham Parametreler.**
+
+- Hepsi **modeless ve üst düzey pencere** (parent'sız): ikinci monitöre
+  taşınabiliyor, ana akışı engellemiyor, hiçbiri bir şey değiştirmiyor.
+- İçerik `studio/services/inspectors.py` içinde **Qt'siz** toplanıyor; pencere
+  yalnız satırları gösteriyor. Bu yüzden testler Qt açmadan içeriği
+  doğrulayabiliyor.
+- Her pencere tek tıkla **panoya metin** olarak kopyalanıyor — bu pencereleri
+  açmanın olağan sebebi, içindekini birine göndermek.
+- Eksik değer `—` ile işaretleniyor; makul görünen bir varsayılanla
+  doldurulmuyor. Bu pencerelerin bütün değeri inanılabilir olmalarında.
+
+**Öne çıkanlar**
+
+- **Köken**: etiketlerin bağlı olduğu ham parmak izi, sürümün sorunları ve —
+  derinlik varsa — `reconstructed_offline` uyarısı. SVO tekrar oynatıldığında
+  kayıt anındaki derinlik geri gelmiyor; pencere bunu ölçüm gibi göstermiyor.
+- **Kaynak Denetimi**: `checksums.json` yeniden hesaplanıyor; değişen dosya
+  adıyla listeleniyor. Manifest yoksa "doğrulanamaz" diyor.
+- **Log Konsolu**: uygulamanın kendi kaydedicisinden okuyor (dosya olmasa da
+  çalışır), halka tampon 2000 satırda sabit, seviye ve metin filtresi var.
+  **Uygulamanın kayıt seviyesini pencerenin kendisi değiştirmiyor**; bunun
+  yerine hangi seviyede olduğunu yazıyor, böylece boş bir konsol gizemli
+  olmuyor.
+
+**Testler**: `test_studio_windows.py` (19).
