@@ -53,6 +53,12 @@ ICON_NAMES: dict[str, str] = {
     "live": "circle-dot",
     "play": "play",
     "pause": "pause",
+    # Transport. Five controls that used to be three "▶" characters and two
+    # bracketed ones: at 16 px nobody could tell "oynat" from "bir kare ileri".
+    "first": "skip-back",
+    "last": "skip-forward",
+    "step-back": "chevron-left",
+    "step-forward": "chevron-right",
 }
 
 

@@ -33,6 +33,22 @@ def qt_app():
     return QApplication.instance() or QApplication([])
 
 
+@pytest.fixture(autouse=True)
+def _legacy_stylesheet(qt_app):
+    """Measure the legacy interface against its own stylesheet, not the Studio's.
+
+    ``QApplication.setStyleSheet`` is process-wide. When a Studio test has run
+    first in the same process, every button in the process is still wearing the
+    Studio's padding - measured at 20px tall becoming 46px - and a layout
+    budget asserted here would be measuring the wrong interface. Only one GUI
+    is ever up in the real application; this restores that condition.
+    """
+    previous = qt_app.styleSheet()
+    qt_app.setStyleSheet("")
+    yield
+    qt_app.setStyleSheet(previous)
+
+
 def _mouse_event(kind, x: float, y: float) -> QMouseEvent:
     """The non-deprecated overload, which also wants a global position."""
     point = QPointF(x, y)

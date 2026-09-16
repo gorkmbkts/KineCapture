@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 from kinecapture.core.errors import KineCaptureError
+from kinecapture.dataset.deletion import ProjectDeletionService
 from kinecapture.dataset.summary_index import TakeIndex
 from kinecapture.studio.services.messages import Message, Severity, from_error
 from kinecapture.studio.services.projects import (
@@ -51,25 +52,77 @@ class ProjectsViewModel:
         )
         self.busy: Observable[bool] = Observable(False, name="busy")
         self.summary: Observable[str] = Observable("", name="summary")
+        #: Which of the four situations the list is in. "boş" and "giriş
+        #: yapılmadı" and "okunamadı" are different statements, and only the
+        #: user can tell which one explains an empty screen.
+        self.state: Observable[str] = Observable("idle", name="projects_state")
+        #: True while a deletion is running. The list stays on screen; only
+        #: the actions are held, because erasing is not instant.
+        self.deleting: Observable[bool] = Observable(False, name="deleting")
         self.message: Event[Message] = Event()
+        #: The user the current list belongs to. A list loaded for nobody is
+        #: not a list of no projects.
+        self._loaded_for: Optional[str] = None
+
+    @property
+    def loaded_for(self) -> Optional[str]:
+        return self._loaded_for
+
+    @property
+    def current_user_id(self) -> str:
+        user = self._session.user
+        return user.user_id if user is not None else ""
 
     # --------------------------------------------------------------- loading
     def reload_projects(self) -> None:
+        """Read the projects this user may open.
+
+        Called again after signing in. The audit found a list loaded before
+        authentication - which can only ever be empty - being kept as the
+        answer afterwards, so a real project looked like no projects at all.
+        """
         self._service.user = self._session.user
+        if self._session.user is None:
+            self._loaded_for = None
+            self.projects.force(())
+            self.participants.force(())
+            self.sessions.force(())
+            self.state.set("signed_out")
+            self.summary.set("Projeleri görmek için giriş yapın.")
+            return
+        self.state.set("loading")
         try:
             rows = tuple(self._service.projects())
         except KineCaptureError as exc:
+            self.state.set("error")
+            self.summary.set("Projeler listelenemedi.")
             self.message.emit(from_error(exc, headline="Projeler listelenemedi."))
             return
+        self._loaded_for = self.current_user_id
         self.projects.force(rows)
         current = self.selected_project.value
         if rows and current not in {row.project_id for row in rows}:
+            self.state.set("ready")
             self.open_project(rows[0].project_id)
         elif not rows:
             self.selected_project.set("")
             self.participants.force(())
             self.sessions.force(())
-            self.summary.set("Henüz proje yok.")
+            self.state.set("empty")
+            self.summary.set("Bu hesapta proje yok. 'Yeni proje' ile başlayın.")
+        else:
+            self.state.set("ready")
+
+    def refresh_all(self, *, force: bool = True) -> None:
+        """What the "Yenile" button promises: the whole screen, not part of it.
+
+        The old button rebuilt only the open project's index, so a project
+        registered elsewhere - or missed because the list was loaded before
+        sign-in - never appeared however many times it was pressed.
+        """
+        self.reload_projects()
+        if self._session.workspace is not None:
+            self.refresh_index(force=force)
 
     def open_project(self, project_id: str) -> None:
         """Open a project and start the index refresh that fills in its counts."""
@@ -99,6 +152,7 @@ class ProjectsViewModel:
             return
         self.selected_project.set(project_id)
         self.selected_participant.set("")
+        self._session.select_participant("")
         self.refresh_index()
 
     def refresh_index(self, *, force: bool = False) -> None:
@@ -162,7 +216,14 @@ class ProjectsViewModel:
 
     # -------------------------------------------------------------- selection
     def select_participant(self, participant_id: str) -> None:
+        """Choose whose data the whole application is working on.
+
+        Written to the session rather than kept here: Capture asks the session
+        who the recording belongs to, and two independent selections is how a
+        take ends up filed under the wrong participant.
+        """
         self.selected_participant.set(participant_id)
+        self._session.select_participant(participant_id)
         self._refill()
 
     # ---------------------------------------------------------------- actions
@@ -209,6 +270,88 @@ class ProjectsViewModel:
                 detail="Kod proje içinde anonim ve değişmezdir.",
             )
         )
+        return True
+
+    # ----------------------------------------------------------------- delete
+    def deletion_preflight(self, project_id: str):  # noqa: ANN201 - TargetReport
+        """Check what deleting this project would mean, changing nothing.
+
+        Returns the report, or ``None`` when it cannot even be inspected. The
+        caller shows it to the user *before* asking them to agree: a
+        confirmation that cannot say what is about to be erased is not consent.
+        """
+        user = self._session.user
+        if user is None:
+            return None
+        service = ProjectDeletionService(
+            self._session.identity, Path(self._session.config.dataset_root)
+        )
+        try:
+            return service.preflight(user, project_id)
+        except (KineCaptureError, PermissionError, OSError) as exc:
+            self.message.emit(from_error(exc, headline="Proje silinemez."))
+            return None
+
+    def delete_project(self, project_id: str) -> bool:
+        """Erase one project for good. Runs off the calling thread.
+
+        The row is found first so the message can name the project after its
+        folder has gone. Everything dangerous is the deletion service's.
+        """
+        user = self._session.user
+        if user is None:
+            return False
+        row = next(
+            (r for r in self.projects.value if r.project_id == project_id), None
+        )
+        name = row.name if row is not None else project_id
+        service = ProjectDeletionService(
+            self._session.identity, Path(self._session.config.dataset_root)
+        )
+        self.deleting.set(True)
+
+        def work():  # noqa: ANN202
+            return service.delete(user, project_id)
+
+        def done(result) -> None:  # noqa: ANN001
+            self.deleting.set(False)
+            # The open project may be the one that just went.
+            if self.selected_project.value == project_id:
+                self._session.close_project()
+                self.selected_project.set("")
+                self.participants.force(())
+                self.sessions.force(())
+            self.reload_projects()
+            if result.remaining:
+                self.message.emit(
+                    Message(
+                        headline=f"{name} kaydı silindi; bazı dosyalar kaldı.",
+                        severity=Severity.WARNING,
+                        detail=(
+                            "Proje listeden kaldırıldı, fakat bazı dosyalar "
+                            "silinemedi. Klasör başka bir program tarafından "
+                            "kullanılıyor olabilir."
+                        ),
+                        code="project_partially_deleted",
+                        technical={"kalan": list(result.remaining)[:10]},
+                    )
+                )
+                return
+            self.message.emit(
+                Message(
+                    headline=f"Proje silindi: {name}",
+                    severity=Severity.INFO,
+                    detail=result.summary if hasattr(result, "summary") else "",
+                    code="project_deleted",
+                )
+            )
+
+        def failed(exc: BaseException) -> None:
+            self.deleting.set(False)
+            self.message.emit(from_error(exc, headline="Proje silinemedi."))
+            self.reload_projects()
+
+        self._runner.run(work, done, failed)
         return True
 
     @property

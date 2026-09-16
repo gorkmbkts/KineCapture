@@ -72,6 +72,15 @@ class MovementRow:
     error_count: int
     unclassified_errors: int
     excluded: bool
+    #: The class's position in the project vocabulary, which is what gives it
+    #: a colour. ``-1`` when no class has been chosen. Stable across sessions
+    #: because the vocabulary order is stored with the project.
+    colour_index: int = -1
+
+    @property
+    def code(self) -> str:
+        """A short form for a box too narrow for the full class name."""
+        return self.exercise.upper()[:4]
 
     @property
     def status(self) -> str:
@@ -100,6 +109,11 @@ class ErrorRow:
     error_label: str
     joint_status: JointStatus
     roles: tuple[str, ...]
+    colour_index: int = -1
+
+    @property
+    def code(self) -> str:
+        return self.error_class.upper()[:4]
 
     @property
     def status(self) -> str:
@@ -147,25 +161,74 @@ class ReviewViewModel:
         )
         self.message: Event[Message] = Event()
         self.frame_changed: Event[int] = Event()
+        #: Fired once the version is really loaded, carrying its directory.
+        #: Everything a screen has to prepare hangs off this, never off a
+        #: timer: the load runs on a worker thread and a ``singleShot(0)``
+        #: fires long before it has finished.
+        self.opened: Event[str] = Event()
+        #: Fired when the load failed, carrying the directory that failed, so
+        #: the screen can offer to try again instead of looking empty.
+        self.open_failed: Event[str] = Event()
+        self.open_error: Observable[str] = Observable("", name="open_error")
+
+        #: Which version this viewmodel is showing (or trying to).
+        self._directory = ""
+        #: Bumped on every open and on close. A result carrying an old token
+        #: belongs to a version the user has already navigated away from and is
+        #: dropped rather than allowed to overwrite the current one.
+        self._open_token = 0
+
+    @property
+    def directory(self) -> str:
+        """The version currently open, or being opened. Empty when none."""
+        return self._directory
+
+    @property
+    def is_open(self) -> bool:
+        return self.review is not None
 
     # ------------------------------------------------------------------ open
     def open_version(self, directory: str) -> None:
         """Load a version and its labels. Anything already open is flushed first."""
         self.close()
+        self._open_token += 1
+        token = self._open_token
+        self._directory = str(directory)
+        self.open_error.set("")
         self.busy.set(True)
 
         def work() -> ReviewSession:
             return ReviewSession.open(directory)
 
         def done(review: ReviewSession) -> None:
+            if token != self._open_token:
+                # A later open (or a close) won the race. Release what this one
+                # produced instead of showing B's screen filled with A's data.
+                try:
+                    review.close()
+                except Exception:  # noqa: BLE001 - discarding, never reported
+                    logger.debug("Geçersiz açılış sonucu kapatılamadı", exc_info=True)
+                return
             self.busy.set(False)
             self._attach(review)
+            self.opened.emit(self._directory)
 
         def failed(exc: BaseException) -> None:
+            if token != self._open_token:
+                return
             self.busy.set(False)
+            self.open_error.set(str(exc) or "Sürüm açılamadı.")
             self.message.emit(from_error(exc, headline="Sürüm açılamadı."))
+            self.open_failed.emit(self._directory)
 
         self._runner.run(work, done, failed)
+
+    def retry_open(self) -> bool:
+        """Try the last requested version again. Used by the error state."""
+        if not self._directory:
+            return False
+        self.open_version(self._directory)
+        return True
 
     def _attach(self, review: ReviewSession) -> None:
         self.review = review
@@ -206,10 +269,25 @@ class ReviewViewModel:
                 self.message.emit(from_error(exc, headline="Etiketler kaydedilemedi."))
         if self.review is not None:
             self.review.close()
+        # Any open still in flight belongs to the version being left behind.
+        self._open_token += 1
         self.review = None
         self.store = None
         self.movements.force(())
         self.errors.force(())
+        self.selected_movement.set("")
+        self.selected_error.set("")
+        self.playing.set(False)
+        self.busy.set(False)
+        # The frame count is what every screen uses to decide whether there is
+        # anything to edit, so it has to go back to zero with the data.
+        self.frames.set(0)
+        self.position.set(0)
+        self.title.set("")
+        self.progress.set("")
+        self.can_undo.set(False)
+        self.can_redo.set(False)
+        self.dirty.set(False)
 
     # ------------------------------------------------------------- transport
     def seek(self, position: int) -> None:
@@ -502,6 +580,21 @@ class ReviewViewModel:
     def _exercise_label(self, code: str) -> str:
         return self._schema.label_for_exercise(code)
 
+    def class_index(self, code: str, *, fault: bool = False) -> int:
+        """Where a class sits in the project vocabulary, or ``-1``.
+
+        The position is what the timeline turns into a colour, so it has to
+        come from something stored with the project: a class must look the
+        same today and next week, on this take and the next one.
+        """
+        if not code:
+            return -1
+        options = self._schema.error_types if fault else self._schema.exercises
+        for index, option in enumerate(options):
+            if option.code == code:
+                return index
+        return -1
+
     def _refresh(self) -> None:
         store = self.store
         if store is None:
@@ -531,6 +624,7 @@ class ReviewViewModel:
                         1 for i in sample.errors if not i.is_classified
                     ),
                     excluded=sample.excluded,
+                    colour_index=self.class_index(sample.exercise),
                 )
             )
             for interval in sample.errors:
@@ -552,6 +646,9 @@ class ReviewViewModel:
                         ),
                         joint_status=interval.joint_status,
                         roles=interval.affected_roles,
+                        colour_index=self.class_index(
+                            interval.error_class, fault=True
+                        ),
                     )
                 )
         movements.sort(key=lambda row: row.start)

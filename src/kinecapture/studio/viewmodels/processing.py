@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Optional
 
 from kinecapture.dataset.summary_index import TakeIndex, TakeSummary, build_index
-from kinecapture.studio.services.messages import Message, Severity, from_error
+from kinecapture.studio.services.messages import Action, Message, Severity, from_error
 from kinecapture.studio.services.processing import (
     Job,
     JobState,
@@ -30,6 +30,11 @@ from .tasks import InlineRunner, TaskRunner
 #: not touch the recording, and an operator must not have to guess that.
 CANCEL_NOTE = "İptal ham kaydı silmez. Kayıt olduğu gibi kalır."
 
+#: A take in this state still has a writer holding its directory. Its frame
+#: count and duration are whatever has been flushed so far, which is why the
+#: audit saw a live recording appear in the queue as "0 kare, 0 saniye".
+OPEN_TAKE_STATE = "recording"
+
 
 class ProcessingViewModel:
     def __init__(
@@ -46,11 +51,59 @@ class ProcessingViewModel:
         self._index: Optional[TakeIndex] = None
 
         self.waiting: Observable[tuple[TakeSummary, ...]] = Observable((), name="waiting")
+        #: Takes a writer still owns. Listed apart from the queue, never in it.
+        self.open_takes: Observable[tuple[TakeSummary, ...]] = Observable(
+            (), name="open_takes"
+        )
         self.jobs: Observable[tuple[Job, ...]] = Observable((), name="jobs")
         self.busy: Observable[bool] = Observable(False, name="busy")
         self.summary: Observable[str] = Observable("", name="summary")
         self.can_pause: Observable[bool] = Observable(pause_supported(), name="can_pause")
+        #: The settings the next job will actually be started with, as one
+        #: line. The audit found "Seçileni işle" starting a run with no
+        #: statement anywhere of what it was about to apply.
+        self.profile_summary: Observable[str] = Observable("", name="profile_summary")
+        self.profile_rows: Observable[tuple[tuple[str, str], ...]] = Observable(
+            (), name="profile_rows"
+        )
         self.message: Event[Message] = Event()
+        #: One per job, when it stops for any reason. The shell uses it to make
+        #: the library and the project counts current without polling them.
+        self.job_finished: Event[Job] = Event()
+
+    # ---------------------------------------------------------------- profile
+    def parameters(self) -> dict:
+        """Exactly what :meth:`start` will pass to the job. One source."""
+        processing = self._settings.processing
+        return {
+            "body_format": processing.body_format,
+            "body_model": processing.body_model,
+            "depth_mode": processing.depth_mode,
+            "store_depth": processing.store_depth,
+            "store_proxy": processing.store_proxy,
+        }
+
+    def refresh_profile(self) -> None:
+        parameters = self.parameters()
+        rows = (
+            ("İskelet biçimi", str(parameters["body_format"])),
+            ("Model", str(parameters["body_model"])),
+            ("Derinlik modu", str(parameters["depth_mode"])),
+            ("Derinlik saklanır", "evet" if parameters["store_depth"] else "hayır"),
+            ("Proxy video", "evet" if parameters["store_proxy"] else "hayır"),
+        )
+        self.profile_rows.force(rows)
+        self.profile_summary.set(
+            " · ".join(
+                (
+                    str(parameters["body_format"]),
+                    str(parameters["body_model"]),
+                    str(parameters["depth_mode"]),
+                    "derinlik saklanır" if parameters["store_depth"] else "derinlik saklanmaz",
+                    "proxy var" if parameters["store_proxy"] else "proxy yok",
+                )
+            )
+        )
 
     # --------------------------------------------------------------- loading
     def reload(self, *, force: bool = False) -> None:
@@ -68,6 +121,7 @@ class ProcessingViewModel:
         def done(index: TakeIndex) -> None:
             self._index = index
             self.busy.set(False)
+            self.refresh_profile()
             self._refill()
 
         def failed(exc: BaseException) -> None:
@@ -79,14 +133,21 @@ class ProcessingViewModel:
     def _refill(self) -> None:
         if self._index is None:
             return
-        waiting = tuple(
+        candidates = [
             take
             for take in self._index
             if not take.is_legacy and not take.complete_runs
-        )
+        ]
+        # A take whose writer has not let go is not a candidate for anything.
+        # Processing it would read a directory that is still being written.
+        open_takes = tuple(t for t in candidates if t.state == OPEN_TAKE_STATE)
+        waiting = tuple(t for t in candidates if t.state != OPEN_TAKE_STATE)
+        self.open_takes.force(open_takes)
         self.waiting.force(waiting)
         done = len(self._index.with_complete_runs())
         parts = [f"{len(waiting)} kayıt işlenmeyi bekliyor", f"{done} kayıt işlenmiş"]
+        if open_takes:
+            parts.append(f"{len(open_takes)} kayıt hâlâ açık (işlenemez)")
         legacy = len(self._index.legacy_takes())
         if legacy:
             parts.append(f"{legacy} eski biçim (yeni arayüz açmaz)")
@@ -94,13 +155,21 @@ class ProcessingViewModel:
 
     # ---------------------------------------------------------------- control
     def start(self, take: TakeSummary) -> bool:
-        parameters = {
-            "body_format": self._settings.processing.body_format,
-            "body_model": self._settings.processing.body_model,
-            "depth_mode": self._settings.processing.depth_mode,
-            "store_depth": self._settings.processing.store_depth,
-            "store_proxy": self._settings.processing.store_proxy,
-        }
+        if take.state == OPEN_TAKE_STATE:
+            self.message.emit(
+                Message(
+                    headline="Bu kayıt hâlâ açık.",
+                    severity=Severity.WARNING,
+                    detail=(
+                        "Kayıt kapanmadan işlenemez. Önce Yakalama ekranından "
+                        "ya da başlıktaki göstergeden kaydı durdurun."
+                    ),
+                    code="take_still_recording",
+                    technical={"take": take.take_id, "state": take.state},
+                )
+            )
+            return False
+        parameters = self.parameters()
         try:
             self.service.start(take, parameters=parameters)
         except (OSError, ValueError) as exc:
@@ -181,12 +250,16 @@ class ProcessingViewModel:
         if not state.is_finished or getattr(job, "_reported", False):
             return
         job._reported = True  # noqa: SLF001 - one message per job, by design
+        self.job_finished.emit(job)
         if state is JobState.COMPLETE:
             self.message.emit(
                 Message(
-                    headline=f"{job.take.take_id} işlendi.",
+                    headline=f"{job.take.participant_id} kaydı işlendi.",
                     severity=Severity.INFO,
                     detail=f"{job.progress.frames_processed} kare.",
+                    code="processing_complete",
+                    technical={"kayıt": job.take.take_id},
+                    actions=(Action("goto:library", "Sonucu incele", primary=True),),
                 )
             )
             self.reload(force=True)
@@ -201,6 +274,7 @@ class ProcessingViewModel:
                     detail=" · ".join(job.progress.issue_texts) or "Ayrıntılar işte.",
                     code="processing_partial",
                     technical={"issues": list(job.progress.issues)},
+                    actions=(Action("goto:library", "Sürümü incele"),),
                 )
             )
             self.reload(force=True)

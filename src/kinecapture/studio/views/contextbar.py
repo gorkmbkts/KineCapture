@@ -11,13 +11,14 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QPushButton, QWidget
+from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QWidget
 
 from kinecapture.studio.services.context import ContextSnapshot
 from kinecapture.studio.theme import ThemeTokens
 
 from . import iconset
-from .widgets import ContextField, separator
+from .brand import CREST_NAME, crest_pixmap
+from .widgets import ContextField, RecordingStrip, separator
 
 
 class ContextBar(QFrame):
@@ -35,7 +36,22 @@ class ContextBar(QFrame):
             tokens.metric("KcSpacingXs"),
         )
         self._layout.setSpacing(tokens.metric("KcSpacingLg"))
+
+        # A small crest at the head of the bar: present on every screen, never
+        # competing with the work. The fields are inserted after it.
+        self.crest = QLabel(self)
+        self.crest.setAccessibleName(CREST_NAME)
+        self.crest.setToolTip(CREST_NAME)
+        self._layout.addWidget(self.crest)
+        self._layout.addWidget(separator(Qt.Orientation.Vertical))
+        self._leading = 2
+
         self._layout.addStretch(1)
+
+        # A continuous state, so it lives in a region whose size never changes
+        # rather than in a message that appears and pushes things about.
+        self.recording = RecordingStrip(tokens, self)
+        self._layout.addWidget(self.recording)
 
         self.theme_button = QPushButton()
         self.theme_button.setProperty("kcVariant", "quiet")
@@ -57,6 +73,8 @@ class ContextBar(QFrame):
         self.setFixedHeight(tokens.metric("KcContextBarHeight"))
         for field in self._fields.values():
             field.set_tokens(tokens)
+        self.recording.set_tokens(tokens)
+        self._show_crest()
         ratio = self.devicePixelRatioF()
         size = tokens.metric("KcIconSize")
         self.theme_button.setIcon(
@@ -71,6 +89,20 @@ class ContextBar(QFrame):
             iconset.icon("inspector", tokens, size=size, ratio=ratio)
         )
 
+    def _show_crest(self) -> None:
+        size = self._tokens.metric("KcContextBarHeight") - self._tokens.metric(
+            "KcSpacingMd"
+        )
+        pixmap = crest_pixmap(
+            self._tokens, size=size, ratio=self.devicePixelRatioF()
+        )
+        if pixmap is None:
+            self.crest.hide()
+            return
+        self.crest.setPixmap(pixmap)
+        self.crest.setFixedSize(pixmap.size() / pixmap.devicePixelRatio())
+        self.crest.show()
+
     def update_context(self, snapshot: ContextSnapshot) -> None:
         """Add fields the first time they appear, then only update values.
 
@@ -82,7 +114,7 @@ class ContextBar(QFrame):
             if field is None:
                 field = ContextField(self._tokens, self)
                 self._fields[item.key] = field
-                position = index * 2
+                position = self._leading + index * 2
                 self._layout.insertWidget(position, field)
                 if index < len(snapshot.items) - 1:
                     self._layout.insertWidget(

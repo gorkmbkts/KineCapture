@@ -18,7 +18,7 @@ from functools import lru_cache
 from importlib import resources
 from typing import Any, Mapping
 
-TOKENS_SCHEMA_VERSION = "1.0.0"
+TOKENS_SCHEMA_VERSION = "1.1.0"
 
 #: Tokens whose colour is allowed to mean something. Documented here as well as
 #: in ``tokens.json`` because this is the list code reads.
@@ -28,6 +28,27 @@ SEMANTIC_COLOURS = {
     "KcStatusLive": "canlı ve tamam",
     "KcAccentPrimary": "seçim ve odak",
 }
+
+#: Movement-class colours, in the order classes are assigned them. A class
+#: keeps its colour for the life of the project, so this order is a contract:
+#: reordering it would repaint every timeline a user has learned to read.
+CLASS_COLOURS = tuple(f"KcClassColour{index}" for index in range(1, 9))
+
+#: Error-class colours. A separate family on purpose - warm against the cool
+#: movement set - so the two kinds of interval are distinguishable before any
+#: label is read.
+FAULT_COLOURS = tuple(f"KcFaultColour{index}" for index in range(1, 7))
+
+
+def class_colour_token(index: int, *, fault: bool = False) -> str:
+    """The colour token for the ``index``-th class of its kind.
+
+    Wraps around rather than running out: a project with more classes than
+    colours reuses them in the same order every time, which keeps the mapping
+    stable instead of leaving the extra classes unpainted.
+    """
+    palette = FAULT_COLOURS if fault else CLASS_COLOURS
+    return palette[int(index) % len(palette)]
 
 
 class TokenError(ValueError):
@@ -135,6 +156,9 @@ def colour_tokens() -> tuple[str, ...]:
 
 
 __all__ = [
+    "CLASS_COLOURS",
+    "FAULT_COLOURS",
+    "class_colour_token",
     "SEMANTIC_COLOURS",
     "TOKENS_SCHEMA_VERSION",
     "ThemeTokens",

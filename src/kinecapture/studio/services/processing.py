@@ -187,6 +187,14 @@ class ProcessingService:
     # ------------------------------------------------------------------ start
     def start(self, take: TakeSummary, *, parameters: Optional[dict] = None) -> Job:
         """Launch processing for one take in a child process."""
+        if take.state == "recording":
+            # Guarded here as well as in the interface: a directory a writer
+            # still owns has no final frame count, no checksums and no
+            # guarantee that what is read now is what will be there in a
+            # second's time.
+            raise ValueError(
+                f"{take.take_id} hâlâ kaydediliyor; kapanmadan işlenemez."
+            )
         existing = self._jobs.get(take.take_id)
         if existing is not None and existing.is_running:
             return existing

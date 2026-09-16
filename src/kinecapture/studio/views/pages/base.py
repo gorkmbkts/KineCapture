@@ -34,9 +34,9 @@ class StudioPage(QWidget, BoundView):
         self._tokens = tokens
 
         self._outer = QVBoxLayout(self)
-        margin = tokens.metric("KcSpacingXl")
+        margin = tokens.metric("KcSpacingXxl")
         self._outer.setContentsMargins(margin, margin, margin, margin)
-        self._outer.setSpacing(tokens.metric("KcSpacingMd"))
+        self._outer.setSpacing(tokens.metric("KcSpacingLg"))
 
         self._title = label(destination.title, role="pageTitle")
         self._subtitle = ElidedLabel(destination.subtitle)
@@ -45,6 +45,9 @@ class StudioPage(QWidget, BoundView):
 
         self._outer.addWidget(self._title)
         self._outer.addWidget(self._subtitle)
+        # Kept for a page used on its own (a test, a tool window). Inside the
+        # shell every message goes to the floating layer instead, so this stays
+        # hidden and costs no height - a notification must not resize the work.
         self._outer.addWidget(self.messages)
 
         self.body = QWidget(self)
@@ -52,6 +55,25 @@ class StudioPage(QWidget, BoundView):
         self.body_layout.setContentsMargins(0, 0, 0, 0)
         self.body_layout.setSpacing(tokens.metric("KcSpacingMd"))
         self._outer.addWidget(self.body, 1)
+
+    #: True for a page that has an inspector of its own. The shell then keeps
+    #: its own panel shut and points the toggle at the page's, so there is
+    #: never a second, emptier inspector competing with the real one - which
+    #: is exactly what the 15 September audit found on Etiketleme.
+    owns_inspector = False
+
+    # ------------------------------------------------------------ inspector
+    def inspector_sections(self) -> tuple:
+        """What the shell's inspector should show for this page right now.
+
+        Returns ``Section`` rows built from whatever is selected. Empty means
+        "nothing is selected", which the shell renders as a reason and a next
+        step rather than as a blank panel.
+        """
+        return ()
+
+    def set_inspector_visible(self, visible: bool) -> None:
+        """Only called on a page that owns its inspector."""
 
     # ------------------------------------------------------------ lifecycle
     def apply_tokens(self, tokens: ThemeTokens) -> None:
@@ -69,6 +91,15 @@ class StudioPage(QWidget, BoundView):
         """Called when the user leaves. Stop timers and workers here."""
 
     def show_message(self, message: Message) -> None:
+        """Hand the message to the shell's floating layer if there is one.
+
+        A page inside the shell never grows a message bar of its own: that is
+        what changed the size of the video and the timeline in the audit.
+        """
+        layer = getattr(self.window(), "toasts", None)
+        if layer is not None:
+            layer.show_message(message)
+            return
         self.messages.show_message(message)
 
     def closeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming

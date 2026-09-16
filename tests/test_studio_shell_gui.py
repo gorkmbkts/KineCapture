@@ -218,7 +218,13 @@ def test_inspector_toggles_from_the_context_bar(window, app: QApplication) -> No
 # ------------------------------------------------------------------ messages
 
 
-def test_a_message_lands_on_the_open_page(window, app: QApplication) -> None:
+def test_a_message_lands_on_the_floating_layer(window, app: QApplication) -> None:
+    """Messages are drawn over the page, not inserted into it.
+
+    They used to be a bar inside the page layout, which resized whatever was
+    underneath. The visible behaviour checked here is the same - the message
+    is on screen, and it is the one that was reported.
+    """
     window.viewmodel.navigate("capture")
     app.processEvents()
     window.viewmodel.report(
@@ -231,10 +237,11 @@ def test_a_message_lands_on_the_open_page(window, app: QApplication) -> None:
         )
     )
     app.processEvents()
-    page = window.page("capture")
-    assert page.messages.isVisible()
-    assert page.messages.current is not None
-    assert page.messages.current.code == "insufficient_disk_space"
+    assert window.toasts.isVisible()
+    assert window.toasts.current is not None
+    assert window.toasts.current.code == "insufficient_disk_space"
+    # The page itself grew nothing.
+    assert window.page("capture").messages.isVisible() is False
 
 
 def test_technical_detail_is_hidden_until_asked_for(window, app: QApplication) -> None:
@@ -242,22 +249,23 @@ def test_technical_detail_is_hidden_until_asked_for(window, app: QApplication) -
         Message(headline="Bir şey oldu.", code="x", technical={"a": 1})
     )
     app.processEvents()
-    bar = window.page(window.viewmodel.active_page.value).messages
-    assert bar.details_visible is False
-    bar._toggle_details()
+    card = window.toasts.toasts[-1]
+    assert card.details_visible is False
+    card._toggle_details()
     app.processEvents()
-    assert bar.details_visible is True
-    assert "a: 1" in bar._technical.text()
+    assert card.details_visible is True
+    assert "a: 1" in card._technical.text()
 
 
-def test_closing_a_message_hides_the_bar(window, app: QApplication) -> None:
+def test_closing_a_message_takes_it_off_the_layer(window, app: QApplication) -> None:
     window.viewmodel.notify("Tamamlandı")
     app.processEvents()
-    bar = window.page(window.viewmodel.active_page.value).messages
-    assert bar.isVisible()
-    bar.clear()
-    assert bar.isVisible() is False
-    assert bar.current is None
+    assert window.toasts.toasts
+    window.toasts.toasts[-1].clear()
+    for _ in range(40):
+        app.processEvents()
+    assert window.toasts.toasts == ()
+    assert window.toasts.current is None
 
 
 def test_exception_hook_turns_a_crash_into_a_message(window) -> None:

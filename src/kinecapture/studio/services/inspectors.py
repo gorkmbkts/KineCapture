@@ -322,10 +322,48 @@ def environment_sections() -> tuple[Section, ...]:
     )
 
 
-def diagnostics_sections(report: Any) -> tuple[Section, ...]:
+#: The four things the diagnostics window can be doing. A failure is one of
+#: them, and it must never be shown as "not run yet": the audit found exactly
+#: that hiding a real ``TypeError`` behind an idle-looking window.
+DIAGNOSTICS_STATES = ("idle", "running", "done", "failed")
+
+
+def diagnostics_sections(
+    report: Any, *, state: str = "done", error: str = ""
+) -> tuple[Section, ...]:
     """A :class:`DiagnosticsReport` as rows, worst first."""
+    if state == "running":
+        return (
+            Section(
+                "Tanılama",
+                (Row("Durum", "çalışıyor", level="warning"),),
+                note="Ortam, paketler ve SDK okunuyor.",
+            ),
+        )
+    if state == "failed":
+        return (
+            Section(
+                "Tanılama",
+                (
+                    Row(
+                        "Durum",
+                        "başarısız",
+                        detail=error or "Sebep bildirilmedi.",
+                        level="error",
+                    ),
+                    Row("Hata", error or MISSING, level="error"),
+                ),
+                note="'Yenile' ile yeniden denenebilir.",
+            ),
+        )
     if report is None:
-        return (Section("Tanılama", (Row("Durum", "henüz çalıştırılmadı"),)),)
+        return (
+            Section(
+                "Tanılama",
+                (Row("Durum", "henüz çalıştırılmadı"),),
+                note="'Yenile' tanılamayı başlatır.",
+            ),
+        )
     order = {"blocked": 0, "warning": 1, "unknown": 2, "ready": 3}
     level_map = {"blocked": "error", "warning": "warning", "ready": "ready"}
     checks = sorted(

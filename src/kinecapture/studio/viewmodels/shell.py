@@ -7,13 +7,14 @@ end unchanged.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Callable, Optional
 
 from kinecapture.studio.services.context import ContextSnapshot
 from kinecapture.studio.services.messages import Message, Severity, from_error
 from kinecapture.studio.services.session import SessionService
 from kinecapture.studio.services.window_state import WindowState
 
+from .capture import RecordingPhase, RecordingStatus
 from .navigation import DEFAULT_DESTINATION, DESTINATIONS, Destination, destination, is_known
 from .observable import Event, Observable
 
@@ -38,6 +39,13 @@ class ShellViewModel:
             session.context(), name="context"
         )
         self.message: Event[Message] = Event()
+        #: What the recording is doing, on every screen. Set from whichever
+        #: viewmodel actually owns the camera; the shell only displays it.
+        self.recording: Observable[RecordingStatus] = Observable(
+            RecordingStatus(), name="recording"
+        )
+        self._read_recording: Optional[Callable[[], RecordingStatus]] = None
+        self._stop_recording: Optional[Callable[[], bool]] = None
 
         self._unsubscribe_session = session.subscribe(self.refresh_context)
 
@@ -69,9 +77,46 @@ class ShellViewModel:
         assert found is not None  # navigate() refuses unknown keys
         return found
 
+    # ------------------------------------------------------------ recording
+    def set_recording_source(
+        self,
+        read: Optional[Callable[[], RecordingStatus]],
+        stop: Optional[Callable[[], bool]] = None,
+    ) -> None:
+        """Say where the live recording state comes from, and how to stop it.
+
+        The shell must be able to show a recording and end it from any screen,
+        including screens that know nothing about a camera. It does that by
+        asking whoever owns the camera, rather than by owning one itself.
+        """
+        self._read_recording = read
+        self._stop_recording = stop
+        self.refresh_recording()
+
+    def refresh_recording(self) -> None:
+        if self._read_recording is None:
+            self.recording.set(RecordingStatus())
+            return
+        self.recording.set(self._read_recording())
+
+    def stop_recording(self) -> bool:
+        """Stop from anywhere. Ignored unless a take is genuinely open."""
+        if self._stop_recording is None:
+            return False
+        if not self.recording.value.is_open:
+            return False
+        started = bool(self._stop_recording())
+        self.refresh_recording()
+        return started
+
+    @property
+    def is_recording(self) -> bool:
+        return self.recording.value.phase is RecordingPhase.RECORDING
+
     # -------------------------------------------------------------- context
     def refresh_context(self) -> None:
         self.context.set(self._session.context())
+        self.refresh_recording()
 
     def toggle_inspector(self) -> bool:
         self.inspector_open.set(not self.inspector_open.value)

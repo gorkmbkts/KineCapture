@@ -41,6 +41,7 @@ from typing import Any, Callable, Optional, Sequence
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import (
+    QBrush,
     QColor,
     QFontMetrics,
     QImage,
@@ -50,6 +51,7 @@ from PySide6.QtGui import (
     QPaintEvent,
     QPen,
     QPixmap,
+    QPolygonF,
     QWheelEvent,
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
@@ -59,23 +61,26 @@ from kinecapture.processing.summary import (
     FLAG_INTEGRITY_ISSUE,
     FLAG_SUBJECT_AMBIGUOUS,
 )
-from kinecapture.studio.theme import ThemeTokens
+from kinecapture.studio.theme import ThemeTokens, class_colour_token
 
 #: Left gutter holding the lane names. Fixed, so the labels never move while
 #: the content scrolls under them.
-GUTTER = 96
+GUTTER = 104
 
-#: Lane heights, top to bottom.
-_RULER_H = 22
+#: Lane heights, top to bottom. Movements and errors get the room, because
+#: they are the two the user works in; the read-only summary lanes are strips.
+_RULER_H = 26
+#: Tall enough for the track name in the gutter to fit on its own line: at
+#: 10px the "QC" and "Kişi" captions overlapped each other.
 _LANE_H = {
     "video": 16,
-    "confidence": 30,
-    "qc": 12,
-    "subject": 12,
-    "movements": 34,
-    "errors": 28,
+    "confidence": 28,
+    "qc": 16,
+    "subject": 16,
+    "movements": 40,
+    "errors": 32,
 }
-_LANE_GAP = 3
+_LANE_GAP = 4
 
 #: The smallest span the view may zoom to. Below a few frames the ruler stops
 #: meaning anything and dragging becomes unusable.
@@ -83,6 +88,15 @@ _MIN_SPAN = 6.0
 
 #: A drag shorter than this is a click, and keeps the old scrub behaviour.
 _DRAG_THRESHOLD_PX = 4
+
+#: How wide the grab area at each end of an interval is. Wide enough to hit
+#: without aiming; the drawn grip is narrower than the area that answers to it.
+_HANDLE_PX = 7
+
+#: Below this width an interval has no middle worth grabbing: the two handles
+#: would overlap, so the box is split down the middle and each half trims its
+#: own end. Without this a short repetition becomes impossible to adjust.
+_MIN_BODY_PX = _HANDLE_PX * 3
 
 
 class Tool(str, Enum):
@@ -105,7 +119,14 @@ class _Grab(str, Enum):
 
 @dataclass
 class Interval:
-    """One drawable band. The timeline knows nothing about labels."""
+    """One drawable band. The timeline knows nothing about labels.
+
+    ``colour_index`` is the *class* this interval belongs to, not its state:
+    every squat repetition carries the same index and therefore the same
+    colour, for the life of the project. ``-1`` means no class has been chosen
+    yet, which is drawn as an unfilled, dashed box rather than as a colour that
+    would imply one.
+    """
 
     key: str
     start: int
@@ -114,6 +135,9 @@ class Interval:
     text: str = ""
     status: str = "neutral"   # neutral | ready | warning | error
     parent: str = ""          # owning movement, for an error interval
+    colour_index: int = -1
+    #: Short code shown when the box is too narrow for the full class name.
+    code: str = ""
 
 
 @dataclass
@@ -157,6 +181,12 @@ class TimelineView(QWidget):
         self._active_movement = ""
         self._drag: Optional[_Drag] = None
         self._snap = True
+        #: Which interval, and which end of it, the pointer is over. Drawn in
+        #: the dynamic layer so a hover never rebuilds the cached picture.
+        self._hover_key = ""
+        self._hover_grab = _Grab.NONE
+        #: True while the last drag movement landed on a snap target.
+        self._snapped_now = False
 
         #: Callable returning decimated lane data for a view range, or None.
         self.lane_source: Optional[Callable[[float, float, int], dict[str, Any]]] = None
@@ -205,6 +235,9 @@ class TimelineView(QWidget):
             self._invalidate()
 
     def set_tool(self, tool: Tool) -> None:
+        # A drawing tool on an empty timeline is an offer that cannot be kept.
+        if self._frames <= 0:
+            tool = Tool.SCRUB
         self._tool = tool
         self.setCursor(
             Qt.CursorShape.CrossCursor
@@ -309,10 +342,15 @@ class TimelineView(QWidget):
     def paintEvent(self, event: QPaintEvent) -> None:  # noqa: N802 - Qt naming
         painter = QPainter(self)
         if self._frames <= 0:
-            painter.fillRect(self.rect(), QColor(self._tokens.colour("KcSurfaceBase")))
+            # Not "empty" but "nothing loaded, and here is what to do about
+            # it": an empty rectangle with one word in it reads as unfinished.
+            painter.fillRect(self.rect(), QColor(self._tokens.colour("KcSurfaceSunken")))
             painter.setPen(QColor(self._tokens.colour("KcTextMuted")))
             painter.drawText(
-                self.rect(), Qt.AlignmentFlag.AlignCenter, "Zaman çizelgesi boş"
+                self.rect(),
+                int(Qt.AlignmentFlag.AlignCenter),
+                "Zaman çizelgesi için önce bir sürüm açın.\n"
+                "İşlenen Videolar → Etiketle",
             )
             painter.end()
             return
@@ -332,7 +370,8 @@ class TimelineView(QWidget):
             self._static_key = key
         painter.drawPixmap(0, 0, self._static)
 
-        # Only these two move with the mouse.
+        # Only these move with the mouse; the rest is the cached picture.
+        self._paint_hover(painter)
         self._paint_selection(painter)
         self._paint_playhead(painter)
         self._paint_drag(painter)
@@ -354,52 +393,90 @@ class TimelineView(QWidget):
         return pixmap
 
     def _paint_gutter(self, painter: QPainter, lanes: dict[str, QRectF]) -> None:
+        """Fixed track headings, so the names never scroll away from the data."""
         tokens = self._tokens
         painter.fillRect(
             QRectF(0, 0, GUTTER, self.height()),
-            QColor(tokens.colour("KcSurfaceRaised")),
+            QColor(tokens.colour("KcSurfaceHeader")),
         )
         painter.setPen(QPen(QColor(tokens.colour("KcBorderSubtle"))))
         painter.drawLine(QPointF(GUTTER, 0), QPointF(GUTTER, self.height()))
         font = painter.font()
         font.setPointSize(max(7, tokens.font_size("KcFontSizeXs")))
         painter.setFont(font)
-        painter.setPen(QColor(tokens.colour("KcTextMuted")))
         captions = {
-            "video": "Video",
-            "confidence": "Güven",
-            "qc": "QC",
-            "subject": "Kişi",
-            "movements": "Hareket",
-            "errors": "Hata",
+            "video": ("Video", False),
+            "confidence": ("Güven", False),
+            "qc": ("QC", False),
+            "subject": ("Kişi", False),
+            # The two editable tracks are named more strongly than the four
+            # read-only strips above them: that is where the work happens.
+            "movements": ("HAREKET", True),
+            "errors": ("HATA", True),
         }
-        for name, caption in captions.items():
+        for name, (caption, editable) in captions.items():
             rect = lanes[name]
+            if editable:
+                painter.fillRect(
+                    QRectF(0, rect.top(), GUTTER, rect.height()),
+                    QColor(tokens.colour("KcSurfaceRaised")),
+                )
+                painter.setPen(QColor(tokens.colour("KcTextSecondary")))
+            else:
+                painter.setPen(QColor(tokens.colour("KcTextMuted")))
             painter.drawText(
-                QRectF(6, rect.top(), GUTTER - 12, rect.height()),
+                QRectF(8, rect.top(), GUTTER - 14, rect.height()),
                 int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
                 caption,
             )
 
+    def _step_frames(self) -> float:
+        """The gap between labelled ticks, in frames, for the current zoom."""
+        seconds_per_px = self._view_span / self._fps / self._plot_width()
+        return max(1.0, _nice_step(seconds_per_px * 90.0) * self._fps)
+
+    def _ticks(self):  # noqa: ANN201 - Iterator[float]
+        step = self._step_frames()
+        tick = int(self._view_start // step) * step
+        end = self._view_start + self._view_span
+        while tick <= end:
+            yield tick
+            tick += step
+
     def _paint_ruler(self, painter: QPainter, lane: QRectF) -> None:
+        """Time, in as much detail as the zoom can carry and no more."""
         tokens = self._tokens
+        painter.fillRect(
+            self._plot(lane), QColor(tokens.colour("KcTimelineRuler"))
+        )
         font = painter.font()
         font.setPointSize(max(7, tokens.font_size("KcFontSizeXs")))
         painter.setFont(font)
-        seconds_per_px = self._view_span / self._fps / self._plot_width()
-        step = _nice_step(seconds_per_px * 90.0)
-        step_frames = max(1.0, step * self._fps)
-        tick = int(self._view_start // step_frames) * step_frames
-        while tick <= self._view_start + self._view_span:
+        step = self._step_frames()
+        # Minor ticks appear only when there is room for them: zoomed out the
+        # ruler stays plain, zoomed in it gains detail.
+        minor = step / 5.0
+        if minor * self._plot_width() / self._view_span >= 6.0:
+            painter.setPen(QPen(QColor(tokens.colour("KcTimelineGrid"))))
+            tick = int(self._view_start // minor) * minor
+            while tick <= self._view_start + self._view_span:
+                x = self._frame_to_x(tick)
+                if GUTTER <= x <= self.width():
+                    painter.drawLine(
+                        QPointF(x, lane.bottom() - 4), QPointF(x, lane.bottom())
+                    )
+                tick += minor
+        for tick in self._ticks():
             x = self._frame_to_x(tick)
             if GUTTER <= x <= self.width():
                 painter.setPen(QPen(QColor(tokens.colour("KcBorderStrong"))))
                 painter.drawLine(
-                    QPointF(x, lane.bottom() - 5), QPointF(x, lane.bottom())
+                    QPointF(x, lane.bottom() - 8), QPointF(x, lane.bottom())
                 )
-                painter.setPen(QColor(tokens.colour("KcTextMuted")))
-                painter.drawText(QPointF(x + 3, lane.top() + 11), _timecode(tick, self._fps))
-            tick += step_frames
+                painter.setPen(QColor(tokens.colour("KcTextSecondary")))
+                painter.drawText(
+                    QPointF(x + 4, lane.top() + 12), _timecode(tick, self._fps)
+                )
 
     def _paint_summary_lanes(self, painter: QPainter, lanes: dict[str, QRectF]) -> None:
         """Draw the four data lanes as four images, built with NumPy.
@@ -545,63 +622,191 @@ class TimelineView(QWidget):
         buffer[:, serious] = self._rgba(tokens.colour("KcStatusRecording"))
         self._blit(painter, rect, buffer)
 
+    # -- intervals -----------------------------------------------------------
+    def _interval_rect(self, interval: Interval, lane: QRectF) -> QRectF:
+        left = max(GUTTER, self._frame_to_x(interval.start))
+        right = min(float(self.width()), self._frame_to_x(interval.end + 1))
+        if right <= left:
+            right = left + 2.0
+        inset = 3.0 if interval.lane == "movements" else 2.0
+        return QRectF(left, lane.top() + inset, right - left, lane.height() - inset * 2)
+
+    def _class_colour(self, interval: Interval) -> QColor:
+        """The colour that *identifies* this interval's class.
+
+        An interval with no class is deliberately colourless: painting it in a
+        class colour would say a decision had been made.
+        """
+        if interval.colour_index < 0:
+            return QColor(self._tokens.colour("KcSurfaceControlActive"))
+        token = class_colour_token(
+            interval.colour_index, fault=interval.lane == "errors"
+        )
+        return QColor(self._tokens.colour(token))
+
     def _paint_intervals(self, painter: QPainter, lanes: dict[str, QRectF]) -> None:
         tokens = self._tokens
         for name in ("movements", "errors"):
             painter.fillRect(
-                self._plot(lanes[name]), QColor(tokens.colour("KcSurfaceViewport"))
+                self._plot(lanes[name]), QColor(tokens.colour("KcSurfaceSunken"))
             )
+        self._paint_track_grid(painter, lanes)
         font = painter.font()
         font.setPointSize(max(7, tokens.font_size("KcFontSizeXs")))
         painter.setFont(font)
         metrics = QFontMetrics(font)
 
-        fills = {
-            "neutral": tokens.colour("KcSurfaceControlActive"),
-            "ready": tokens.colour("KcStatusLiveMuted"),
-            "warning": tokens.colour("KcStatusWarningMuted"),
-            "error": tokens.colour("KcStatusRecordingMuted"),
-        }
-        edges = {
-            "neutral": tokens.colour("KcBorderStrong"),
+        status_colours = {
             "ready": tokens.colour("KcStatusLive"),
             "warning": tokens.colour("KcStatusWarning"),
             "error": tokens.colour("KcStatusRecording"),
         }
 
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         for interval in self._intervals:
             lane = lanes.get(interval.lane)
             if lane is None:
                 continue
             if interval.end < self._view_start or interval.start > self._view_start + self._view_span:
                 continue
-            left = max(GUTTER, self._frame_to_x(interval.start))
-            right = min(float(self.width()), self._frame_to_x(interval.end + 1))
-            if right <= left:
-                right = left + 1.0
-            rect = QRectF(left, lane.top() + 2, right - left, lane.height() - 4)
+            rect = self._interval_rect(interval, lane)
             dimmed = (
                 interval.lane == "errors"
                 and self._active_movement
                 and interval.parent != self._active_movement
             )
-            fill = QColor(fills.get(interval.status, fills["neutral"]))
-            if dimmed:
-                fill.setAlpha(70)
-            painter.fillRect(rect, fill)
-            pen = QPen(QColor(edges.get(interval.status, edges["neutral"])))
+            base = self._class_colour(interval)
+            self._paint_one_interval(
+                painter, interval, rect, base, dimmed, metrics, status_colours
+            )
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    def _paint_one_interval(
+        self,
+        painter: QPainter,
+        interval: Interval,
+        rect: QRectF,
+        base: QColor,
+        dimmed: bool,
+        metrics: QFontMetrics,
+        status_colours: dict[str, str],
+    ) -> None:
+        tokens = self._tokens
+        radius = 3.0
+        classified = interval.colour_index >= 0
+        is_error = interval.lane == "errors"
+
+        fill = QColor(base)
+        fill.setAlpha(60 if dimmed else (150 if classified else 90))
+        if is_error and classified:
+            # A fault is a different kind of thing from a movement, so it is
+            # drawn differently as well as in a different colour family: a
+            # hatched body under a solid cap, readable without seeing hue.
+            painter.setBrush(fill)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(rect, radius, radius)
+            hatch = QColor(base)
+            hatch.setAlpha(110 if not dimmed else 50)
+            painter.setBrush(QBrush(hatch, Qt.BrushStyle.BDiagPattern))
+            painter.drawRoundedRect(rect, radius, radius)
+        else:
+            painter.setBrush(fill)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.drawRoundedRect(rect, radius, radius)
+
+        edge = QPen(QColor(base))
+        edge.setWidth(1)
+        if not classified:
+            # Nothing chosen yet: an open box, not a coloured one.
+            edge = QPen(QColor(tokens.colour("KcStatusWarning")))
+            edge.setStyle(Qt.PenStyle.DashLine)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setPen(edge)
+        painter.drawRoundedRect(rect, radius, radius)
+
+        if is_error:
+            # The cap: a solid bar along the top of every fault interval, so
+            # the fault track reads as a different data type at a glance.
+            cap = QColor(base)
+            cap.setAlpha(120 if dimmed else 255)
+            painter.fillRect(
+                QRectF(rect.left(), rect.top(), rect.width(), 3.0), cap
+            )
+
+        status = status_colours.get(interval.status)
+        if status and interval.status != "ready":
+            # Readiness is a *state*, so it is a stripe rather than the body
+            # colour, which belongs to the class.
+            painter.fillRect(
+                QRectF(rect.left(), rect.bottom() - 2.5, rect.width(), 2.5),
+                QColor(status),
+            )
+
+        self._paint_handles(painter, rect, emphasis=_Grab.NONE)
+
+        text = interval.text or interval.code
+        if text and rect.width() > 30:
+            painter.setPen(QColor(tokens.colour("KcTextPrimary")))
+            room = int(rect.width()) - _HANDLE_PX * 2 - 4
+            shown = metrics.elidedText(text, Qt.TextElideMode.ElideRight, room)
+            if metrics.horizontalAdvance(shown) > room and interval.code:
+                shown = metrics.elidedText(interval.code, Qt.TextElideMode.ElideRight, room)
+            painter.drawText(
+                rect.adjusted(_HANDLE_PX + 2, 0, -(_HANDLE_PX + 2), 0),
+                int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
+                shown,
+            )
+
+    def _paint_handles(
+        self, painter: QPainter, rect: QRectF, *, emphasis: _Grab
+    ) -> None:
+        """The grips that say "this edge can be dragged".
+
+        Present at rest and stronger under the pointer. Without them the only
+        way to learn that an interval can be trimmed is to be told.
+        """
+        tokens = self._tokens
+        for grab, x in (
+            (_Grab.TRIM_START, rect.left()),
+            (_Grab.TRIM_END, rect.right() - _HANDLE_PX),
+        ):
+            hot = emphasis is grab
+            colour = QColor(tokens.colour("KcTrimHandle"))
+            colour.setAlpha(230 if hot else 120)
+            area = QRectF(x, rect.top(), _HANDLE_PX, rect.height())
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(colour)
+            painter.drawRoundedRect(area, 2.0, 2.0)
+            # Two short rules inside the cap: a grip, the way every editor
+            # draws one, so the meaning does not depend on the colour.
+            grip = QColor(tokens.colour("KcSurfaceSunken"))
+            grip.setAlpha(200)
+            pen = QPen(grip)
             pen.setWidth(1)
             painter.setPen(pen)
-            painter.drawRect(rect)
-            if interval.text and rect.width() > 26:
-                painter.setPen(QColor(tokens.colour("KcTextPrimary")))
-                painter.drawText(
-                    rect.adjusted(4, 0, -4, 0),
-                    int(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter),
-                    metrics.elidedText(
-                        interval.text, Qt.TextElideMode.ElideRight, int(rect.width()) - 8
-                    ),
-                )
+            middle = area.center().x()
+            top = area.top() + area.height() * 0.28
+            bottom = area.bottom() - area.height() * 0.28
+            painter.drawLine(QPointF(middle - 1.5, top), QPointF(middle - 1.5, bottom))
+            painter.drawLine(QPointF(middle + 1.5, top), QPointF(middle + 1.5, bottom))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    def _paint_track_grid(self, painter: QPainter, lanes: dict[str, QRectF]) -> None:
+        """A quiet ruler grid through the editable tracks.
+
+        An empty track with nothing in it should read as a measured surface,
+        not as a panel somebody forgot to finish.
+        """
+        tokens = self._tokens
+        pen = QPen(QColor(tokens.colour("KcTimelineGrid")))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        top = lanes["movements"].top()
+        bottom = lanes["errors"].bottom()
+        for tick in self._ticks():
+            x = self._frame_to_x(tick)
+            if GUTTER <= x <= self.width():
+                painter.drawLine(QPointF(x, top), QPointF(x, bottom))
 
     def _paint_selection(self, painter: QPainter) -> None:
         if not self._selected:
@@ -612,22 +817,62 @@ class TimelineView(QWidget):
         lane = self._lane_rects().get(interval.lane)
         if lane is None:
             return
-        left = max(GUTTER, self._frame_to_x(interval.start))
-        right = min(float(self.width()), self._frame_to_x(interval.end + 1))
+        rect = self._interval_rect(interval, lane)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        # Selection is not carried by colour alone: a brighter body, a heavier
+        # accent outline, and the grips turned up.
+        glow = QColor(self._tokens.colour("KcAccentPrimary"))
+        glow.setAlpha(45)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(glow)
+        painter.drawRoundedRect(rect, 3.0, 3.0)
         pen = QPen(QColor(self._tokens.colour("KcAccentPrimary")))
         pen.setWidth(2)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRect(QRectF(left, lane.top() + 1, max(2.0, right - left), lane.height() - 2))
+        painter.drawRoundedRect(rect.adjusted(-1, -1, 1, 1), 4.0, 4.0)
+        self._paint_handles(painter, rect, emphasis=self._hover_grab_for(interval.key))
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    def _hover_grab_for(self, key: str) -> _Grab:
+        return self._hover_grab if self._hover_key == key else _Grab.NONE
+
+    def _paint_hover(self, painter: QPainter) -> None:
+        if not self._hover_key or self._hover_key == self._selected:
+            return
+        interval = self._interval(self._hover_key)
+        if interval is None:
+            return
+        lane = self._lane_rects().get(interval.lane)
+        if lane is None:
+            return
+        rect = self._interval_rect(interval, lane)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(self._tokens.colour("KcTextPrimary")))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 3.0, 3.0)
+        self._paint_handles(painter, rect, emphasis=self._hover_grab)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_playhead(self, painter: QPainter) -> None:
         x = self._frame_to_x(self._position)
         if not (GUTTER <= x <= self.width()):
             return
-        pen = QPen(QColor(self._tokens.colour("KcStatusRecording")))
+        pen = QPen(QColor(self._tokens.colour("KcPlayhead")))
         pen.setWidth(1)
         painter.setPen(pen)
         painter.drawLine(QPointF(x, 0), QPointF(x, self.height()))
+        # A head at the top, so the line can be found without following it.
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(self._tokens.colour("KcPlayhead")))
+        painter.drawPolygon(
+            QPolygonF(
+                [QPointF(x - 5, 0), QPointF(x + 5, 0), QPointF(x, 8)]
+            )
+        )
+        painter.setBrush(Qt.BrushStyle.NoBrush)
 
     def _paint_drag(self, painter: QPainter) -> None:
         drag = self._drag
@@ -641,12 +886,53 @@ class TimelineView(QWidget):
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(QRectF(left, 0, max(2.0, right - left), self.height()))
+        # Which edge is moving, and where it is. A boundary chosen blind is a
+        # boundary chosen twice.
+        moving = drag.start if drag.grab is _Grab.TRIM_START else drag.end
+        x = self._frame_to_x(moving if drag.grab is not _Grab.DRAW else drag.end)
+        self._paint_edge_badge(painter, x, moving if drag.grab is not _Grab.DRAW else drag.end)
+
+    def _paint_edge_badge(self, painter: QPainter, x: float, frame: int) -> None:
+        tokens = self._tokens
+        text = f"kare {frame + 1} · {_timecode(frame, self._fps)}"
+        font = painter.font()
+        font.setPointSize(max(7, tokens.font_size("KcFontSizeXs")))
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        width = metrics.horizontalAdvance(text) + 12
+        height = metrics.height() + 6
+        left = min(max(GUTTER, x + 6), self.width() - width - 2)
+        rect = QRectF(left, 2, width, height)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(tokens.colour("KcSurfaceOverlay")))
+        painter.drawRoundedRect(rect, 3.0, 3.0)
+        # A snap is announced, quietly: the edge did not land where the mouse
+        # was, and the user is entitled to know why.
+        border = QColor(
+            tokens.colour("KcStatusLive" if self._snapped_now else "KcBorderStrong")
+        )
+        pen = QPen(border)
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(rect, 3.0, 3.0)
+        painter.setPen(QColor(tokens.colour("KcTextPrimary")))
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     # ----------------------------------------------------------------- input
     def _interval(self, key: str) -> Optional[Interval]:
         return next((i for i in self._intervals if i.key == key), None)
 
     def _hit(self, point: QPoint) -> tuple[Optional[Interval], _Grab]:
+        """What is under the pointer, and which part of it.
+
+        A very short interval has no usable middle: the two handles would sit
+        on top of each other and neither would be reachable. There the box is
+        split down the middle instead, so each half trims its own end and the
+        interval stays adjustable at any zoom.
+        """
         lanes = self._lane_rects()
         for interval in reversed(self._intervals):
             lane = lanes.get(interval.lane)
@@ -654,17 +940,27 @@ class TimelineView(QWidget):
                 continue
             left = self._frame_to_x(interval.start)
             right = self._frame_to_x(interval.end + 1)
-            if not (left - 5 <= point.x() <= right + 5):
+            if not (left - _HANDLE_PX <= point.x() <= right + _HANDLE_PX):
                 continue
-            if abs(point.x() - left) <= 5:
+            if right - left < _MIN_BODY_PX:
+                middle = (left + right) / 2.0
+                return interval, (
+                    _Grab.TRIM_START if point.x() < middle else _Grab.TRIM_END
+                )
+            if point.x() - left <= _HANDLE_PX:
                 return interval, _Grab.TRIM_START
-            if abs(point.x() - right) <= 5:
+            if right - point.x() <= _HANDLE_PX:
                 return interval, _Grab.TRIM_END
             return interval, _Grab.MOVE
         return None, _Grab.NONE
 
     def mousePressEvent(self, event: QMouseEvent) -> None:  # noqa: N802 - Qt naming
         point = event.position().toPoint()
+        if self._frames <= 0:
+            # No frame range means no answer to "which frames did they drag
+            # over". Drawing here is what produced the 0-0 movement in the
+            # 15 September audit, so the gesture is refused outright.
+            return
         if point.x() < GUTTER:
             return
         frame = self._frame_at(point.x())
@@ -827,16 +1123,41 @@ class TimelineView(QWidget):
 
     # ------------------------------------------------------------- internals
     def _update_cursor(self, point: QPoint) -> None:
+        """Cursor and hover together: both answer "what would a drag do here".
+
+        The body and the ends of a box have to feel different before the mouse
+        goes down, or selecting and trimming get confused with each other.
+        """
         if point.x() < GUTTER:
             self.setCursor(Qt.CursorShape.ArrowCursor)
+            self._set_hover("", _Grab.NONE)
             return
-        _interval, grab = self._hit(point)
+        interval, grab = self._hit(point)
+        self._set_hover(interval.key if interval is not None else "", grab)
         if grab in (_Grab.TRIM_START, _Grab.TRIM_END):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif grab is _Grab.MOVE:
+            self.setCursor(Qt.CursorShape.PointingHandCursor)
         elif self._tool is not Tool.SCRUB:
             self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
+
+    def _set_hover(self, key: str, grab: _Grab) -> None:
+        if (key, grab) == (self._hover_key, self._hover_grab):
+            return
+        self._hover_key, self._hover_grab = key, grab
+        # Only the dynamic layer changes, so the cached picture is untouched.
+        self.update()
+
+    @property
+    def hovered(self) -> tuple[str, str]:
+        """(interval key, which end) under the pointer. Empty when none."""
+        return self._hover_key, self._hover_grab.value
+
+    def leaveEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming
+        self._set_hover("", _Grab.NONE)
+        super().leaveEvent(event)
 
     def _scrub_to(self, frame: int) -> None:
         clamped = max(0, min(self._frames - 1, int(frame)))
@@ -847,7 +1168,12 @@ class TimelineView(QWidget):
         self.position_changed.emit(clamped)
 
     def _snapped(self, frame: int) -> int:
-        """Snap to a second boundary or an interval edge when one is close."""
+        """Snap to a second boundary or an interval edge when one is close.
+
+        Records whether it actually snapped, so the drag badge can say so
+        instead of leaving the user wondering why the edge moved on its own.
+        """
+        self._snapped_now = False
         if not self._snap:
             return frame
         tolerance = max(1, int(self._view_span / self._plot_width() * 6))
@@ -859,7 +1185,9 @@ class TimelineView(QWidget):
             for edge in (interval.start, interval.end):
                 if abs(edge - frame) < distance:
                     best, distance = edge, abs(edge - frame)
-        return max(0, min(self._frames - 1, best))
+        snapped = max(0, min(self._frames - 1, best))
+        self._snapped_now = snapped != frame
+        return snapped
 
 
 def _nice_step(seconds: float) -> float:

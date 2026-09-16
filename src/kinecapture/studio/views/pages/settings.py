@@ -19,21 +19,31 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
     QSpinBox,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
 
-from kinecapture.studio.services.settings import SettingField
+from kinecapture.studio.services.settings import APPLIES_TEXT, SettingField
 from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.navigation import Destination
 from kinecapture.studio.viewmodels.settings import SettingsViewModel
 
 from ..widgets import ElidedLabel, label, separator
 from .base import StudioPage
+
+#: How wide a control is allowed to get. A settings page is a column of
+#: sentences with a control at the end of each, not a row of full-width bars.
+CONTROL_WIDTH = 320
+
+#: How wide the readable column is. Beyond this a help sentence stops being a
+#: sentence and becomes a line to track across a monitor.
+CONTENT_WIDTH = 900
 
 
 class _FieldRow(QWidget):
@@ -51,42 +61,72 @@ class _FieldRow(QWidget):
         self._on_change = on_change
         self._silent = False
 
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, tokens.metric("KcSpacingMd"))
-        outer.setSpacing(tokens.metric("KcSpacingXs"))
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, tokens.metric("KcSpacingLg"))
+        outer.setSpacing(tokens.metric("KcSpacingXl"))
 
-        top = QHBoxLayout()
-        top.setSpacing(tokens.metric("KcSpacingMd"))
-        caption = label(field.label)
-        caption.setMinimumWidth(200)
-        top.addWidget(caption)
+        # Name and explanation on the left, the control on the right. The
+        # control is capped rather than stretched: a spin box the width of a
+        # 1920px window is not easier to use, it is just the widest thing on
+        # the screen, which is what the audit called a "control gallery".
+        left = QVBoxLayout()
+        left.setSpacing(tokens.metric("KcSpacingXs"))
+        self.caption = label(field.label)
+        self.caption.setProperty("kcRole", "fieldLabel")
+        left.addWidget(self.caption)
+        self.help = QLabel(field.help_text)
+        self.help.setWordWrap(True)
+        self.help.setProperty("kcRole", "pageSubtitle")
+        left.addWidget(self.help)
+        if field.cost_note:
+            cost = QLabel(field.cost_note)
+            cost.setWordWrap(True)
+            cost.setProperty("kcRole", "fieldCost")
+            left.addWidget(cost)
+        self.problem = label("", role="fieldError")
+        self.problem.setWordWrap(True)
+        self.problem.hide()
+        left.addWidget(self.problem)
+        outer.addLayout(left, 1)
+
+        right = QVBoxLayout()
+        right.setSpacing(tokens.metric("KcSpacingXs"))
+        control_row = QHBoxLayout()
+        control_row.setSpacing(tokens.metric("KcSpacingSm"))
         self.control = self._build_control(field)
-        top.addWidget(self.control, 1)
+        self.control.setMaximumWidth(CONTROL_WIDTH)
+        self.control.setMinimumWidth(min(CONTROL_WIDTH, 160))
+        control_row.addStretch(1)
+        control_row.addWidget(self.control)
         if field.kind == "path":
             browse = QPushButton("Seç…")
             browse.setProperty("kcVariant", "quiet")
             browse.clicked.connect(self._browse)
-            top.addWidget(browse)
-        outer.addLayout(top)
-
-        self.help = ElidedLabel(field.help_text)
-        self.help.setProperty("kcRole", "pageSubtitle")
-        self.help.setToolTip(field.help_text)
-        outer.addWidget(self.help)
-
-        if field.cost_note:
-            cost = label(field.cost_note, role="fieldCost")
-            cost.setToolTip(field.cost_note)
-            outer.addWidget(cost)
-
-        self.problem = label("", role="fieldError")
-        self.problem.hide()
-        outer.addWidget(self.problem)
+            control_row.addWidget(browse)
+        right.addLayout(control_row)
+        # When a saved change starts to matter. "Kaydedildi" and "etkin" are
+        # not the same statement and the screen must not merge them.
+        self.applies = label(APPLIES_TEXT[field.applies_when], role="fieldApplies")
+        self.applies.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.applies.setToolTip(
+            "Bu ayar kaydedildikten sonra ne zaman etkili olur"
+        )
+        right.addWidget(self.applies)
+        outer.addLayout(right)
 
         self.setAccessibleName(field.label)
-        self.setAccessibleDescription(field.help_text)
+        self.setAccessibleDescription(
+            f"{field.help_text} Etkili olma zamanı: {APPLIES_TEXT[field.applies_when]}."
+        )
         if field.read_only:
             self.control.setEnabled(False)
+
+    @property
+    def search_text(self) -> str:
+        """Everything about this setting, lower-cased, for one-call searching."""
+        return " ".join(
+            (self.field.label, self.field.help_text, self.field.key, self.field.cost_note)
+        ).casefold()
 
     def _build_control(self, field: SettingField) -> QWidget:
         if field.kind == "choice":
@@ -163,6 +203,32 @@ class SettingsPage(StudioPage):
         super().__init__(destination, tokens, parent)
         self.viewmodel: Optional[SettingsViewModel] = None
         self.rows: dict[str, _FieldRow] = {}
+        self._sections: dict[str, QWidget] = {}
+        self._section_buttons: dict[str, QToolButton] = {}
+
+        search_row = QHBoxLayout()
+        search_row.setSpacing(tokens.metric("KcSpacingMd"))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("Ayar ara")
+        self.search.setClearButtonEnabled(True)
+        self.search.setMaximumWidth(360)
+        self.search.setToolTip("Ad, açıklama veya anahtar içinde arar")
+        self.search.textChanged.connect(self._apply_search)
+        search_row.addWidget(self.search)
+        search_row.addStretch(1)
+        self.body_layout.addLayout(search_row)
+
+        columns = QHBoxLayout()
+        columns.setSpacing(tokens.metric("KcSpacingXl"))
+
+        # A rail of sections, so a long form is navigable instead of scrolled
+        # through from the top every time.
+        self._rail = QWidget(self)
+        self._rail_layout = QVBoxLayout(self._rail)
+        self._rail_layout.setContentsMargins(0, 0, 0, 0)
+        self._rail_layout.setSpacing(tokens.metric("KcSpacingXs"))
+        self._rail.setFixedWidth(176)
+        columns.addWidget(self._rail)
 
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(True)
@@ -171,11 +237,14 @@ class SettingsPage(StudioPage):
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
         )
         self._content = QWidget()
+        self._content.setMaximumWidth(CONTENT_WIDTH)
         self._content_layout = QVBoxLayout(self._content)
         self._content_layout.setContentsMargins(0, 0, tokens.metric("KcSpacingLg"), 0)
         self._content_layout.setSpacing(tokens.metric("KcSpacingLg"))
         self.scroll.setWidget(self._content)
-        self.body_layout.addWidget(self.scroll, 1)
+        columns.addWidget(self.scroll, 1)
+        columns.addStretch(0)
+        self.body_layout.addLayout(columns, 1)
 
         self.body_layout.addWidget(separator())
         bar = QHBoxLayout()
@@ -209,18 +278,65 @@ class SettingsPage(StudioPage):
     def _build_rows(self) -> None:
         assert self.viewmodel is not None
         tokens = self._tokens
-        for _key, title, subtitle, fields in self.viewmodel.groups():
-            header = label(title.upper(), role="sectionTitle")
-            self._content_layout.addWidget(header)
-            caption = ElidedLabel(subtitle)
+        for key, title, subtitle, fields in self.viewmodel.groups():
+            section = QWidget(self._content)
+            column = QVBoxLayout(section)
+            column.setContentsMargins(0, 0, 0, 0)
+            column.setSpacing(tokens.metric("KcSpacingSm"))
+            column.addWidget(label(title.upper(), role="sectionTitle"))
+            caption = QLabel(subtitle)
+            caption.setWordWrap(True)
             caption.setProperty("kcRole", "pageSubtitle")
-            self._content_layout.addWidget(caption)
-            self._content_layout.addWidget(separator())
+            column.addWidget(caption)
+            column.addWidget(separator())
             for field in fields:
-                row = _FieldRow(field, tokens, self._edited, self._content)
+                row = _FieldRow(field, tokens, self._edited, section)
                 self.rows[field.key] = row
-                self._content_layout.addWidget(row)
+                column.addWidget(row)
+            self._sections[key] = section
+            self._content_layout.addWidget(section)
+
+            button = QToolButton(self._rail)
+            button.setText(title)
+            button.setCheckable(False)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setToolTip(subtitle)
+            button.clicked.connect(lambda _c=False, k=key: self.scroll_to(k))
+            self._section_buttons[key] = button
+            self._rail_layout.addWidget(button)
+        self._rail_layout.addStretch(1)
         self._content_layout.addStretch(1)
+
+    def scroll_to(self, group: str) -> bool:
+        """Put a section at the top of the view. Returns whether it was found."""
+        section = self._sections.get(group)
+        if section is None:
+            return False
+        self.scroll.ensureWidgetVisible(section, 0, self.scroll.height())
+        self.scroll.verticalScrollBar().setValue(
+            section.mapTo(self._content, section.rect().topLeft()).y()
+        )
+        return True
+
+    def _apply_search(self, text: str) -> None:
+        """Hide what does not match, and the sections that end up empty.
+
+        Filtering in place rather than jumping to a result: the page is short
+        enough that showing only the matching settings *is* the answer.
+        """
+        needle = text.strip().casefold()
+        for key, section in self._sections.items():
+            shown = 0
+            for row in self.rows.values():
+                if row.parent() is not section:
+                    continue
+                matches = not needle or needle in row.search_text
+                row.setVisible(matches)
+                shown += int(matches)
+            section.setVisible(bool(shown))
+            button = self._section_buttons.get(key)
+            if button is not None:
+                button.setEnabled(bool(shown))
 
     # ---------------------------------------------------------------- slots
     def _edited(self, key: str, value: Any) -> None:

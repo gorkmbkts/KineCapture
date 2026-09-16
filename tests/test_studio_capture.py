@@ -22,6 +22,7 @@ from kinecapture.studio.services.capture import (
     CaptureService,
     SubjectAnchor,
 )
+from kinecapture.studio.services.messages import Severity
 from kinecapture.studio.services.session import SessionService
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import (
@@ -201,8 +202,16 @@ def test_recording_needs_a_project(config: AppConfig, monkeypatch) -> None:
     assert seen and "proje" in seen[0].headline.casefold()
 
 
-def test_recording_needs_a_participant(session: SessionService, tmp_path: Path) -> None:
-    """A project with nobody in it cannot record against a participant."""
+def test_an_empty_project_gets_a_participant_rather_than_a_dead_button(
+    session: SessionService, tmp_path: Path
+) -> None:
+    """Recording into an empty project creates its first participant.
+
+    This used to refuse, and the screen disabled the button to match. On a
+    real ZED that was a camera showing a live image with a record button that
+    did nothing and said nothing. There is no ambiguity to protect in an empty
+    project, so the participant is created and *named* instead.
+    """
     import shutil
 
     workspace = session.workspace
@@ -214,9 +223,44 @@ def test_recording_needs_a_participant(session: SessionService, tmp_path: Path) 
     viewmodel.message.subscribe(seen.append)
     assert viewmodel.connect()
     try:
-        assert viewmodel.start_recording() is False
-        assert seen and "katılımcı" in seen[-1].headline.casefold()
+        assert viewmodel.start_recording() is True
+        participants = workspace.list_participants()
+        assert len(participants) == 1
+        code = participants[0].code
+        created = [m for m in seen if m.code == "participant_created"]
+        assert created, "the new participant has to be announced, not assumed"
+        # Named in the message, whatever the code allocator hands out - codes
+        # are never reused, so it is not necessarily P0001.
+        assert code in created[0].headline
+        # And the take really belongs to it.
+        assert viewmodel.target.value.participant_code == code
     finally:
+        viewmodel.stop_recording()
+        viewmodel.disconnect()
+
+
+def test_an_unselected_participant_is_chosen_out_loud(
+    session: SessionService, tmp_path: Path
+) -> None:
+    """With several to pick from, the one used is named so it can be corrected."""
+    workspace = session.workspace
+    assert workspace is not None
+    workspace.create_participant()
+    assert len(workspace.list_participants()) >= 2
+    session.select_participant("")
+
+    viewmodel = CaptureViewModel(session)
+    seen = []
+    viewmodel.message.subscribe(seen.append)
+    assert viewmodel.connect()
+    try:
+        assert viewmodel.start_recording() is True
+        defaulted = [m for m in seen if m.code == "capture_target_defaulted"]
+        assert defaulted, "a defaulted target must be visible, not silent"
+        assert defaulted[0].severity is Severity.WARNING
+        assert viewmodel.target.value.is_set
+    finally:
+        viewmodel.stop_recording()
         viewmodel.disconnect()
 
 

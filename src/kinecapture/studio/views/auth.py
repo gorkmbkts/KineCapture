@@ -13,6 +13,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
@@ -25,7 +26,13 @@ from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.auth import AuthMode, AuthState, AuthViewModel
 
 from .qt_bridge import BoundView
+from .brand import CREST_NAME, crest_pixmap
 from .widgets import ElidedLabel, MessageBar, label, separator
+
+#: How big the crest is on the sign-in screen. Large enough to be the first
+#: thing read, small enough to leave the form above the fold on a 700px window.
+CREST_SIZE = 168
+
 
 _TITLES = {
     AuthMode.SETUP: ("Kuruluma hoş geldiniz", "Sistem Sahibi hesabını oluşturun"),
@@ -67,21 +74,46 @@ class AuthView(QWidget, BoundView):
         scroll.setWidget(holder)
 
         self._column = QVBoxLayout(column)
-        margin = tokens.metric("KcSpacingXl")
-        self._column.setContentsMargins(margin, margin * 3, margin, margin)
-        self._column.setSpacing(tokens.metric("KcSpacingMd"))
+        margin = tokens.metric("KcSpacingXxl")
+        self._column.setContentsMargins(margin, margin, margin, margin)
+        self._column.setSpacing(tokens.metric("KcSpacingLg"))
+        # Centred rather than pinned to the top: on a maximised window the card
+        # otherwise sits in the corner of a very large empty rectangle. The
+        # stretches collapse on a short window and the area scrolls instead.
+        self._column.addStretch(1)
+
+        # The crest leads the sign-in screen. This is the one place in the
+        # product where the institution, not the task, is the first thing on
+        # screen - so it is given real size and real room around it.
+        self.crest = QLabel()
+        self.crest.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.crest.setAccessibleName(CREST_NAME)
+        self.crest.setToolTip(CREST_NAME)
+        self._column.addWidget(self.crest, 0, Qt.AlignmentFlag.AlignHCenter)
+        self.institution = label(CREST_NAME, role="section")
+        self.institution.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._column.addWidget(self.institution)
+        self._column.addSpacing(tokens.metric("KcSpacingXl"))
 
         self.title = label("", role="pageTitle")
+        self.title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.subtitle = ElidedLabel("")
         self.subtitle.setProperty("kcRole", "pageSubtitle")
+        self.subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.messages = MessageBar(tokens, self)
         self._column.addWidget(self.title)
         self._column.addWidget(self.subtitle)
+        self._column.addSpacing(tokens.metric("KcSpacingMd"))
         self._column.addWidget(self.messages)
         self._column.addWidget(separator())
+        self._column.addSpacing(tokens.metric("KcSpacingMd"))
+        self._show_crest()
 
         self.form = QFormLayout()
         self.form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+        self.form.setHorizontalSpacing(tokens.metric("KcSpacingXl"))
+        self.form.setVerticalSpacing(tokens.metric("KcSpacingLg"))
+        self.form.setContentsMargins(0, tokens.metric("KcSpacingMd"), 0, 0)
         self._column.addLayout(self.form)
 
         self.problem = label("", role="sectionTitle")
@@ -99,6 +131,7 @@ class AuthView(QWidget, BoundView):
         buttons.addWidget(self.secondary)
         buttons.addStretch(1)
         buttons.addWidget(self.primary)
+        self._column.addSpacing(tokens.metric("KcSpacingLg"))
         self._column.addLayout(buttons)
         self._column.addStretch(1)
 
@@ -108,6 +141,28 @@ class AuthView(QWidget, BoundView):
 
         self.bind(viewmodel.state, self._render)
         self.bind_event(viewmodel.message, self.messages.show_message)
+
+    def apply_tokens(self, tokens: ThemeTokens) -> None:
+        """The gate is outside the shell's pages, so it is themed separately."""
+        self._tokens = tokens
+        self.messages.set_tokens(tokens)
+        self._show_crest()
+
+    def _show_crest(self) -> None:
+        """Draw the crest for the current theme, or leave the space empty.
+
+        A decoration that will not load must never be the reason somebody
+        cannot sign in, so a missing crest simply hides itself.
+        """
+        pixmap = crest_pixmap(
+            self._tokens, size=CREST_SIZE, ratio=self.devicePixelRatioF()
+        )
+        if pixmap is None:
+            self.crest.hide()
+            return
+        self.crest.setPixmap(pixmap)
+        self.crest.setFixedSize(pixmap.size() / pixmap.devicePixelRatio())
+        self.crest.show()
 
     # ---------------------------------------------------------------- render
     def _render(self, state: AuthState) -> None:

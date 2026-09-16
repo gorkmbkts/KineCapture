@@ -5,14 +5,17 @@
  * refuses to emit a stylesheet that still contains an unresolved placeholder,
  * and tests/test_studio_layers.py refuses to let a literal hex colour in.
  *
- * Character: layered greys, 1px separators, almost no rounding, small tight
- * type. Colour means something; it is not decoration.
+ * Character: a calm ladder of greys, measured soft corners, 1px separators
+ * instead of frames, and colour that always means something.
+ *
+ * The rule this file exists to keep: *this product owns every surface.* Qt
+ * falls back to the platform palette for anything a stylesheet does not
+ * mention - and on Windows 11 that palette follows the system theme, which
+ * is how the light theme ended up with dark islands in it. So scroll-area
+ * viewports, item views, tabs, menus, headers, tool windows and spin boxes
+ * are all named here, whether or not they look wrong today.
  */
 
-/* Type and colour are inherited by everything; the *ground* is not. Only the
- * window and the named surfaces paint a background, so a plain container
- * widget shows its parent's surface instead of stamping a slightly different
- * rectangle over it. */
 QWidget {
     color: @KcTextPrimary@;
     font-family: @KcFontFamily@;
@@ -24,6 +27,8 @@ QMainWindow, QDialog {
 }
 
 QWidget:disabled {
+    /* Dimmed, still readable: a control nobody can use still has to say what
+     * it would have done. */
     color: @KcTextDisabled@;
 }
 
@@ -33,22 +38,45 @@ QLabel, QCheckBox, QRadioButton {
     background: transparent;
 }
 
+/* The gap between a tick and the word it belongs to. Without it the
+ * two read as one smudged shape. */
+QCheckBox, QRadioButton {
+    spacing: @KcSpacingMd@px;
+    padding: @KcSpacingXs@px 0;
+}
+
 QToolTip {
     background-color: @KcSurfaceOverlay@;
     color: @KcTextPrimary@;
     border: @KcBorderWidth@px solid @KcBorderStrong@;
-    padding: @KcSpacingSm@px @KcSpacingMd@px;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingMd@px @KcSpacingLg@px;
 }
 
 /* ----------------------------------------------------------- surfaces */
 
 QFrame[kcSurface="raised"] {
     background-color: @KcSurfaceRaised@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSurface@px;
+}
+
+QFrame[kcSurface="sunken"] {
+    background-color: @KcSurfaceSunken@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSurface@px;
 }
 
 QFrame[kcSurface="viewport"] {
     background-color: @KcSurfaceViewport@;
     border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSmall@px;
+}
+
+/* A toolbar-like strip: the same family as the panel it sits on, one step up. */
+QWidget[kcSurface="header"], QFrame[kcSurface="header"] {
+    background-color: @KcSurfaceHeader@;
+    border-radius: @KcRadiusSmall@px;
 }
 
 QFrame[kcSeparator="horizontal"] {
@@ -68,8 +96,12 @@ QFrame[kcSeparator="vertical"] {
 /* ------------------------------------------------------------ context bar */
 
 QFrame#kcContextBar {
-    background-color: @KcSurfaceRaised@;
+    background-color: @KcSurfaceHeader@;
     border-bottom: @KcBorderWidth@px solid @KcBorderSubtle@;
+}
+
+QWidget#kcRecordingStrip {
+    background: transparent;
 }
 
 QLabel[kcRole="contextKey"] {
@@ -110,8 +142,29 @@ QLabel[kcRole="fieldCost"] {
 }
 
 QLabel[kcRole="sectionTitle"] {
-    color: @KcTextSecondary@;
+    color: @KcTextMuted@;
     font-size: @KcFontSizeXs@px;
+    font-weight: @KcFontWeightMedium@;
+    letter-spacing: 1px;
+}
+
+/* The name of one setting: a little heavier than body text, so a column of
+ * settings reads as a list of things rather than a wall of sentences. */
+QLabel[kcRole="fieldLabel"] {
+    color: @KcTextPrimary@;
+    font-size: @KcFontSizeMd@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
+/* When a saved change starts to matter. Quiet: it is a qualifier, not news. */
+QLabel[kcRole="fieldApplies"] {
+    color: @KcTextMuted@;
+    font-size: @KcFontSizeXs@px;
+}
+
+QLabel[kcRole="section"] {
+    color: @KcTextPrimary@;
+    font-size: @KcFontSizeLg@px;
     font-weight: @KcFontWeightMedium@;
 }
 
@@ -121,8 +174,8 @@ QLabel[kcStatus="neutral"] {
     color: @KcTextSecondary@;
     background-color: @KcSurfaceControl@;
     border: @KcBorderWidth@px solid @KcBorderSubtle@;
-    border-radius: @KcRadiusControl@px;
-    padding: @KcSpacingXs@px @KcSpacingMd@px;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
     font-size: @KcFontSizeXs@px;
 }
 
@@ -130,8 +183,17 @@ QLabel[kcStatus="live"] {
     color: @KcStatusLive@;
     background-color: @KcStatusLiveMuted@;
     border: @KcBorderWidth@px solid @KcStatusLive@;
-    border-radius: @KcRadiusControl@px;
-    padding: @KcSpacingXs@px @KcSpacingMd@px;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
+    font-size: @KcFontSizeXs@px;
+}
+
+QLabel[kcStatus="ready"] {
+    color: @KcStatusLive@;
+    background-color: @KcStatusLiveMuted@;
+    border: @KcBorderWidth@px solid @KcStatusLive@;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
     font-size: @KcFontSizeXs@px;
 }
 
@@ -139,8 +201,8 @@ QLabel[kcStatus="warning"] {
     color: @KcStatusWarning@;
     background-color: @KcStatusWarningMuted@;
     border: @KcBorderWidth@px solid @KcStatusWarning@;
-    border-radius: @KcRadiusControl@px;
-    padding: @KcSpacingXs@px @KcSpacingMd@px;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
     font-size: @KcFontSizeXs@px;
 }
 
@@ -148,8 +210,17 @@ QLabel[kcStatus="error"] {
     color: @KcStatusRecording@;
     background-color: @KcStatusRecordingMuted@;
     border: @KcBorderWidth@px solid @KcStatusRecording@;
-    border-radius: @KcRadiusControl@px;
-    padding: @KcSpacingXs@px @KcSpacingMd@px;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
+    font-size: @KcFontSizeXs@px;
+}
+
+QLabel[kcStatus="info"] {
+    color: @KcTextSecondary@;
+    background-color: @KcSurfaceControl@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
     font-size: @KcFontSizeXs@px;
 }
 
@@ -166,20 +237,36 @@ QCheckBox::indicator, QRadioButton::indicator {
 }
 
 QCheckBox::indicator {
-    border-radius: @KcRadiusControl@px;
+    border-radius: @KcRadiusSmall@px;
 }
 
+/* Half the indicator's own size: Qt draws a square if the radius is larger,
+ * which turns the one control whose *shape* says "pick exactly one" into a
+ * second checkbox. */
 QRadioButton::indicator {
-    border-radius: @KcIconSize@px;
+    border-radius: @KcRadiusRound@px;
 }
 
 QCheckBox::indicator:hover, QRadioButton::indicator:hover {
-    border-color: @KcTextSecondary@;
+    border-color: @KcAccentPrimary@;
+    background-color: @KcSurfaceControlHover@;
 }
 
-QCheckBox::indicator:checked, QRadioButton::indicator:checked {
+QCheckBox::indicator:checked {
     background-color: @KcAccentPrimary@;
     border-color: @KcAccentPrimary@;
+    image: url(kc:check.svg);
+}
+
+QRadioButton::indicator:checked {
+    /* An accent dot inside a round outline. Drawn as an image rather than as a
+     * thick border: a border that wide makes Qt ignore the radius and paint a
+     * square, which turns the one control whose *shape* means "exactly one"
+     * into a second checkbox. */
+    background-color: @KcSurfaceControl@;
+    border: @KcBorderWidth@px solid @KcAccentPrimary@;
+    border-radius: @KcRadiusRound@px;
+    image: url(kc:radio-dot.svg);
 }
 
 QCheckBox::indicator:disabled, QRadioButton::indicator:disabled {
@@ -198,12 +285,13 @@ QPushButton {
     color: @KcTextPrimary@;
     border: @KcBorderWidth@px solid @KcBorderStrong@;
     border-radius: @KcRadiusControl@px;
-    padding: @KcSpacingSm@px @KcSpacingLg@px;
+    padding: @KcSpacingMd@px @KcSpacingXl@px;
     min-height: @KcControlHeight@px;
 }
 
 QPushButton:hover {
     background-color: @KcSurfaceControlHover@;
+    border-color: @KcBorderStrong@;
 }
 
 QPushButton:pressed {
@@ -211,11 +299,12 @@ QPushButton:pressed {
 }
 
 QPushButton:focus {
-    border: @KcBorderWidth@px solid @KcFocusRing@;
+    border: @KcBorderWidthStrong@px solid @KcFocusRing@;
 }
 
 QPushButton:disabled {
     color: @KcTextDisabled@;
+    background-color: @KcSurfaceBase@;
     border-color: @KcBorderSubtle@;
 }
 
@@ -223,11 +312,18 @@ QPushButton[kcVariant="primary"] {
     background-color: @KcAccentPrimary@;
     color: @KcTextOnAccent@;
     border-color: @KcAccentPrimary@;
+    font-weight: @KcFontWeightMedium@;
 }
 
 QPushButton[kcVariant="primary"]:hover {
     background-color: @KcAccentPrimaryHover@;
     border-color: @KcAccentPrimaryHover@;
+}
+
+QPushButton[kcVariant="primary"]:disabled {
+    background-color: @KcAccentMuted@;
+    border-color: @KcAccentMuted@;
+    color: @KcTextDisabled@;
 }
 
 QPushButton[kcVariant="quiet"] {
@@ -241,10 +337,65 @@ QPushButton[kcVariant="quiet"]:hover {
     color: @KcTextPrimary@;
 }
 
+QPushButton[kcVariant="quiet"]:disabled {
+    background-color: transparent;
+    border-color: transparent;
+}
+
+/* Ends something that is running. Recording red, and nothing else uses it. */
+QPushButton[kcVariant="danger"] {
+    background-color: @KcStatusRecordingMuted@;
+    border-color: @KcStatusRecording@;
+    color: @KcStatusRecording@;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QPushButton[kcVariant="danger"]:hover {
+    background-color: @KcStatusRecording@;
+    color: @KcTextOnAccent@;
+}
+
+/* ------------------------------------------------------------ tool buttons */
+
+QToolButton {
+    background-color: transparent;
+    color: @KcTextSecondary@;
+    border: @KcBorderWidth@px solid transparent;
+    border-radius: @KcRadiusControl@px;
+    padding: @KcSpacingMd@px @KcSpacingLg@px;
+}
+
+QToolButton:hover {
+    background-color: @KcSurfaceControlHover@;
+    color: @KcTextPrimary@;
+}
+
+QToolButton:pressed {
+    background-color: @KcSurfaceControlActive@;
+}
+
+QToolButton:checked {
+    background-color: @KcAccentMuted@;
+    border-color: @KcAccentPrimary@;
+    color: @KcTextPrimary@;
+}
+
+QToolButton:focus {
+    border: @KcBorderWidthStrong@px solid @KcFocusRing@;
+}
+
+QToolButton:disabled {
+    color: @KcTextDisabled@;
+}
+
+QToolButton::menu-indicator {
+    image: none;
+}
+
 /* -------------------------------------------------------------- navigation */
 
 QFrame#kcNavBar {
-    background-color: @KcSurfaceRaised@;
+    background-color: @KcSurfaceHeader@;
     border-top: @KcBorderWidth@px solid @KcBorderSubtle@;
 }
 
@@ -253,7 +404,8 @@ QToolButton[kcRole="navItem"] {
     color: @KcTextSecondary@;
     border: none;
     border-top: @KcSpacingXs@px solid transparent;
-    padding: @KcSpacingSm@px @KcSpacingLg@px @KcSpacingSm@px @KcSpacingLg@px;
+    border-radius: 0;
+    padding: @KcSpacingMd@px @KcSpacingLg@px @KcSpacingMd@px @KcSpacingLg@px;
     font-size: @KcFontSizeSm@px;
 }
 
@@ -264,12 +416,13 @@ QToolButton[kcRole="navItem"]:hover {
 
 QToolButton[kcRole="navItem"]:checked {
     color: @KcTextPrimary@;
-    background-color: @KcSurfaceControlActive@;
+    background-color: @KcSurfaceBase@;
     border-top: @KcSpacingXs@px solid @KcAccentPrimary@;
+    font-weight: @KcFontWeightMedium@;
 }
 
 QToolButton[kcRole="navItem"]:focus {
-    border-bottom: @KcBorderWidth@px solid @KcFocusRing@;
+    border-bottom: @KcBorderWidthStrong@px solid @KcFocusRing@;
 }
 
 /* --------------------------------------------------------------- inspector */
@@ -286,28 +439,92 @@ QLineEdit, QPlainTextEdit, QTextEdit, QSpinBox, QDoubleSpinBox, QComboBox {
     color: @KcTextPrimary@;
     border: @KcBorderWidth@px solid @KcBorderStrong@;
     border-radius: @KcRadiusControl@px;
-    padding: @KcSpacingXs@px @KcSpacingMd@px;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
     min-height: @KcControlHeight@px;
     selection-background-color: @KcAccentPrimary@;
     selection-color: @KcTextOnAccent@;
 }
 
+QLineEdit:hover, QPlainTextEdit:hover, QTextEdit:hover,
+QSpinBox:hover, QDoubleSpinBox:hover, QComboBox:hover {
+    border-color: @KcTextMuted@;
+}
+
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QSpinBox:focus, QDoubleSpinBox:focus, QComboBox:focus {
-    border-color: @KcFocusRing@;
+    border: @KcBorderWidthStrong@px solid @KcFocusRing@;
+}
+
+QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
+    background-color: @KcSurfaceBase@;
+    border-color: @KcBorderSubtle@;
+    color: @KcTextDisabled@;
+}
+
+QLineEdit[kcState="error"], QSpinBox[kcState="error"], QComboBox[kcState="error"] {
+    border-color: @KcStatusRecording@;
 }
 
 QComboBox::drop-down {
     border: none;
     width: @KcIconSizeLarge@px;
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+}
+
+QComboBox::down-arrow {
+    image: url(kc:chevron-down.svg);
+    width: @KcIconSize@px;
+    height: @KcIconSize@px;
 }
 
 QComboBox QAbstractItemView {
     background-color: @KcSurfaceOverlay@;
     border: @KcBorderWidth@px solid @KcBorderStrong@;
-    selection-background-color: @KcAccentMuted@;
+    border-radius: @KcRadiusControl@px;
+    padding: @KcSpacingXs@px;
+    selection-background-color: @KcSurfaceSelected@;
     selection-color: @KcTextPrimary@;
     outline: none;
+}
+
+/* The platform spin arrows are drawn for the platform palette and vanish on
+ * ours; these are ours. */
+QSpinBox::up-button, QDoubleSpinBox::up-button,
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    background-color: @KcSurfaceControlHover@;
+    border: none;
+    border-left: @KcBorderWidth@px solid @KcBorderSubtle@;
+    width: @KcIconSizeLarge@px;
+    subcontrol-origin: border;
+}
+
+QSpinBox::up-button, QDoubleSpinBox::up-button {
+    subcontrol-position: top right;
+    border-top-right-radius: @KcRadiusControl@px;
+}
+
+QSpinBox::down-button, QDoubleSpinBox::down-button {
+    subcontrol-position: bottom right;
+    border-bottom-right-radius: @KcRadiusControl@px;
+}
+
+QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+    background-color: @KcSurfaceControlActive@;
+}
+
+QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+    image: url(kc:chevron-up.svg);
+    width: @KcIconSize@px;
+    height: @KcIconSize@px;
+}
+
+QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+    image: url(kc:chevron-down.svg);
+    width: @KcIconSize@px;
+    height: @KcIconSize@px;
 }
 
 /* -------------------------------------------------------- views and tables */
@@ -317,20 +534,213 @@ QAbstractItemView {
     alternate-background-color: @KcSurfaceBase@;
     color: @KcTextPrimary@;
     border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSmall@px;
     gridline-color: @KcBorderSubtle@;
-    selection-background-color: @KcAccentMuted@;
+    selection-background-color: @KcSurfaceSelected@;
     selection-color: @KcTextPrimary@;
     outline: none;
 }
 
+QTableView::item, QListWidget::item, QTreeWidget::item, QListView::item {
+    padding: @KcSpacingMd@px @KcSpacingLg@px;
+    border: none;
+}
+
+QTableView::item:hover, QListWidget::item:hover,
+QTreeWidget::item:hover, QListView::item:hover {
+    background-color: @KcSurfaceControlHover@;
+}
+
+QTableView::item:selected, QListWidget::item:selected,
+QTreeWidget::item:selected, QListView::item:selected {
+    background-color: @KcSurfaceSelected@;
+    color: @KcTextPrimary@;
+}
+
+/* A view that is not focused still has to show what is selected - the user's
+ * choice did not become less true because they clicked elsewhere. */
+QAbstractItemView:!focus {
+    selection-background-color: @KcSurfaceSelected@;
+    selection-color: @KcTextPrimary@;
+}
+
+QHeaderView {
+    background-color: @KcSurfaceHeader@;
+}
+
 QHeaderView::section {
-    background-color: @KcSurfaceControl@;
+    background-color: @KcSurfaceHeader@;
     color: @KcTextSecondary@;
     border: none;
     border-right: @KcBorderWidth@px solid @KcBorderSubtle@;
     border-bottom: @KcBorderWidth@px solid @KcBorderSubtle@;
-    padding: @KcSpacingSm@px @KcSpacingMd@px;
+    padding: @KcSpacingMd@px @KcSpacingLg@px;
     font-size: @KcFontSizeXs@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QHeaderView::section:hover {
+    background-color: @KcSurfaceControlHover@;
+    color: @KcTextPrimary@;
+}
+
+QHeaderView::up-arrow {
+    image: url(kc:chevron-up.svg);
+    width: @KcIconSize@px;
+    height: @KcIconSize@px;
+}
+
+QHeaderView::down-arrow {
+    image: url(kc:chevron-down.svg);
+    width: @KcIconSize@px;
+    height: @KcIconSize@px;
+}
+
+QTableCornerButton::section {
+    background-color: @KcSurfaceHeader@;
+    border: none;
+}
+
+/* ------------------------------------------------------------ scroll areas */
+/* The viewport of a scroll area is a plain child widget, and a plain child
+ * widget takes the *platform* window colour. On a Windows 11 machine in dark
+ * mode that is a dark rectangle, which is invisible in the dark theme and a
+ * black island in the light one. This is the rule that fixes that. */
+
+QAbstractScrollArea {
+    background-color: @KcSurfaceRaised@;
+    border: none;
+}
+
+QAbstractScrollArea > QWidget > QWidget {
+    background-color: @KcSurfaceRaised@;
+}
+
+QScrollArea, QScrollArea > QWidget > QWidget {
+    background-color: @KcSurfaceRaised@;
+}
+
+QScrollArea[kcSurface="base"],
+QScrollArea[kcSurface="base"] > QWidget > QWidget {
+    background-color: @KcSurfaceBase@;
+}
+
+QStackedWidget, QSplitter, QTabWidget {
+    background-color: transparent;
+}
+
+/* --------------------------------------------------------------------- tabs */
+
+QTabWidget::pane {
+    background-color: @KcSurfaceRaised@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSmall@px;
+    top: -@KcBorderWidth@px;
+}
+
+QTabBar {
+    background: transparent;
+}
+
+QTabBar::tab {
+    background-color: @KcSurfaceHeader@;
+    color: @KcTextSecondary@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-bottom: none;
+    border-top-left-radius: @KcRadiusSmall@px;
+    border-top-right-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingMd@px @KcSpacingXl@px;
+    margin-right: @KcSpacingXs@px;
+}
+
+QTabBar::tab:hover {
+    background-color: @KcSurfaceControlHover@;
+    color: @KcTextPrimary@;
+}
+
+QTabBar::tab:selected {
+    background-color: @KcSurfaceRaised@;
+    color: @KcTextPrimary@;
+    border-color: @KcBorderSubtle@;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QTabBar::tab:focus {
+    border: @KcBorderWidthStrong@px solid @KcFocusRing@;
+}
+
+/* -------------------------------------------------------------- menus */
+
+QMenu {
+    background-color: @KcSurfaceOverlay@;
+    color: @KcTextPrimary@;
+    border: @KcBorderWidth@px solid @KcBorderStrong@;
+    border-radius: @KcRadiusControl@px;
+    padding: @KcSpacingMd@px;
+}
+
+QMenu::item {
+    padding: @KcSpacingMd@px @KcSpacingXxl@px @KcSpacingMd@px @KcSpacingLg@px;
+    border-radius: @KcRadiusSmall@px;
+}
+
+QMenu::item:selected {
+    background-color: @KcSurfaceSelected@;
+    color: @KcTextPrimary@;
+}
+
+QMenu::item:disabled {
+    color: @KcTextDisabled@;
+}
+
+QMenu::separator {
+    height: @KcBorderWidth@px;
+    background-color: @KcBorderSubtle@;
+    margin: @KcSpacingSm@px @KcSpacingMd@px;
+}
+
+QMenuBar {
+    background-color: @KcSurfaceHeader@;
+    color: @KcTextPrimary@;
+}
+
+QMenuBar::item:selected {
+    background-color: @KcSurfaceControlHover@;
+}
+
+/* --------------------------------------------------------------- grouping */
+
+QGroupBox {
+    background-color: @KcSurfaceRaised@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSurface@px;
+    margin-top: @KcSpacingXl@px;
+    padding: @KcSpacingXl@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QGroupBox::title {
+    subcontrol-origin: margin;
+    subcontrol-position: top left;
+    left: @KcSpacingLg@px;
+    padding: 0 @KcSpacingSm@px;
+    color: @KcTextSecondary@;
+}
+
+/* ------------------------------------------------------------- progress */
+
+QProgressBar {
+    background-color: @KcSurfaceControl@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSmall@px;
+    text-align: center;
+    color: @KcTextSecondary@;
+    min-height: @KcControlHeight@px;
+}
+
+QProgressBar::chunk {
+    background-color: @KcAccentPrimary@;
+    border-radius: @KcRadiusSmall@px;
 }
 
 /* ------------------------------------------------------------- scroll bars */
@@ -344,7 +754,7 @@ QScrollBar:vertical {
 QScrollBar::handle:vertical {
     background: @KcScrollbar@;
     min-height: @KcControlHeight@px;
-    border-radius: @KcRadiusControl@px;
+    border-radius: @KcRadiusSmall@px;
 }
 
 QScrollBar::handle:vertical:hover {
@@ -360,7 +770,7 @@ QScrollBar:horizontal {
 QScrollBar::handle:horizontal {
     background: @KcScrollbar@;
     min-width: @KcControlHeight@px;
-    border-radius: @KcRadiusControl@px;
+    border-radius: @KcRadiusSmall@px;
 }
 
 QScrollBar::handle:horizontal:hover {
@@ -378,31 +788,42 @@ QScrollBar::add-page, QScrollBar::sub-page {
 /* ------------------------------------------------------------- message bar */
 
 QFrame[kcMessage="info"] {
-    background-color: @KcSurfaceControl@;
-    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    background-color: @KcSurfaceOverlay@;
+    border: @KcBorderWidth@px solid @KcBorderStrong@;
+    border-left: @KcSpacingSm@px solid @KcAccentPrimary@;
     border-radius: @KcRadiusControl@px;
 }
 
 QFrame[kcMessage="warning"] {
-    background-color: @KcStatusWarningMuted@;
+    background-color: @KcSurfaceOverlay@;
     border: @KcBorderWidth@px solid @KcStatusWarning@;
+    border-left: @KcSpacingSm@px solid @KcStatusWarning@;
     border-radius: @KcRadiusControl@px;
 }
 
 QFrame[kcMessage="error"] {
-    background-color: @KcStatusRecordingMuted@;
+    background-color: @KcSurfaceOverlay@;
     border: @KcBorderWidth@px solid @KcStatusRecording@;
+    border-left: @KcSpacingSm@px solid @KcStatusRecording@;
     border-radius: @KcRadiusControl@px;
 }
 
+/* ---------------------------------------------------------------- splitters */
+
 QSplitter::handle {
-    background-color: @KcBorderSubtle@;
+    background-color: @KcSurfaceBase@;
+}
+
+QSplitter::handle:hover {
+    background-color: @KcAccentPrimary@;
 }
 
 QSplitter::handle:horizontal {
-    width: @KcBorderWidth@px;
+    width: @KcSpacingSm@px;
+    image: none;
 }
 
 QSplitter::handle:vertical {
-    height: @KcBorderWidth@px;
+    height: @KcSpacingSm@px;
+    image: none;
 }

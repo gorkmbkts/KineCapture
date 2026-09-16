@@ -12,7 +12,7 @@ from typing import Optional
 
 from kinecapture.dataset.summary_index import TakeIndex
 from kinecapture.studio.services.library import LibraryService, VersionRow
-from kinecapture.studio.services.messages import Message, Severity, from_error
+from kinecapture.studio.services.messages import Action, Message, Severity, from_error
 from kinecapture.studio.services.session import SessionService
 
 from .observable import Event, Observable
@@ -43,6 +43,10 @@ class LibraryViewModel:
         self.message: Event[Message] = Event()
         #: Emitted when the user asks to label a version. The shell routes it.
         self.open_for_review: Event[VersionRow] = Event()
+        #: Emitted when the user asks for another version of the same take,
+        #: computed with the settings in force now. The shell routes it to
+        #: the processing queue; the existing version is never touched.
+        self.recompute_requested: Event[VersionRow] = Event()
 
     @property
     def filters(self):  # noqa: ANN201
@@ -139,6 +143,45 @@ class LibraryViewModel:
             )
         self.open_for_review.emit(target)
         return True
+
+    # ------------------------------------------------------------ new version
+    def recompute(self, row: Optional[VersionRow] = None) -> bool:
+        """Ask for another version of this take with the current settings.
+
+        A new version, never an edit of the old one: the arrays and the
+        checksums of a finished run are what the labels point at, and
+        recomputing in place would change data somebody has already reviewed.
+        """
+        target = row or self.selected.value
+        if target is None:
+            return False
+        self.recompute_requested.emit(target)
+        return True
+
+    def subject_recovery_message(self, row: VersionRow) -> Message:
+        """What can honestly be done about a version with nobody in it.
+
+        Choosing an athlete now cannot fill arrays that were written empty at
+        processing time. The only real repair is another run with the athlete
+        marked - and if the raw recording carries no anchor either, that has to
+        be said rather than implied away.
+        """
+        return Message(
+            headline="Bu sürümde izlenen kişi yok.",
+            severity=Severity.WARNING,
+            detail=(
+                "Sürüm işlenirken hiçbir kişi seçilmemiş; eklem dizileri boş "
+                "ve sonradan seçim onları doldurmaz. Kaydı yeniden işlemek yeni "
+                "bir sürüm üretir; mevcut sürüm olduğu gibi kalır. Ham kayıtta "
+                "kişi işareti yoksa yeni sürüm de kişisiz çıkar — işaret kayıt "
+                "sırasında konur."
+            ),
+            code="needs_subject_selection",
+            technical={"kayıt": row.take_id, "sürüm": row.run_id},
+            actions=(
+                Action("goto:processing", "Yeni sürüm hesapla", primary=True),
+            ),
+        )
 
     @property
     def all_rows(self) -> tuple[VersionRow, ...]:

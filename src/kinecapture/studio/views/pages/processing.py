@@ -16,7 +16,7 @@ from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QHBoxLayout,
-    QHeaderView,
+    QLabel,
     QProgressBar,
     QPushButton,
     QTableView,
@@ -25,12 +25,13 @@ from PySide6.QtWidgets import (
 )
 
 from kinecapture.dataset.summary_index import TakeSummary
+from kinecapture.studio.services.formatting import duration, local_datetime, timezone_note
 from kinecapture.studio.services.processing import Job, JobState
 from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.navigation import Destination
 from kinecapture.studio.viewmodels.processing import CANCEL_NOTE, ProcessingViewModel
 
-from ..models import ROW_ROLE, Column, RowTableModel
+from ..models import ROW_ROLE, Column, RowTableModel, configure_columns
 from ..widgets import ElidedLabel, label, separator
 from .base import StudioPage
 
@@ -58,18 +59,24 @@ _STATE_STATUS = {
 
 def _waiting_columns() -> tuple[Column[TakeSummary], ...]:
     return (
-        Column("participant", "Katılımcı", lambda r: r.participant_id),
+        Column(
+            "participant",
+            "Katılımcı",
+            lambda r: r.participant_id,
+            tooltip=lambda r: r.take_id,
+        ),
         Column(
             "started",
             "Tarih",
-            lambda r: r.started_at[:16].replace("T", " "),
+            lambda r: local_datetime(r.started_at),
             sort_key=lambda r: r.started_at,
+            tooltip=lambda r: timezone_note(r.started_at),
             numeric=True,
         ),
         Column(
             "duration",
             "Süre",
-            lambda r: f"{r.duration_s:.0f} sn",
+            lambda r: duration(r.duration_s),
             sort_key=lambda r: r.duration_s,
             numeric=True,
         ),
@@ -88,7 +95,13 @@ def _waiting_columns() -> tuple[Column[TakeSummary], ...]:
 
 def _job_columns() -> tuple[Column[Job], ...]:
     return (
-        Column("take", "Kayıt", lambda j: j.take.take_id),
+        Column(
+            "take",
+            "Kayıt",
+            lambda j: f"{j.take.participant_id} · {local_datetime(j.take.started_at)}",
+            tooltip=lambda j: j.take.take_id,
+            stretch=True,
+        ),
         Column(
             "state",
             "Durum",
@@ -138,6 +151,34 @@ class ProcessingPage(StudioPage):
         actions.addWidget(self.refresh_button)
         actions.addStretch(1)
         self.body_layout.addLayout(actions)
+
+        # What "Seçileni işle" is about to apply, next to the button that
+        # applies it. Expandable, because the summary is enough most of the
+        # time and the full list is wanted exactly when it is not.
+        profile_row = QHBoxLayout()
+        profile_row.setSpacing(tokens.metric("KcSpacingSm"))
+        profile_row.addWidget(label("ETKİN PROFİL", role="sectionTitle"))
+        self.profile_label = ElidedLabel("")
+        self.profile_label.setProperty("kcRole", "pageSubtitle")
+        profile_row.addWidget(self.profile_label, 1)
+        self.profile_button = QPushButton("Ayrıntılar")
+        self.profile_button.setProperty("kcVariant", "quiet")
+        self.profile_button.setCheckable(True)
+        self.profile_button.toggled.connect(self._toggle_profile)
+        profile_row.addWidget(self.profile_button)
+        self.body_layout.addLayout(profile_row)
+        self.profile_detail = QLabel("")
+        self.profile_detail.setProperty("kcRole", "mono")
+        self.profile_detail.setWordWrap(True)
+        self.profile_detail.hide()
+        self.body_layout.addWidget(self.profile_detail)
+
+        # An open take is not a queue entry. Said here so its absence from the
+        # list below reads as a decision rather than as a missing recording.
+        self.open_note = ElidedLabel("")
+        self.open_note.setProperty("kcStatus", "warning")
+        self.open_note.hide()
+        self.body_layout.addWidget(self.open_note)
 
         self.body_layout.addWidget(label("İŞLENMEYİ BEKLEYENLER", role="sectionTitle"))
         self.waiting_model, self.waiting_view = self._make_table(
@@ -194,8 +235,9 @@ class ProcessingPage(StudioPage):
         view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         view.verticalHeader().setVisible(False)
-        view.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        view.horizontalHeader().setStretchLastSection(True)
+        view.setWordWrap(False)
+        view.setTextElideMode(Qt.TextElideMode.ElideRight)
+        configure_columns(view, columns, fill=False)
         view.setAccessibleName(caption)
         return model, view
 
@@ -203,15 +245,19 @@ class ProcessingPage(StudioPage):
     def attach(self, viewmodel: ProcessingViewModel) -> None:
         self.viewmodel = viewmodel
         self.bind(viewmodel.waiting, self.waiting_model.set_rows)
+        self.bind(viewmodel.open_takes, self._show_open_takes)
         self.bind(viewmodel.jobs, self._show_jobs)
         self.bind(viewmodel.summary, self.summary.setText)
         self.bind(viewmodel.busy, self._show_busy)
         self.bind(viewmodel.can_pause, self._show_pause_support)
+        self.bind(viewmodel.profile_summary, self.profile_label.setText)
+        self.bind(viewmodel.profile_rows, self._show_profile_rows)
         self.bind_event(viewmodel.message, self.show_message)
 
     def page_activated(self) -> None:
         if self.viewmodel is None:
             return
+        self.viewmodel.refresh_profile()
         self.viewmodel.reload()
         self._timer.start()
 
@@ -225,6 +271,25 @@ class ProcessingPage(StudioPage):
 
     def _show_busy(self, busy: bool) -> None:
         self.refresh_button.setEnabled(not busy)
+
+    def _show_open_takes(self, takes: tuple[TakeSummary, ...]) -> None:
+        if not takes:
+            self.open_note.hide()
+            return
+        names = ", ".join(take.take_id for take in takes)
+        self.open_note.setText(
+            f"{len(takes)} kayıt hâlâ açık ve listede yok: {names}. "
+            "Kayıt kapanınca işlenmeye uygun olur."
+        )
+        self.open_note.show()
+
+    def _toggle_profile(self, shown: bool) -> None:
+        self.profile_detail.setVisible(shown)
+
+    def _show_profile_rows(self, rows: tuple[tuple[str, str], ...]) -> None:
+        self.profile_detail.setText(
+            "\n".join(f"{name:<20}{value}" for name, value in rows)
+        )
 
     def _show_pause_support(self, supported: bool) -> None:
         self.pause_button.setToolTip(

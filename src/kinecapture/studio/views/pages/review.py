@@ -67,6 +67,7 @@ from kinecapture.studio.viewmodels.review import (
     ReviewViewModel,
 )
 
+from .. import iconset
 from ..timeline import Interval, TimelineView, Tool
 from ..skeleton3d import Skeleton3DView
 from ..subject import SubjectPanel
@@ -103,6 +104,11 @@ def _tool_button(text: str, tooltip: str) -> QToolButton:
 class ReviewPage(StudioPage):
     """The labelling screen."""
 
+    #: This screen has a real inspector of its own - the label/athlete panel
+    #: on the right. The shell keeps its generic one shut here rather than
+    #: opening a second, emptier panel beside it.
+    owns_inspector = True
+
     def __init__(
         self,
         destination: Destination,
@@ -116,6 +122,7 @@ class ReviewPage(StudioPage):
         self._resume_position: Optional[int] = None
         self._roles: dict[str, Optional[int]] = {}
         self._camera = None
+        self._editing_enabled = False
 
         self._clock = QTimer(self)
         self._clock.setTimerType(Qt.TimerType.PreciseTimer)
@@ -179,22 +186,32 @@ class ReviewPage(StudioPage):
         row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(tokens.metric("KcSpacingSm"))
 
-        self.first_button = QPushButton("|◀")
-        self.first_button.setToolTip("Başa git (Home)")
-        self.back_button = QPushButton("◀")
-        self.back_button.setToolTip("Bir kare geri (←)")
-        self.play_button = QPushButton("▶")
-        self.play_button.setToolTip("Oynat / duraklat (Boşluk)")
-        self.forward_button = QPushButton("▶")
-        self.forward_button.setToolTip("Bir kare ileri (→)")
-        self.last_button = QPushButton("▶|")
-        self.last_button.setToolTip("Sona git (End)")
-        for button in (
-            self.first_button, self.back_button, self.play_button,
-            self.forward_button, self.last_button,
+        # Five different jobs, five different icons. They were "|◀ ◀ ▶ ▶ ▶|"
+        # before, and at this size the middle three were indistinguishable -
+        # which made "bir kare ileri" and "oynat" the same button to the eye.
+        self._transport: dict[str, QPushButton] = {}
+        for key, icon_key, name, tip in (
+            ("first", "first", "Başa git", "Başa git (Home)"),
+            ("back", "step-back", "Bir kare geri", "Bir kare geri (←)"),
+            ("play", "play", "Oynat", "Oynat / duraklat (Boşluk)"),
+            ("forward", "step-forward", "Bir kare ileri", "Bir kare ileri (→)"),
+            ("last", "last", "Sona git", "Sona git (End)"),
         ):
-            button.setFixedWidth(tokens.metric("KcControlHeightLarge") + 6)
+            button = QPushButton()
+            button.setIcon(iconset.icon(icon_key, tokens, size=tokens.metric("KcIconSize")))
+            button.setToolTip(tip)
+            # An icon with no text needs a name of its own, or a screen reader
+            # announces a blank button.
+            button.setAccessibleName(name)
+            button.setFixedWidth(tokens.metric("KcControlHeightLarge") + 8)
+            self._transport[key] = button
             row.addWidget(button)
+        self.first_button = self._transport["first"]
+        self.back_button = self._transport["back"]
+        self.play_button = self._transport["play"]
+        self.play_button.setProperty("kcVariant", "primary")
+        self.forward_button = self._transport["forward"]
+        self.last_button = self._transport["last"]
 
         self.first_button.clicked.connect(lambda: self._seek(0))
         self.back_button.clicked.connect(lambda: self._step(-1))
@@ -205,6 +222,14 @@ class ReviewPage(StudioPage):
         self.position_label = mono_label("—")
         row.addWidget(self.position_label)
         row.addStretch(1)
+
+        # Hidden unless an open actually failed, so the normal bar does not
+        # carry a button for a state that is not happening.
+        self.retry_button = QPushButton("Yeniden dene")
+        self.retry_button.setToolTip("Bu sürümü yeniden açmayı dener")
+        self.retry_button.clicked.connect(self._retry_open)
+        self.retry_button.setVisible(False)
+        row.addWidget(self.retry_button)
 
         self.next_gap_button = QPushButton("Sonraki eksik")
         self.next_gap_button.setToolTip(
@@ -585,22 +610,34 @@ class ReviewPage(StudioPage):
         self.bind(viewmodel.error_options, lambda _o: self._refill_classes())
         self.bind(viewmodel.playing, self._playing_changed)
         self.bind(viewmodel.frames, self._frames_changed)
+        self.bind(viewmodel.busy, self._loading_changed)
         self.bind_event(viewmodel.message, self.show_message)
         self.bind_event(viewmodel.frame_changed, self._render_frame)
+        # The whole screen is prepared from the *opened* event, never from a
+        # timer after the request: the load runs on a worker thread and
+        # anything scheduled alongside it arrives before the data does.
+        self.bind_event(viewmodel.opened, lambda _directory: self._after_open())
+        self.bind_event(viewmodel.open_failed, self._open_failed)
 
     # ------------------------------------------------------------- lifecycle
     def page_activated(self) -> None:
         """Open whichever version the library sent us here for."""
         shell = self.window()
         pending = getattr(shell, "pending_review", None)
-        if pending is None or self.viewmodel is None:
-            if self.viewmodel is None or self.viewmodel.review is None:
+        if self.viewmodel is None:
+            self._show_nothing()
+            return
+        if pending is None:
+            if self.viewmodel.review is None and not self.viewmodel.busy.value:
                 self._show_nothing()
             return
         setattr(shell, "pending_review", None)
         directory = getattr(pending, "directory", None) or str(pending)
+        if self.viewmodel.review is not None and self.viewmodel.directory == directory:
+            # Already showing exactly this version. Re-opening it would throw
+            # away the playhead and the selection for no gain.
+            return
         self.viewmodel.open_version(directory)
-        QTimer.singleShot(0, self._after_open)
 
     def page_deactivated(self) -> None:
         self._clock.stop()
@@ -657,13 +694,85 @@ class ReviewPage(StudioPage):
             review.frame, self.subject.candidate_title, viewmodel.fps.value
         )
         self.subject.open(review, annotator=viewmodel.store.annotator if viewmodel.store else "")
+        self._set_editing_enabled(review.frames > 0)
         self._render_frame(viewmodel.position.value)
+
+    # -------------------------------------------------------- loading states
+    def _loading_changed(self, busy: bool) -> None:
+        """While a version is loading the screen says so and edits nothing."""
+        if not busy:
+            return
+        self._set_editing_enabled(False)
+        self.retry_button.setVisible(False)
+        self.viewer.set_placeholder("Sürüm açılıyor…")
+        self.skeleton.set_note("Sürüm açılıyor…")
+        self.timeline.set_take(0, 30.0)
+        self.timeline.set_intervals(())
+        self.inspector.setCurrentIndex(0)
+
+    def _open_failed(self, _directory: str) -> None:
+        """A failed open is a state with a way out, not an empty screen."""
+        self._set_editing_enabled(False)
+        reason = self.viewmodel.open_error.value if self.viewmodel else ""
+        self.viewer.set_placeholder(
+            "Sürüm açılamadı.\n\n"
+            + (reason or "Ayrıntı için mesaj çubuğuna bakın.")
+            + "\n\n'Yeniden dene' ile tekrar açılabilir."
+        )
+        self.skeleton.set_note("Sürüm açılamadı.")
+        self.retry_button.setVisible(True)
+
+    def _retry_open(self) -> None:
+        if self.viewmodel is not None:
+            self.viewmodel.retry_open()
+
+    def _set_editing_enabled(self, enabled: bool) -> None:
+        """Nothing that edits a label is reachable before the data is here.
+
+        Drawing on a timeline that has no frame range produced a 0-0 movement
+        in the 15 September audit: the tool was live while the view still
+        thought the take was empty.
+        """
+        self._editing_enabled = enabled
+        for tool, button in self._tool_buttons.items():
+            button.setEnabled(enabled or tool is Tool.SCRUB)
+        if not enabled:
+            self._set_tool(Tool.SCRUB, sync=True)
+        for widget in (
+            self.snap_box,
+            self.next_gap_button,
+            self.add_error_button,
+            self.delete_movement_button,
+            self.apply_all_button,
+            self.new_exercise_button,
+            self.exercise_combo,
+            self.movement_start,
+            self.movement_end,
+            self.movement_note,
+            self.exclude_box,
+            self.play_button,
+            self.first_button,
+            self.back_button,
+            self.forward_button,
+            self.last_button,
+        ):
+            widget.setEnabled(enabled)
+
+    def set_inspector_visible(self, visible: bool) -> None:
+        """The shell's inspector toggle drives *this* screen's inspector."""
+        self.side_tabs.setVisible(visible)
 
     def _show_nothing(self) -> None:
         self.viewer.set_placeholder(
             "Etiketlenecek sürüm seçilmedi.\n\n"
             "İşlenen Videolar ekranından bir sürüm seçip 'Etiketle' deyin."
         )
+        self.skeleton.set_note("Sürüm seçilmedi.")
+        self.skeleton.set_joints(None)
+        self.timeline.set_take(0, 30.0)
+        self.timeline.set_intervals(())
+        self.retry_button.setVisible(False)
+        self._set_editing_enabled(False)
         self.inspector.setCurrentIndex(0)
 
     # ------------------------------------------------------------- transport
@@ -689,7 +798,15 @@ class ReviewPage(StudioPage):
             self.viewmodel.toggle_play()
 
     def _playing_changed(self, playing: bool) -> None:
-        self.play_button.setText("⏸" if playing else "▶")
+        self.play_button.setIcon(
+            iconset.icon(
+                "pause" if playing else "play",
+                self._tokens,
+                colour_token="KcTextOnAccent",
+                size=self._tokens.metric("KcIconSize"),
+            )
+        )
+        self.play_button.setAccessibleName("Duraklat" if playing else "Oynat")
         if playing and self.viewmodel is not None:
             fps = max(1.0, self.viewmodel.fps.value)
             self._clock.start(max(1, int(round(1000.0 / fps))))
@@ -876,14 +993,16 @@ class ReviewPage(StudioPage):
         intervals = [
             Interval(
                 key=row.sample_id, start=row.start, end=row.end, lane="movements",
-                text=row.text, status=row.status,
+                text=row.exercise_label or "sınıf yok", status=row.status,
+                colour_index=row.colour_index, code=row.code,
             )
             for row in viewmodel.movements.value
         ]
         intervals += [
             Interval(
                 key=row.interval_id, start=row.start, end=row.end, lane="errors",
-                text=row.text, status=row.status, parent=row.sample_id,
+                text=row.error_label or "sınıf seçin", status=row.status,
+                parent=row.sample_id, colour_index=row.colour_index, code=row.code,
             )
             for row in viewmodel.errors.value
         ]
@@ -1211,6 +1330,19 @@ class ReviewPage(StudioPage):
         self.skeleton.set_tokens(tokens)
         self.subject_panel.set_tokens(tokens)
         self.timeline.set_tokens(tokens)
+        # Icons are rendered with a colour baked in, so they are re-rendered
+        # rather than left tinted for the theme we just left.
+        size = tokens.metric("KcIconSize")
+        for key, icon_key in (
+            ("first", "first"),
+            ("back", "step-back"),
+            ("forward", "step-forward"),
+            ("last", "last"),
+        ):
+            self._transport[key].setIcon(iconset.icon(icon_key, tokens, size=size))
+        self._playing_changed(
+            self.viewmodel.playing.value if self.viewmodel is not None else False
+        )
 
 
 __all__ = ["ReviewPage", "QUICK_SLOTS"]

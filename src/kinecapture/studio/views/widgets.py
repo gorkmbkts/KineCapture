@@ -11,13 +11,14 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QVBoxLayout,
     QWidget,
@@ -170,18 +171,218 @@ class ContextField(QWidget):
         self.setAccessibleName(f"{item.label} {item.value} ({word})")
 
 
+class SectionList(QScrollArea):
+    """``label: value`` rows under headings, redrawn only when they change.
+
+    Used by the shell's inspector, which is refreshed several times a second
+    from whatever is selected. Rebuilding the widgets on every tick would
+    churn a panel that usually says exactly what it said before, so the
+    sections are compared first and the rebuild is skipped when they match.
+    """
+
+    def __init__(self, tokens: ThemeTokens, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._tokens = tokens
+        self._sections: tuple = ()
+        self.setWidgetResizable(True)
+        self.setFrameShape(QScrollArea.Shape.NoFrame)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._body = QWidget()
+        self._layout = QVBoxLayout(self._body)
+        self._layout.setContentsMargins(0, 0, 0, 0)
+        self._layout.setSpacing(tokens.metric("KcSpacingMd"))
+        self.setWidget(self._body)
+        self._empty = QLabel("")
+        self._empty.setWordWrap(True)
+        self._empty.setProperty("kcRole", "pageSubtitle")
+        self._layout.addWidget(self._empty)
+        self._layout.addStretch(1)
+        self.show_sections(())
+
+    def set_tokens(self, tokens: ThemeTokens) -> None:
+        self._tokens = tokens
+        sections, self._sections = self._sections, ()
+        self.show_sections(sections)
+
+    @property
+    def sections(self) -> tuple:
+        return self._sections
+
+    def show_sections(self, sections) -> None:  # noqa: ANN001 - Sequence[Section]
+        wanted = tuple(sections)
+        if wanted == self._sections:
+            return
+        self._sections = wanted
+        while self._layout.count():
+            item = self._layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None and widget is not self._empty:
+                widget.deleteLater()
+        if not wanted:
+            # A panel with nothing in it says *why* and what would fill it,
+            # rather than sitting there as unexplained empty width.
+            self._empty.setText(
+                "Bu ekranda henüz bir şey seçilmedi.\n\n"
+                "Bir satır seçin; ayrıntıları burada görünür."
+            )
+            self._layout.addWidget(self._empty)
+            self._layout.addStretch(1)
+            return
+        self._empty.hide()
+        for section in wanted:
+            self._layout.addWidget(label(section.title.upper(), role="sectionTitle"))
+            for row in section.rows:
+                self._layout.addWidget(self._row_widget(row))
+            if section.note:
+                note = QLabel(section.note)
+                note.setWordWrap(True)
+                note.setProperty("kcRole", "pageSubtitle")
+                self._layout.addWidget(note)
+            self._layout.addWidget(separator())
+        self._layout.addStretch(1)
+
+    def _row_widget(self, row) -> QWidget:  # noqa: ANN001 - inspectors.Row
+        holder = QWidget()
+        column = QVBoxLayout(holder)
+        margin = self._tokens.metric("KcSpacingXs")
+        column.setContentsMargins(0, margin, 0, margin)
+        column.setSpacing(self._tokens.metric("KcSpacingXs"))
+        caption = label(row.label, role="contextKey")
+        value = QLabel(row.value)
+        value.setWordWrap(True)
+        value.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        status = {"ready": "live", "warning": "warning", "error": "error"}.get(
+            getattr(row, "level", "neutral")
+        )
+        if status:
+            value.setProperty("kcStatus", status)
+        else:
+            value.setProperty("kcRole", "contextValue")
+        if row.detail:
+            holder.setToolTip(row.detail)
+        column.addWidget(caption)
+        column.addWidget(value)
+        holder.setAccessibleName(f"{row.label}: {row.value}")
+        return holder
+
+
+class RecordingStrip(QWidget):
+    """The live recording, visible on every screen, in a fixed-size region.
+
+    Two rules it exists to keep:
+
+    *It is always there.* The width is reserved whether or not a take is open,
+    so a recording starting cannot shift the controls next to it out from under
+    the pointer. Only the contents change.
+
+    *It can always be stopped.* The audit found a take running with no way to
+    end it except going back to Yakalama, and the indicator disappearing on the
+    way. The button here is the same stop the Capture screen uses.
+    """
+
+    stop_requested = Signal()
+
+    def __init__(self, tokens: ThemeTokens, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._tokens = tokens
+        self.setObjectName("kcRecordingStrip")
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(
+            tokens.metric("KcSpacingMd"), 0, tokens.metric("KcSpacingMd"), 0
+        )
+        layout.setSpacing(tokens.metric("KcSpacingMd"))
+
+        self._dot = QLabel()
+        self._dot.setFixedSize(iconset.icon_size(tokens))
+        self._text = label(role="contextValue")
+        self._elapsed = mono_label("")
+        self.stop_button = QPushButton("Kaydı durdur")
+        self.stop_button.setProperty("kcVariant", "danger")
+        self.stop_button.setToolTip("Açık kaydı kapat (Ctrl+Shift+S)")
+        self.stop_button.setAccessibleName("Kaydı durdur")
+        self.stop_button.clicked.connect(self.stop_requested.emit)
+        self.stop_button.hide()
+
+        layout.addWidget(self._dot)
+        layout.addWidget(self._text)
+        layout.addWidget(self._elapsed)
+        layout.addWidget(self.stop_button)
+        layout.addStretch(1)
+        self.setFixedWidth(tokens.metric("KcRecordingStripWidth"))
+        self.show_status(None)
+
+    def set_tokens(self, tokens: ThemeTokens) -> None:
+        self._tokens = tokens
+        self.setFixedWidth(tokens.metric("KcRecordingStripWidth"))
+        self._dot.setFixedSize(iconset.icon_size(tokens))
+        self.show_status(self._status)
+
+    def show_status(self, status) -> None:  # noqa: ANN001 - RecordingStatus | None
+        """Paint one reading. ``None`` means "nothing is recording"."""
+        self._status = status
+        open_take = bool(status is not None and status.is_open)
+        phase = status.phase.value if status is not None else "idle"
+        icon_key, colour_token = {
+            "idle": ("info", "KcTextMuted"),
+            "preparing": ("info", "KcStatusWarning"),
+            "recording": ("live", "KcStatusRecording"),
+            "closing": ("pause", "KcStatusWarning"),
+        }.get(phase, ("info", "KcTextMuted"))
+        size = self._tokens.metric("KcIconSize")
+        self._dot.setPixmap(
+            iconset.pixmap(
+                icon_key,
+                self._tokens.colour(colour_token),
+                size,
+                self.devicePixelRatioF(),
+            )
+        )
+        if status is None or phase == "idle":
+            self._text.setText("kayıt yok")
+            self._text.setProperty("kcRole", "contextKey")
+            self._elapsed.setText("")
+            self.stop_button.hide()
+            self.setToolTip("Şu anda açık bir kayıt yok.")
+        else:
+            headline = "KAYIT" if phase == "recording" else status.phase_text.upper()
+            self._text.setText(f"{headline} · {status.target_text}")
+            self._text.setProperty("kcRole", "contextValue")
+            self._elapsed.setText(status.elapsed_text)
+            # Still shown while closing, but disabled: the take is already on
+            # its way down and a second press must not start a second close.
+            self.stop_button.setVisible(open_take)
+            self.stop_button.setEnabled(phase == "recording")
+            self.setToolTip(
+                f"{status.phase_text} · {status.frames} kare\n"
+                f"{status.target_detail or status.target_text}"
+            )
+        _restyle(self._text)
+        self.setAccessibleName(
+            "Kayıt yok" if status is None or phase == "idle"
+            else f"{status.phase_text} {status.target_text} {status.elapsed_text}"
+        )
+
+    @property
+    def is_showing_recording(self) -> bool:
+        return bool(self._status is not None and self._status.is_open)
+
+
 class MessageBar(QFrame):
     """The visible layer of a message, with "Ayrıntılar" holding the rest."""
+
+    #: The key of an action the user pressed on this message.
+    action_triggered = Signal(str)
 
     def __init__(self, tokens: ThemeTokens, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._tokens = tokens
         self._message: Optional[Message] = None
         self._details_open = False
+        self._action_buttons: list[QPushButton] = []
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(*(tokens.metric("KcSpacingMd"),) * 4)
-        outer.setSpacing(tokens.metric("KcSpacingSm"))
+        outer.setContentsMargins(*(tokens.metric("KcSpacingLg"),) * 4)
+        outer.setSpacing(tokens.metric("KcSpacingMd"))
 
         row = QHBoxLayout()
         row.setSpacing(tokens.metric("KcSpacingMd"))
@@ -213,8 +414,31 @@ class MessageBar(QFrame):
         self._technical.hide()
         outer.addWidget(self._technical)
 
+        # What to do about it, next to the message that raised it. A message
+        # saying "use the Verileri Hesapla screen" and leaving the user to find
+        # the take again is a message that made them do the work twice.
+        self._actions = QHBoxLayout()
+        self._actions.setSpacing(tokens.metric("KcSpacingSm"))
+        self._actions.addStretch(1)
+        outer.addLayout(self._actions)
+
         self.setProperty("kcMessage", "info")
         self.hide()
+
+    def _rebuild_actions(self, message: Message) -> None:
+        for button in self._action_buttons:
+            self._actions.removeWidget(button)
+            button.deleteLater()
+        self._action_buttons.clear()
+        for action in message.actions:
+            button = QPushButton(action.label)
+            button.setProperty("kcVariant", "primary" if action.primary else "quiet")
+            button.setAccessibleName(action.label)
+            button.clicked.connect(
+                lambda _checked=False, key=action.key: self.action_triggered.emit(key)
+            )
+            self._actions.addWidget(button)
+            self._action_buttons.append(button)
 
     def set_tokens(self, tokens: ThemeTokens) -> None:
         self._tokens = tokens
@@ -239,6 +463,7 @@ class MessageBar(QFrame):
         self._technical.setText(message.technical_text())
         self._details_button.setVisible(message.has_details)
         self._technical.setVisible(self._details_open and message.has_details)
+        self._rebuild_actions(message)
         self.setProperty("kcMessage", status)
         _restyle(self)
         self.show()
@@ -280,6 +505,8 @@ __all__ = [
     "ContextField",
     "ElidedLabel",
     "MessageBar",
+    "RecordingStrip",
+    "SectionList",
     "StatusPill",
     "label",
     "mono_label",

@@ -286,9 +286,15 @@ def test_settings_page_renders_every_declared_field(
 
 
 def test_every_field_shows_its_explanation(open_window, app: QApplication) -> None:
+    """The sentence is shown in full now: it wraps instead of being elided.
+
+    A help text cut off at the width of a control is not an explanation, so
+    the label was changed from an eliding one to a wrapping one.
+    """
     page = open_window.page("settings")
     for key, row in page.rows.items():
-        assert row.help.fullText().strip(), key
+        assert row.help.text().strip(), key
+        assert row.help.wordWrap(), key
         assert row.accessibleDescription().strip(), key
 
 

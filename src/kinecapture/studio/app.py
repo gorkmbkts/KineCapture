@@ -21,7 +21,7 @@ from kinecapture.studio.services.window_state import (
     default_window_state_path,
     load_window_state,
 )
-from kinecapture.studio.theme import stylesheet_for
+from kinecapture.studio.theme import stylesheet_for  # noqa: F401 - re-exported for tests
 from kinecapture.studio.viewmodels.shell import ShellViewModel
 
 logger = logging.getLogger(__name__)
@@ -78,6 +78,7 @@ def run_studio(config: AppConfig) -> int:
     from PySide6.QtWidgets import QApplication
 
     from .views.skeleton3d import default_surface_format
+    from .views.theming import apply_application_theme
 
     # Must be set before the first GL context exists: the 3D skeleton view
     # needs a depth buffer, and asking for one afterwards is ignored.
@@ -86,7 +87,9 @@ def run_studio(config: AppConfig) -> int:
     application = QApplication.instance() or QApplication(sys.argv)
     application.setApplicationName(APP_NAME)
     application.setApplicationVersion(APP_VERSION)
-    application.setStyleSheet(stylesheet_for(config.theme))
+    # Style, palette and stylesheet together, before the first widget exists,
+    # so nothing is ever built against the platform's colours.
+    apply_application_theme(config.theme)
 
     window = build_window(config)
     install_exception_hook(window)

@@ -80,6 +80,42 @@ class SettingField:
     cost_note: str = ""
     #: Set when the value is shown but cannot be edited here.
     read_only: bool = False
+    #: When a saved change actually starts to matter. Empty means the group's
+    #: default. Saved and effective are not the same thing, and an interface
+    #: that says "kaydedildi" while the camera still runs the old profile is
+    #: telling the operator something false.
+    applies: str = ""
+
+    @property
+    def applies_when(self) -> str:
+        return self.applies or GROUP_APPLIES.get(self.group, APPLIES_NOW)
+
+
+#: The three moments a setting can start to matter.
+APPLIES_NOW = "now"
+APPLIES_NEXT_RECORDING = "next_recording"
+APPLIES_RECONNECT = "reconnect"
+APPLIES_NEXT_JOB = "next_job"
+APPLIES_RESTART = "restart"
+
+APPLIES_TEXT = {
+    APPLIES_NOW: "hemen",
+    APPLIES_NEXT_RECORDING: "sonraki kayıtta",
+    APPLIES_RECONNECT: "yeniden bağlanınca",
+    APPLIES_NEXT_JOB: "sonraki işlemede",
+    APPLIES_RESTART: "uygulama yeniden açılınca",
+}
+
+#: What a group's settings do by default. Capture settings are the camera's
+#: profile, so they reach it when the camera is opened again.
+GROUP_APPLIES = {
+    "capture": APPLIES_RECONNECT,
+    "preview": APPLIES_RECONNECT,
+    "processing": APPLIES_NEXT_JOB,
+    "data": APPLIES_NEXT_RECORDING,
+    "appearance": APPLIES_NOW,
+    "advanced": APPLIES_NOW,
+}
 
 
 def _capture_fields() -> tuple[SettingField, ...]:
@@ -172,6 +208,8 @@ def _capture_fields() -> tuple[SettingField, ...]:
             minimum=0.0,
             maximum=600.0,
             suffix=" dk",
+            # Checked when a recording starts, not when the camera opens.
+            applies=APPLIES_NEXT_RECORDING,
         ),
     )
 
@@ -344,6 +382,7 @@ def _data_fields() -> tuple[SettingField, ...]:
                 "verilerinizi taşımaz; eski klasör olduğu yerde kalır."
             ),
             kind="path",
+            applies=APPLIES_NEXT_RECORDING,
         ),
         SettingField(
             key="log_dir",
@@ -351,6 +390,7 @@ def _data_fields() -> tuple[SettingField, ...]:
             label="Log klasörü",
             help_text="Tanılama kayıtlarının yazıldığı klasör.",
             kind="path",
+            applies=APPLIES_RESTART,
         ),
     )
 
@@ -643,6 +683,12 @@ def _coerce_top_level(key: str, value: Any) -> Any:
 
 
 __all__ = [
+    "APPLIES_NEXT_JOB",
+    "APPLIES_RESTART",
+    "APPLIES_NEXT_RECORDING",
+    "APPLIES_NOW",
+    "APPLIES_RECONNECT",
+    "APPLIES_TEXT",
     "Choice",
     "FIELDS_BY_KEY",
     "GROUP_ORDER",

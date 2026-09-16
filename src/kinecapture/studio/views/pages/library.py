@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QHBoxLayout,
-    QHeaderView,
     QLineEdit,
     QPushButton,
     QSplitter,
@@ -27,12 +26,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from kinecapture.studio.services.formatting import local_datetime, timezone_note
 from kinecapture.studio.services.library import VersionRow
 from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.library import LibraryViewModel
 from kinecapture.studio.viewmodels.navigation import Destination
 
-from ..models import ROW_ROLE, Column, RowTableModel, SearchProxy
+from ..models import ROW_ROLE, Column, RowTableModel, SearchProxy, configure_columns
 from ..widgets import ElidedLabel, label, mono_label, separator
 from .base import StudioPage
 
@@ -43,12 +43,20 @@ _COVER_WIDTH = 240
 
 def _columns() -> tuple[Column[VersionRow], ...]:
     return (
-        Column("participant", "Katılımcı", lambda r: r.participant_id),
+        # The row names what a person recognises: who, when, and which take.
+        # The run_/take_ identifiers live in the detail panel and the tooltip.
+        Column(
+            "participant",
+            "Katılımcı",
+            lambda r: r.participant_id,
+            tooltip=lambda r: f"{r.take_id}\n{r.run_id}",
+        ),
         Column(
             "started",
             "Tarih",
-            lambda r: r.started_at[:16].replace("T", " "),
+            lambda r: local_datetime(r.started_at),
             sort_key=lambda r: r.started_at,
+            tooltip=lambda r: timezone_note(r.started_at),
             numeric=True,
         ),
         Column(
@@ -143,15 +151,23 @@ class LibraryPage(StudioPage):
         self.filter_box.setAccessibleName("Sürüm filtresi")
         self.filter_box.setToolTip("Listeyi duruma göre daraltır")
         self.search = QLineEdit()
-        self.search.setPlaceholderText("Ara")
+        self.search.setPlaceholderText("Katılımcı, tarih veya model ara")
+        self.search.setMaximumWidth(360)
         self.search.setClearButtonEnabled(True)
         self.label_button = QPushButton("Etiketle")
         self.label_button.setProperty("kcVariant", "primary")
         self.label_button.setEnabled(False)
+        self.recompute_button = QPushButton("Yeni sürüm hesapla")
+        self.recompute_button.setToolTip(
+            "Bu kaydı şu anki ayarlarla yeniden işler. Mevcut sürüm silinmez."
+        )
+        self.recompute_button.setEnabled(False)
         self.refresh_button = QPushButton("Yenile")
         self.refresh_button.setProperty("kcVariant", "quiet")
         top.addWidget(self.filter_box)
-        top.addWidget(self.search, 1)
+        top.addWidget(self.search)
+        top.addStretch(1)
+        top.addWidget(self.recompute_button)
         top.addWidget(self.label_button)
         top.addWidget(self.refresh_button)
         self.body_layout.addLayout(top)
@@ -176,20 +192,26 @@ class LibraryPage(StudioPage):
         self.view.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.view.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.view.verticalHeader().setVisible(False)
-        self.view.horizontalHeader().setSectionResizeMode(
-            QHeaderView.ResizeMode.Interactive
-        )
-        self.view.horizontalHeader().setStretchLastSection(True)
+        self.view.setWordWrap(False)
+        self.view.setTextElideMode(Qt.TextElideMode.ElideRight)
+        # Every column here holds a fixed-length value, so none of them
+        # is stretched and the remaining width stays empty.
+        configure_columns(self.view, _columns(), fill=False)
         self.view.setAccessibleName("İşlenmiş sürümler")
         splitter.addWidget(self.view)
         splitter.addWidget(self._build_detail(tokens))
-        splitter.setSizes([900, 380])
+        # The list is the library; the panel is one item's detail. It has a
+        # floor so it stays readable and a ceiling so it stops eating the list.
+        splitter.setSizes([1180, 420])
+        splitter.setStretchFactor(0, 3)
+        splitter.setStretchFactor(1, 1)
         self.body_layout.addWidget(splitter, 1)
 
         self.filter_box.currentIndexChanged.connect(self._filter_chosen)
         self.search.textChanged.connect(self.proxy.set_search)
         self.refresh_button.clicked.connect(self._refresh)
         self.label_button.clicked.connect(self._label)
+        self.recompute_button.clicked.connect(self._recompute)
         self.view.selectionModel().selectionChanged.connect(self._selection_changed)
         self.view.doubleClicked.connect(lambda _index: self._label())
 
@@ -256,8 +278,16 @@ class LibraryPage(StudioPage):
         if self.viewmodel is not None:
             self.viewmodel.select(row)
 
+    def _recompute(self) -> None:
+        if self.viewmodel is not None:
+            self.viewmodel.recompute()
+
     def _show_selected(self, row: Optional[VersionRow]) -> None:
         self.label_button.setEnabled(row is not None)
+        self.recompute_button.setEnabled(row is not None)
+        if row is not None and not row.subject_chosen and self.viewmodel is not None:
+            # Said once per selection, with the only repair that actually works.
+            self.show_message(self.viewmodel.subject_recovery_message(row))
         if row is None:
             self.detail_title.setText("Bir sürüm seçin")
             self.detail_lines.setText("")
@@ -319,6 +349,60 @@ class LibraryPage(StudioPage):
             card = _VersionCard(self._tokens, self.compare_holder)
             card.show_row(row, 150)
             self.compare_layout.addWidget(card)
+
+    def inspector_sections(self) -> tuple:
+        """The selected version: what it is, and what produced it."""
+        from kinecapture.studio.services.inspectors import Row, Section
+
+        row = self.viewmodel.selected.value if self.viewmodel else None
+        if row is None:
+            return ()
+        parameters = self.viewmodel.parameters(row)
+        return (
+            Section(
+                "Sürüm",
+                (
+                    Row("Katılımcı", row.participant_id),
+                    Row(
+                        "Tarih",
+                        local_datetime(row.started_at),
+                        detail=timezone_note(row.started_at),
+                    ),
+                    Row("Kare", str(row.frames)),
+                    Row("Model", row.model_text),
+                    Row(
+                        "Durum",
+                        row.quality_text,
+                        level={"live": "ready", "warning": "warning"}.get(
+                            row.quality_status, "neutral"
+                        ),
+                        detail=" · ".join(row.issues),
+                    ),
+                    Row("Etiket", "var" if row.annotated else "yok"),
+                ),
+            ),
+            Section(
+                "Kimlikler",
+                (
+                    Row("Kayıt", row.take_id),
+                    Row("Sürüm", row.run_id),
+                    Row("Klasör", row.directory, detail=row.directory),
+                ),
+                note="Ayrıntılar ve kopyalama için; satırlarda kısaltılır.",
+            ),
+            Section(
+                "Üretim ayarları",
+                (
+                    Row("Şema", row.schema_version or "—"),
+                    Row("Derinlik", str(parameters.get("depth_mode", "—"))),
+                    Row(
+                        "Fitting",
+                        "açık" if parameters.get("body_fitting") else "kapalı",
+                    ),
+                    Row("Derinlik dosyası", "var" if row.has_depth else "yok"),
+                ),
+            ),
+        )
 
     def _label(self) -> None:
         if self.viewmodel is not None:

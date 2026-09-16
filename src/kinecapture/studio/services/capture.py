@@ -32,6 +32,42 @@ from kinecapture.domain.project import CaptureProfile, Session, Take
 
 logger = logging.getLogger(__name__)
 
+#: The two recording modes, as profile facts rather than as button labels.
+#: ``raw_only`` is the default and the cheapest live path; ``live_skeleton``
+#: asks the device to track while recording, which is a different profile and
+#: therefore a different connection.
+RAW_ONLY = "raw_only"
+LIVE_SKELETON = "live_skeleton"
+
+
+def mode_of_profile(profile: CaptureProfile) -> str:
+    """Which mode a profile *is*. The profile is the truth, not the button."""
+    return LIVE_SKELETON if profile.enable_body_tracking else RAW_ONLY
+
+
+def profile_for_mode(base: CaptureProfile, mode: str) -> CaptureProfile:
+    """``base`` with the two fields the mode actually controls set.
+
+    Nothing else is touched: the mode is a decision about live body tracking,
+    not a second copy of the capture settings.
+    """
+    from dataclasses import replace
+
+    wants_skeleton = mode == LIVE_SKELETON
+    if (
+        profile_has_mode(base, mode)
+        and base.store_skeleton == wants_skeleton
+    ):
+        return base
+    return replace(
+        base, enable_body_tracking=wants_skeleton, store_skeleton=wants_skeleton
+    )
+
+
+def profile_has_mode(profile: CaptureProfile, mode: str) -> bool:
+    return mode_of_profile(profile) == mode
+
+
 #: What the preview overlay is, said once so no screen has to phrase it itself.
 PREVIEW_POSE_DISCLAIMER = (
     "Bu kaplama kadrajı kontrol etmek içindir: CPU'da çalışan hafif bir 2B "
@@ -112,6 +148,14 @@ class CaptureService:
     _pose_factory: Optional[Callable[[], Any]] = field(default=None, repr=False)
     _pose_error: str = ""
     last_take: Optional[Take] = None
+    #: The mode the operator has chosen for the *next* connection.
+    _mode: str = ""
+    #: The profile the connected camera is actually running. ``None`` when
+    #: nothing is connected - which is the difference between "chosen" and
+    #: "in force", and the whole reason this field exists.
+    _active_profile: Optional[CaptureProfile] = field(default=None, repr=False)
+    _free_bytes_cached: int = field(default=0, repr=False)
+    _free_bytes_at: float = field(default=-1e9, repr=False)
 
     # ------------------------------------------------------------- lifecycle
     @property
@@ -130,8 +174,33 @@ class CaptureService:
     def pose_unavailable_reason(self) -> str:
         return self._pose_error
 
+    @property
+    def mode(self) -> str:
+        """The mode chosen for the next connection."""
+        return self._mode or mode_of_profile(self.config.capture)
+
+    @property
+    def active_mode(self) -> str:
+        """The mode the connected camera is really running, or ``""``."""
+        profile = self._active_profile
+        return mode_of_profile(profile) if profile is not None else ""
+
+    @property
+    def active_profile(self) -> Optional[CaptureProfile]:
+        return self._active_profile
+
+    @property
+    def mode_applied(self) -> bool:
+        """Whether the chosen mode is the one in force right now."""
+        return self._active_profile is not None and self.active_mode == self.mode
+
+    def set_mode(self, mode: str) -> None:
+        """Remember the choice. It reaches the camera on the next connection."""
+        self._mode = mode
+
     def profile(self) -> CaptureProfile:
-        return self.config.capture
+        """The profile a connection made *now* would use."""
+        return profile_for_mode(self.config.capture, self.mode)
 
     def connect(self, *, backend: Optional[str] = None) -> Any:
         """Open the camera and start the preview. Returns the camera info."""
@@ -140,15 +209,20 @@ class CaptureService:
         if self._service is not None:
             self.disconnect()
         kind = BackendKind(backend or getattr(self.config.backend, "value", self.config.backend))
-        camera = self._build_backend(kind)
+        profile = self.profile()
+        camera = self._build_backend(kind, profile)
         processor = self._build_pose_processor()
         self._service = LiveCaptureService(camera, preview_processor=processor)
         info = self._service.connect()
         self._service.start_preview()
+        # Only now is the mode in force. Recorded from the profile the backend
+        # was actually built with, so "etkin" cannot be claimed on the strength
+        # of a button having been pressed.
+        self._active_profile = getattr(camera, "_profile", profile)
         return info
 
-    def _build_backend(self, kind: BackendKind):  # noqa: ANN202 - CameraBackend
-        profile = self.profile()
+    def _build_backend(self, kind: BackendKind, profile: Optional[CaptureProfile] = None):  # noqa: ANN202
+        profile = profile if profile is not None else self.profile()
         if kind is BackendKind.MOCK:
             from kinecapture.camera.mock import MockCameraBackend
 
@@ -207,6 +281,7 @@ class CaptureService:
 
     def disconnect(self) -> None:
         if self._service is None:
+            self._active_profile = None
             return
         try:
             self._service.shutdown()
@@ -214,6 +289,7 @@ class CaptureService:
             logger.exception("Kamera kapatılırken hata")
         finally:
             self._service = None
+            self._active_profile = None
 
     # --------------------------------------------------------------- preview
     def latest_frame(self):  # noqa: ANN201 - FramePacket
@@ -293,20 +369,39 @@ class CaptureService:
         )
 
     def _free_bytes(self) -> int:
-        import shutil
+        """Free space on the data volume, asked for at most once a second.
 
+        ``metrics()`` is read several times a second by the Capture screen and
+        again by the shell's recording strip. Free space does not move fast
+        enough to be worth a syscall on every one of those.
+        """
+        import shutil
+        import time
+
+        now = time.monotonic()
+        if now - self._free_bytes_at < 1.0:
+            return self._free_bytes_cached
         root = Path(self.config.dataset_root)
+        value = 0
         for candidate in (root, *root.parents):
             try:
-                return int(shutil.disk_usage(str(candidate)).free)
+                value = int(shutil.disk_usage(str(candidate)).free)
             except OSError:
                 continue
-        return 0
+            break
+        self._free_bytes_cached = value
+        self._free_bytes_at = now
+        return value
 
 
 __all__ = [
+    "LIVE_SKELETON",
     "PREVIEW_POSE_DISCLAIMER",
+    "RAW_ONLY",
     "CaptureMetrics",
     "CaptureService",
     "SubjectAnchor",
+    "mode_of_profile",
+    "profile_for_mode",
+    "profile_has_mode",
 ]

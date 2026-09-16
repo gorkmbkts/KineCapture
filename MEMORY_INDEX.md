@@ -1,35 +1,23 @@
 # MEMORY_INDEX — KineCapture Studio
 
-Her görevde **yalnız bu dosya** okunur. `MEMORY.md` arşivdir; yalnız ilgili
-bölüm hedefli açılır. Kod hafızadan önceliklidir.
+Önce bu indeks; `MEMORY.md` yalnız hedefli okunur. Kod önceliklidir.
 
 ## Güncel faz
 
-Yeni arayüz `kinecapture/studio/` altında **tamamlandı (F0–F15)**. Sekiz
-ekranın hepsi gerçek; uçtan uca tur mock ile çalıştırıldı. Plan ve faz
-sonuçları: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** bölüm 7. `python -m kinecapture` Studio'yu, `--legacy-gui`
-eski arayüzü açar. Kullanıcı kararı: **geriye dönük veri uyumluluğu aranmıyor;
-mevcut veri silinmiyor.**
+Studio F0–F15 teslim edildi. **15 Eylül denetiminin P0 açıkları 16 Eylül'de
+kapatıldı** ve görsel sistem yeniden kuruldu (aşağıda). Sekiz ekran gerçek.
+Faz geçmişi: `FAZ_PLANI_PYSIDE6_STUDIO.md` §7. `python -m kinecapture` Studio,
+`--legacy-gui` eski GUI. Eski veri uyumluluğu aranmıyor; veri silinmiyor.
 
-## Sürümler (kaynak: `src/kinecapture/__init__.py`)
+## Sürümler
 
-| Sözleşme | Sürüm |
-|---|---|
-| app / paket | 0.11.0 |
-| project / session | 1.1.0 / 2.0.0 |
-| take / skeleton stream | 1.2.0 / 1.2.0 |
-| raw archive · capture policy | 1.1.0 · 2 |
-| processing · canonical annotation | **1.1.0** · **1.1.0** |
-| subject review · canonical release | **1.0.0** · **1.0.0** |
-| subject association | 1.1.0 |
-| eski annotation / release | 2.2.0 / 2.2.0 |
-| label / feature spec | 2.0.0 / 1.0.0 |
-| identity SQLite schema | 1 |
+Tam liste: `src/kinecapture/__init__.py`. app 0.11.0 · processing 1.1.0 ·
+canonical annotation 1.1.0 · subject review 1.0.0 · canonical release 1.0.0 ·
+studio theme tokens **1.1.0** · identity SQLite şema 1.
 
 Ortam: `KineSynth` / Python 3.11.14, PySide6 6.10.1, numpy 2.4.6, opencv 4.12,
-pyzed 5.4 / SDK 5.4.1. RTX 2060 6 GB, i7-10750H, ~16 GB RAM. **PyOpenGL kurulu
-ama hızlandırıcısı numpy 2.x ile uyumsuz — 3B görünüm yalnız Qt GL sınıflarını
-kullanır.**
+pyzed 5.4 / SDK 5.4.1. RTX 2060 6 GB, i7-10750H, ~16 GB RAM. **PyOpenGL
+hızlandırıcısı numpy 2.x ile uyumsuz — 3B yalnız Qt GL sınıfları.**
 
 ## Modül haritası (`src/kinecapture/`, ~42,7k satır)
 
@@ -49,63 +37,72 @@ kullanır.**
 | `features/` | sürümlü seçilebilir özellik katmanı (31 özellik) |
 | `identity/` | SQLite, scrypt, auth |
 | `visualization/` | `skeleton_spec` ZED tabloları |
-| `studio/` | **yeni arayüz**: `services/` · `viewmodels/` · `theme/` (Qt'siz) · `views/` |
+| `studio/` | **yeni arayüz**: `services/` `viewmodels/` `theme/` (Qt'siz) `views/` (+`theming` `palette` `qssassets` `toasts` `brand`) |
 | `gui/` | eski arayüz; `--legacy-gui`, eski kayıtlar için korunuyor |
 | `tools/` | verify_zed_topology, extract_raw, capture_diagnostic |
 
-Durum: `DISCONNECTED → READY → PREVIEWING → RECORDING → STOPPING →
-REVIEWING`; `ERROR` her yerden.
-
+Durum: `DISCONNECTED→READY→PREVIEWING→RECORDING→STOPPING→REVIEWING`, `ERROR`.
 ## `MEMORY.md` bölüm dizini (satır no)
 
-| # | Satır | İçerik |
-|---|---|---|
-| 1–2 | 18 | Kullanım politikası; faz geçmişi |
-| 3–4 | 86 | Ortam; ZED SDK/donanım ölçümleri (ilk açılış, BGRA) |
-| 5–6 | 173 | Çalışan özellikler; 16 kalıcı teknik karar (kare indeksi) |
-| 6B | 294 | İki seviyeli etiketleme (MovementSample + ErrorInterval) |
-| 6C | 393 | Seçilebilir özellik katmanı, registry, export |
-| 6D | 600 | **Ölçüm:** SVO2 depth'i geri vermez, H264 kayıplı; RGB-D arşivi |
-| 6E | 790 | Kimlik/SQLite, tek Sistem Sahibi, proje erişimi |
-| 6H–6I | 1197 / 1289 | Proje silme; **türetilmiş correctness** |
-| 6J–6K | 1505 / 1560 | Eklem kanıtı: kanonik roller, `JointAnnotationStatus` |
-| 6P | 1872 | Squat düz-bacak tanısı: BODY_34 hatası, BODY_38 adayı |
-| 6S–6T | 2071 / 2141 | Squat/offline: **SDK depth tampon alias hatası** |
-| 6V | 2375 | **BACKEND MİMARİSİ:** min ham kayıt, anchor, process_take |
-| 6X | 2546 | Canlı ZED tek kişi testi — **devam ediyor**, tamamlanmadı |
-| 6Y | 2580 | **F0/F1:** arayüz-backend kopukluğu, ölçülen performans açıkları |
-| 6Z | 2666 | **F2:** studio/ katmanları, tokens.json, kabuk, offscreen font |
-| 6AA | 2748 | **F3:** processing 1.1.0 — memmap, özet, thumbnail, derinlik |
-| 6AB | 2858 | **F4–F7:** ekranlar, TaskRunner, alt süreç, kütüphane, ölçümler |
-| 6AC | 3305 | **F8:** Etiketleme, kanonik sidecar, 7 backend açığı, bütçeler |
-| 6AD | 3401 | **F9–F15 (en güncel):** 3B, sporcu, dışa aktarım, cila, ölçümler |
-| 7–9 | 2937 · 2964 · 2978 | Mimari sınırlar; test komutları; doğrulamalar |
-| 10–12 | 3228 · 3249 · 3272 | Bilinen sorunlar; uygulanmayanlar; adımlar |
+1–2 (18) politika/faz · 3–4 (86) ortam, ZED ölçümleri · 5–6 (173) çalışan
+özellikler, 16 kalıcı karar · 6B (294) iki seviyeli etiketleme · 6C (393)
+özellik katmanı · 6D (600) **SVO2 depth'i geri vermez** · 6E (790) kimlik ·
+6H–6I (1197/1289) silme, türetilmiş correctness · 6J–6K (1505/1560) eklem
+kanıtı · 6P (1872) squat düz-bacak · 6S–6T (2071/2141) **SDK depth alias
+hatası** · 6V (2375) **backend mimarisi** · 6X (2546) canlı ZED — devam ediyor ·
+6Y (2580) F0/F1 açıklar · 6Z (2666) F2 katmanlar · 6AA (2748) F3 processing ·
+6AB (2858) F4–F7 · 6AC (3305) F8 etiketleme · 6AD (3401) F9–F15 · 6AE **16 Eylül
+GUI/UX** · 7–9 (2937/2964/2978) sınırlar, testler, doğrulamalar · 10–12
+(3228/3249/3272) sorunlar, uygulanmayanlar, adımlar.
 
-Plan ve faz sonuçları: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** (bölüm 7).
-Tespit: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
+Plan: **`FAZ_PLANI_PYSIDE6_STUDIO.md`** §7. Tespit: `F1_MEVCUT_DURUM_TESPITI_2026-09-13.md`.
+
+## 16 Eylül GUI/UX turu (ayrıntı: `MEMORY.md` §6AE)
+
+Kapandı, regresyon testli: etiketleme açılışı `ReviewViewModel.opened` olayına
+bağlı; kayıt hedefi tek kaynakta (`SessionService`/`WorkTarget`); kayıt modu
+backend profiline giriyor (`profile_for_mode`); kayıt kabukta görünür ve her
+ekrandan durdurulabilir (Ctrl+Shift+S), açık kayıt işlenemez; proje listesi
+kullanıcıya göre yüklenir; tanılama doğru imza + dört durum. Görsel: tokens
+1.1.0, `theming.apply_application_theme` (Fusion+palet+QSS), yüzen bildirim
+(geometri sabit), tek denetçi, timeline trim/hover/snap/sabit sınıf renkleri,
+sütun politikası + yerel saat, ayarlar rayı+arama, taşıma ikonları, tek başına
+çekim, YTÜ logosu, boşluklar.
+
+Kullanım geri bildirimi sonrası (aynı gün): **kayıt butonu hedef yokken devre
+dışıydı — gerçek ZED'de kayıt alınamamasının sebebi buydu**; artık bağlıysa hep
+etkin, katılımcı yoksa oluşturulup adı söyleniyor. Bildirim katmanı
+`WA_TransparentForMouseEvents` yüzünden **tüm alt ağacı tıklanamaz** yapıyordu;
+katman artık yalnız kartlar kadar. Projeler'e **proje silme** eklendi
+(`ProjectDeletionService` + ad yazarak onay). Yakalama ekranı yeniden
+tasarlandı: kaydırma yok, görüntü solda, konsol sağda, taşıma altta; hedef
+kutusu kaldırıldı — kişi yalnız görüntüye tıklanarak seçilir.
+
+**Açık:** kişi seçilmemiş sürüm için kare-anchor seçici yok; kurtarma yolu
+"yeni sürüm hesapla" + dürüst açıklama. Gerçek ZED ile kayıt turu kullanıcı
+tarafından tekrar denenmeli; mock ile doğrulandı.
 
 ## Bilinen açıklar (ölçümler 6Y'de)
 
-- Studio'da Projeler · Yakalama · Verileri Hesapla · İşlenen Videolar ·
-  **Etiketleme** · Ayarlar çalışıyor. **Veri Seti ve Dışa Aktarım yer tutucu.**
-- Bütçeler ölçüldü ve karşılandı (6AD). **Gerçek ZED ile tam tur yok**; iki
-  kişinin karıştığı kayıt mock ile üretilemedi.
-- Python tablo modeli çizimde `QTableWidget`'tan pahalı (21/15 ms);
-  karşılığında doldurma satır sayısından bağımsız — bilinçli takas.
-- **`pytest tests/` tek süreçte tamamlanmıyor**; dosya dosya çalıştırılmalı.
-- **`offscreen` Qt platformunda font ailesi yok**: genişlik/yerleşim ölçümleri
-  orada anlamsız, `QT_QPA_PLATFORM=windows` gerekir (bkz. 6Z).
-- Canlı ZED doğrulaması eksik: 60 FPS, H264_LOSSLESS bilgi koruması, native
-  sayaç güvenilirliği, çok kişili anchor.
-- SDK ilk model optimizasyonu (dakikalar) bağlan düğmesini bloklar; proxy video
-  Windows uzun yolda (OpenCV) açılamaz — uzun `pytest` kökünde koşu dürüstçe
-  `partial` olur (6AC).
-- `dataset_root` tercihi eski pytest yolunu gösteriyor; proje kilidi yok.
+- Bütçeler ölçüldü (6AD). **Gerçek ZED ile tam tur yok**; iki kişinin karıştığı
+  kayıt mock ile üretilemedi.
+- **`pytest tests/` dosya dosya çalıştırılmalı.** Studio stil sayfası
+  uygulama geneli: eski GUI ölçümleri aynı süreçte etkilenir (fixture sıfırlar).
+- **`offscreen`'de font ailesi yok**: yerleşim ölçümü orada anlamsız, gerçek
+  `QT_QPA_PLATFORM=windows` gerekir (6Z).
+- Canlı ZED doğrulaması eksik: 60 FPS, H264_LOSSLESS, native sayaç, çok kişi.
+- SDK ilk model optimizasyonu dakikalar sürer (TaskRunner'da, GUI'yi bloklamaz);
+  proxy video Windows uzun yolda açılamaz (6AC).
+- `dataset_root` tercihi eski pytest yolunu gösterebilir; proje kilidi yok.
+
+## Görsel kanıt
+
+`python -m kinecapture.tools.ux_shots --output <klasör>`: gerçek
+`QT_QPA_PLATFORM=windows`, büyütülmüş pencere, 18 görüntü; tek kullanımlık
+kimlik/veri, mock backend. Ölçülen **1920×1009, DPR 1.0**; bildirim
+öncesi/sonrası ana dikdörtgenler aynı (her koşuda basılır).
 
 ## Sonraki adım
 
-**Gerçek ZED ile doğrulama.** Kamera karşısında tek kişilik bir kayıt alıp
-yakalama → işleme → etiketleme → dışa aktarım turunu gerçek veriyle tekrarlamak;
-60 FPS sürdürülebilirliği ve canlı iskeletin doğruluğu ancak orada ölçülebilir.
-Ayrıca yakalama ekranının tıkla-seç kişi akışı uçtan uca bağlanmalı (6AD).
+Kişi kare-anchor seçici ve kişisiz sürüm kurtarma akışının tamamlanması; sonra
+gerçek ZED turu ve uçtan uca başarılı kanonik paket.

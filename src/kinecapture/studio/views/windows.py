@@ -78,9 +78,9 @@ class ToolWindow(QWidget):
         self.resize(560, 520)
 
         outer = QVBoxLayout(self)
-        margin = tokens.metric("KcSpacingLg")
+        margin = tokens.metric("KcSpacingXl")
         outer.setContentsMargins(margin, margin, margin, margin)
-        outer.setSpacing(tokens.metric("KcSpacingMd"))
+        outer.setSpacing(tokens.metric("KcSpacingLg"))
 
         outer.addWidget(label(title, role="pageTitle"))
         caption = label(subtitle)

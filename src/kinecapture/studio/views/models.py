@@ -31,7 +31,14 @@ SEARCH_ROLE = int(Qt.ItemDataRole.UserRole) + 4
 
 @dataclass(frozen=True)
 class Column(Generic[T]):
-    """One column: a heading and how to get its text out of a row."""
+    """One column: a heading and how to get its text out of a row.
+
+    ``stretch`` marks the column whose content has no natural length - a
+    project name, a take's title - and which should therefore take whatever
+    room is left. Everything else is sized from its content. The 15 September
+    audit found the opposite arrangement: a project name elided at about a
+    hundred pixels while "Oluşturuldu" held several hundred.
+    """
 
     key: str
     title: str
@@ -43,6 +50,11 @@ class Column(Generic[T]):
     tooltip: Optional[Callable[[T], str]] = None
     numeric: bool = False
     width: int = 0
+    #: Takes the leftover width. At most one per table in practice.
+    stretch: bool = False
+    #: A floor for a content-sized column, so a one-character value does not
+    #: produce a column narrower than its own heading.
+    minimum: int = 0
 
 
 #: Everything below returns ``None`` for any other role, so the set is the
@@ -271,6 +283,42 @@ class SearchProxy(QSortFilterProxyModel):
         return bool(haystack) and self._needle in haystack
 
 
+def configure_columns(  # noqa: ANN001
+    view, columns: Sequence[Column], *, fill: bool = True
+) -> None:
+    """Give each column the width its content actually needs.
+
+    Called once, when the table is built. The user can still drag any of them
+    afterwards - a stretch column becomes interactive the moment it is
+    dragged, which is Qt's own behaviour and the right one - but nobody should
+    have to drag anything to read a name on first sight.
+    """
+    from PySide6.QtWidgets import QHeaderView
+
+    header = view.horizontalHeader()
+    # Off: with it on, the last column absorbs the leftover width whatever it
+    # holds, which is how a date column ended up several hundred pixels wide.
+    header.setStretchLastSection(False)
+    for index, column in enumerate(columns):
+        if column.stretch:
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.Stretch)
+            continue
+        if column.width:
+            header.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
+            header.resizeSection(index, column.width)
+            continue
+        header.setSectionResizeMode(index, QHeaderView.ResizeMode.ResizeToContents)
+    if column_minimums := {i: c.minimum for i, c in enumerate(columns) if c.minimum}:
+        for index, minimum in column_minimums.items():
+            if header.sectionSize(index) < minimum:
+                header.setSectionResizeMode(index, QHeaderView.ResizeMode.Interactive)
+                header.resizeSection(index, minimum)
+    if fill and not any(column.stretch for column in columns):
+        # Nothing here has a variable length, so rather than inflate
+        # one arbitrary column the leftover width is left blank.
+        header.setStretchLastSection(True)
+
+
 __all__ = [
     "ROW_ROLE",
     "SEARCH_ROLE",
@@ -279,4 +327,5 @@ __all__ = [
     "Column",
     "RowTableModel",
     "SearchProxy",
+    "configure_columns",
 ]
