@@ -20,7 +20,16 @@ from __future__ import annotations
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPoint,
+    QPointF,
+    QRectF,
+    Qt,
+    QTimer,
+    QVariantAnimation,
+    Signal,
+)
 from PySide6.QtGui import (
     QColor,
     QFont,
@@ -34,6 +43,13 @@ from PySide6.QtGui import (
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from kinecapture.studio.theme import ThemeTokens
+
+
+#: How long a message drawn on the picture stays fully visible, and how long
+#: it then takes to disappear. Long enough to read a short sentence from three
+#: metres away; short enough that it is gone before the next attempt.
+NOTICE_HOLD_MS = 3000
+NOTICE_FADE_MS = 600
 
 
 class PreviewView(QWidget):
@@ -61,6 +77,22 @@ class PreviewView(QWidget):
         #: Painted over the picture because the person who needs to read it is
         #: standing in front of the camera, not sitting at the keyboard.
         self._framing = ("", "", "")
+        #: A message drawn on the picture for the same reason, which holds for
+        #: a few seconds and then fades out by itself.
+        self._notice = ("", "")
+        self._notice_opacity = 0.0
+        self._notice_hold = QTimer(self)
+        self._notice_hold.setSingleShot(True)
+        self._notice_hold.timeout.connect(self._fade_notice)
+        self._notice_fade = QVariantAnimation(self)
+        self._notice_fade.setDuration(NOTICE_FADE_MS)
+        self._notice_fade.setEasingCurve(QEasingCurve.Type.InCubic)
+        self._notice_fade.valueChanged.connect(self._notice_faded)
+        #: The detection the operator picked, in source pixels, or ``None``.
+        self._subject_box = None
+        #: Where the framing badge was painted this pass, so other overlays
+        #: can avoid it. Empty until the first paint.
+        self._framing_rect = QRectF()
         self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -96,6 +128,43 @@ class PreviewView(QWidget):
         """Thirds and a head/feet margin, to frame a shot without a second person."""
         if shown != self._guides:
             self._guides = bool(shown)
+            self.update()
+
+    def show_notice(self, text: str, *, severity: str = "warning") -> None:
+        """Put a sentence on the picture, and take it away again.
+
+        Same card as the window's own messages, drawn where the person is
+        already looking. It holds for :data:`NOTICE_HOLD_MS` and then fades,
+        because somebody three metres from the keyboard cannot dismiss it.
+        """
+        self._notice = (str(text or ""), str(severity or "warning"))
+        self._notice_fade.stop()
+        self._notice_opacity = 1.0
+        self._notice_hold.start(NOTICE_HOLD_MS)
+        self.update()
+
+    def _fade_notice(self) -> None:
+        self._notice_fade.stop()
+        self._notice_fade.setStartValue(1.0)
+        self._notice_fade.setEndValue(0.0)
+        self._notice_fade.start()
+
+    def _notice_faded(self, value) -> None:  # noqa: ANN001 - QVariant
+        self._notice_opacity = float(value)
+        if self._notice_opacity <= 0.0:
+            self._notice = ("", "")
+        self.update()
+
+    @property
+    def notice_text(self) -> str:
+        """What is on the picture right now. Empty once it has faded."""
+        return self._notice[0] if self._notice_opacity > 0.0 else ""
+
+    def set_subject_box(self, box) -> None:  # noqa: ANN001 - 4-tuple or None
+        """Outline the person the operator picked, in source pixels."""
+        value = tuple(float(v) for v in box) if box is not None else None
+        if value != self._subject_box:
+            self._subject_box = value
             self.update()
 
     def set_framing(self, text: str, state: str, history: str) -> None:
@@ -215,8 +284,15 @@ class PreviewView(QWidget):
         self._paint_people(painter)
         if self._guides:
             self._paint_guides(painter, rect)
+        # The badge goes down first and records where it landed, so the
+        # subject tag can step out of its way instead of printing over it.
+        self._framing_rect = QRectF()
         if self._framing[0]:
             self._paint_framing(painter, rect)
+        if self._subject_box is not None:
+            self._paint_subject_box(painter, rect)
+        if self._notice[0] and self._notice_opacity > 0.0:
+            self._paint_notice(painter, rect)
         if self._countdown:
             self._paint_countdown(painter, rect)
         if self._recording:
@@ -296,6 +372,7 @@ class PreviewView(QWidget):
         badge = QRectF(
             rect.center().x() - width / 2.0, rect.top() + pad, width, height
         )
+        self._framing_rect = badge
 
         background = QColor(tokens.colour("KcSurfaceViewport"))
         background.setAlpha(205)
@@ -329,6 +406,103 @@ class PreviewView(QWidget):
                 QFontMetrics(small_font).height(),
             )
             painter.drawText(below, int(Qt.AlignmentFlag.AlignCenter), history)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    def _paint_subject_box(self, painter: QPainter, rect: QRectF) -> None:
+        """Outline whoever the operator picked, so the choice is visible.
+
+        "I clicked something" and "the application understood who" are two
+        different facts, and until now the screen only ever showed the first.
+        """
+        assert self._subject_box is not None
+        tokens = self._tokens
+        x0, y0, x1, y1 = self._subject_box
+        box = QRectF(self._to_widget(x0, y0), self._to_widget(x1, y1)).normalized()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        pen = QPen(QColor(tokens.colour("KcAccentPrimary")))
+        pen.setWidth(tokens.metric("KcBorderWidthStrong"))
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        radius = tokens.metric("KcRadiusSmall")
+        painter.drawRoundedRect(box, radius, radius)
+
+        font = painter.font()
+        font.setPointSize(max(9, int(rect.height() / 40)))
+        font.setBold(True)
+        painter.setFont(font)
+        text = "seçilen kişi"
+        metrics = painter.fontMetrics()
+        pad = tokens.metric("KcSpacingSm")
+        # Inside the box, not above it: above put the tag on the same row as
+        # the framing badge. And if the badge is there anyway - it is centred,
+        # and people stand in the middle of frames - the tag drops below it.
+        tag = QRectF(
+            box.left() + pad,
+            box.top() + pad,
+            metrics.horizontalAdvance(text) + pad * 2,
+            metrics.height() + pad,
+        )
+        if tag.intersects(self._framing_rect):
+            tag.moveTop(self._framing_rect.bottom() + pad)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(tokens.colour("KcAccentPrimary")))
+        painter.drawRoundedRect(tag, radius, radius)
+        painter.setPen(QColor(tokens.colour("KcTextOnAccent")))
+        painter.drawText(tag, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+
+    #: Notice severity -> the token its edge is painted in. The same three the
+    #: window's own message cards use, so the two read as one system.
+    _NOTICE_COLOURS = {
+        "info": "KcAccentPrimary",
+        "warning": "KcStatusWarning",
+        "error": "KcStatusRecording",
+    }
+
+    def _paint_notice(self, painter: QPainter, rect: QRectF) -> None:
+        """The window's message card, drawn on the picture and fading out."""
+        text, severity = self._notice
+        tokens = self._tokens
+        painter.save()
+        painter.setOpacity(self._notice_opacity)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        font = painter.font()
+        font.setPointSize(max(12, int(rect.height() / 26)))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+        pad = tokens.metric("KcSpacingLg")
+        width = min(metrics.horizontalAdvance(text) + pad * 3, rect.width() - pad * 2)
+        height = metrics.height() + pad * 2
+        card = QRectF(
+            rect.center().x() - width / 2.0,
+            rect.bottom() - height - tokens.metric("KcSpacingXxl"),
+            width,
+            height,
+        )
+        radius = tokens.metric("KcRadiusControl")
+        background = QColor(tokens.colour("KcSurfaceOverlay"))
+        background.setAlpha(238)
+        accent = QColor(
+            tokens.colour(self._NOTICE_COLOURS.get(severity, "KcStatusWarning"))
+        )
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(card, radius, radius)
+        pen = QPen(accent)
+        pen.setWidth(tokens.metric("KcBorderWidth"))
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(card, radius, radius)
+        # The coloured edge a message card carries, on the same side.
+        painter.fillRect(
+            QRectF(card.left(), card.top(), tokens.metric("KcSpacingSm"), card.height()),
+            accent,
+        )
+        painter.setPen(QColor(tokens.colour("KcTextPrimary")))
+        painter.drawText(card, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.restore()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_countdown(self, painter: QPainter, rect: QRectF) -> None:

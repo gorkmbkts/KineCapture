@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from kinecapture.core.config import AppConfig  # noqa: E402
 from kinecapture.studio.app import build_window  # noqa: E402
-from kinecapture.studio.services.messages import Message, Severity  # noqa: E402
+from kinecapture.studio.services.messages import Action, Message, Severity  # noqa: E402
 from kinecapture.studio.views.toasts import (  # noqa: E402
     INFO_LIFETIME_MS,
     MAX_TOASTS,
@@ -255,4 +255,87 @@ def test_a_message_never_covers_a_page_action_bar(window, app) -> None:
     )
     assert not layer_rect.intersects(button_rect), (
         f"a message at {layer_rect} covers Kaydet at {button_rect}"
+    )
+
+
+def test_a_message_never_covers_the_controls_of_any_page(window, app) -> None:
+    """Whatever the page keeps in its lower half stays reachable.
+
+    Etiketleme keeps undo, redo and the save state on a bar above the
+    timeline. A message landed on top of them, so the one thing the message
+    was about - the version that had just opened - could not be undone or
+    saved while it was showing.
+    """
+    window.viewmodel.navigate("review")
+    app.processEvents()
+    page = window.page("review")
+
+    window.viewmodel.report(
+        Message(
+            headline="Bu sürümde kişi seçilmemiş.",
+            severity=Severity.WARNING,
+            detail=(
+                "Bu sürüm işlenirken hiçbir kişi seçilmemiş; eklem dizileri "
+                "boş. Kaydı, sporcu işaretlenmiş hâlde yeniden işleyin."
+            ),
+            code="review_no_subject",
+            technical={"sürüm": "run_dd6e"},
+            actions=(Action("goto:processing", "Yeni sürüm hesapla", primary=True),),
+        )
+    )
+    app.processEvents()
+    layer = window.toasts
+    assert layer.isVisible()
+    layer_rect = QRect(layer.mapTo(window, layer.rect().topLeft()), layer.size())
+
+    for name in ("undo_button", "redo_button", "save_state"):
+        control = getattr(page, name, None)
+        assert control is not None, name
+        rect = QRect(control.mapTo(window, control.rect().topLeft()), control.size())
+        assert not layer_rect.intersects(rect), (
+            f"a message at {layer_rect} covers {name} at {rect}"
+        )
+
+
+def test_the_headline_gets_the_width_of_the_card(window, app) -> None:
+    """A message nobody can read is not a message.
+
+    The headline used to share its row with "Ayrıntılar" and "Kapat", whose
+    padding left it roughly 120px inside a 400px card. On screen that turned
+    "take_20260916T224651_d41e işlendi" into "take_20260916T22465..." and a
+    warning about a missing subject into "Bu sürümde işlenen kişi...".
+    """
+    window.viewmodel.report(
+        Message(
+            headline="take_20260916T224651_d41e: kaynak kapsamı doğrulanamadı.",
+            severity=Severity.WARNING,
+            detail="Kayıt sırasındaki bazı kareler ham kaynakta eşleştirilemedi.",
+            code="processing_partial",
+            technical={"issues": ["capture_frames_unmatched"]},
+            actions=(Action("goto:library", "Sürüm listesi"),),
+        )
+    )
+    app.processEvents()
+    card = window.toasts._toasts[0]  # noqa: SLF001 - measuring the card is the point
+    headline = card._headline  # noqa: SLF001 - ditto
+    assert headline.width() > card.width() * 0.7, (
+        f"headline has {headline.width()}px of a {card.width()}px card"
+    )
+    # And the sentence under it wraps instead of being cut at one line.
+    assert card._detail.wordWrap()  # noqa: SLF001
+
+
+def test_a_card_is_only_as_tall_as_what_it_shows(window, app) -> None:
+    """No empty space below the text: the card is measured after it is laid out."""
+    window.viewmodel.report(
+        Message(
+            headline="Kısa bir başlık.",
+            severity=Severity.INFO,
+            detail="Tek satırlık bir açıklama.",
+        )
+    )
+    app.processEvents()
+    card = window.toasts._toasts[0]  # noqa: SLF001 - measuring the card is the point
+    assert card.height() == card.sizeHint().height(), (
+        f"card is {card.height()}px for a {card.sizeHint().height()}px hint"
     )

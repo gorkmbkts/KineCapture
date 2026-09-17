@@ -170,3 +170,51 @@ def record_take(service, workspace, session, *, frames: int = 30, **kwargs):
         f"writer only persisted {service.recorded_frame_count}/{frames} frames"
     )
     return service.stop_recording()
+
+
+class _SolePersonPreview:
+    """The light pose preview with exactly one person, in a known box.
+
+    Enough for the one thing most capture tests need from it: something for
+    the operator's click to land on.
+    """
+
+    class _Person:
+        def __init__(self, box) -> None:
+            import numpy as np
+
+            self.bbox = np.asarray(box, dtype=np.float32).reshape(2, 2)
+            self.points = np.zeros((33, 2), dtype=np.float32)
+            self.confidence = np.ones(33, dtype=np.float32)
+
+    def __init__(self, packet) -> None:  # noqa: ANN001 - FramePacket
+        self.packet = packet
+        self.people = (self._Person([[10, 10], [200, 400]]),)
+
+    def anchor(self, x: float, y: float) -> dict:
+        from kinecapture.preview.pose import PosePreview
+
+        return PosePreview.anchor(self, x, y)  # the real rule, not a copy
+
+
+def choose_subject(capture, monkeypatch, *, point=(60.0, 120.0)) -> None:
+    """Pick the person in the frame, the way an operator now has to.
+
+    Recording without a selection is refused: the joint arrays are written at
+    processing time from the body that was marked, so a take with nobody
+    marked comes back NaN from end to end. Two real ZED recordings were lost
+    to that on 17 September, which is why the refusal exists and why every
+    test that records has to answer the question first.
+    """
+    import time as _time
+
+    deadline = _time.time() + 10.0
+    packet = capture.service.latest_frame()
+    while packet is None and _time.time() < deadline:
+        _time.sleep(0.02)
+        packet = capture.service.latest_frame()
+    assert packet is not None, "no preview frame to pick a subject from"
+    monkeypatch.setattr(
+        capture.service, "pose_preview", lambda: _SolePersonPreview(packet)
+    )
+    assert capture.select_subject(*point)

@@ -149,6 +149,10 @@ class CaptureViewModel:
         )
         self.alerts: Observable[tuple[Alert, ...]] = Observable((), name="alerts")
         self.anchor: Observable[Optional[SubjectAnchor]] = Observable(None, name="anchor")
+        #: A sentence to draw *on the picture*. The window's message corner is
+        #: the wrong place for somebody standing three metres away looking at
+        #: themselves, and that is exactly who needs to read this one.
+        self.notice: Event[tuple[str, str]] = Event()
         #: The mode chosen for the next recording.
         self.mode: Observable[str] = Observable(self.service.mode, name="mode")
         #: The mode the connected camera is really running. Empty when nothing
@@ -441,7 +445,13 @@ class CaptureViewModel:
                 Alert(
                     "no_subject",
                     AlertLevel.WARNING,
-                    "Kaydedilecek kişi seçilmedi. Kayıt sürüyor; seçim sonradan da yapılabilir.",
+                    # It used to end "seçim sonradan da yapılabilir", which is
+                    # not true: the joint arrays are written at processing time
+                    # from the selected body, so a take with no selection comes
+                    # back entirely NaN and can only be recovered by processing
+                    # it again with the athlete marked.
+                    "Kaydedilecek kişi seçilmedi. Bu kayıt işlendiğinde eklem "
+                    "dizileri boş olur.",
                 )
             )
         return tuple(alerts)
@@ -516,11 +526,11 @@ class CaptureViewModel:
 
     def begin_recording(self) -> bool:
         """Start, after the chosen countdown. No countdown means start now."""
+        if not self._can_record():
+            return False
         seconds = self.countdown_seconds.value
         if seconds <= 0:
             return self.start_recording()
-        if not self._can_record():
-            return False
         self.countdown.set(seconds)
         return True
 
@@ -571,26 +581,60 @@ class CaptureViewModel:
         return self.stop_recording()
 
     def _can_record(self) -> bool:
-        """Whether a recording could start now, without starting one."""
+        """Whether a recording could start now, without starting one.
+
+        Every refusal says what to do about it. A control that simply will not
+        work, with no sentence attached, is what made a connected ZED look
+        broken on 16 September.
+        """
         if self._session.workspace is None:
-            self.message.emit(
-                Message(headline="Önce bir proje açın.", severity=Severity.WARNING)
-            )
+            self._refuse("Önce bir proje açın.", "Projeler ekranından bir proje açın.")
             return False
         if not self.service.is_connected:
-            self.message.emit(
-                Message(headline="Önce kameraya bağlanın.", severity=Severity.WARNING)
+            self._refuse("Önce kameraya bağlanın.", "Yakalama ekranında Bağlan'a basın.")
+            return False
+        if self.anchor.value is None:
+            # Not a preference. The joint arrays are written at processing time
+            # from the body the operator marked; with nobody marked, a take
+            # comes back NaN from end to end and the only way out is to process
+            # it again. Two ZED recordings were lost to this on 17 September,
+            # and the screen had told the operator it could be fixed later.
+            self._refuse(
+                "Önce görüntüde kişiyi seçin.",
+                "Kaydedilecek kişiye önizlemede tıklayın. Kayıt başladıktan "
+                "sonra seçilemez: bu kayıt işlendiğinde eklem dizileri boş olur.",
+                notice="Önce görüntüde kendinize tıklayın",
             )
             return False
         return True
 
+    def _refuse(self, headline: str, detail: str = "", *, notice: str = "") -> None:
+        """Say no in two places: the message corner, and the picture itself.
+
+        The second one matters because the person who has to act is standing in
+        front of the camera looking at themselves, not at the corner of the
+        screen.
+        """
+        self.message.emit(
+            Message(
+                headline=headline,
+                severity=Severity.WARNING,
+                detail=detail,
+                code="capture_refused",
+            )
+        )
+        self.notice.emit((notice or headline, "warning"))
+
     # ------------------------------------------------------------- recording
     def start_recording(self) -> bool:
+        # Checked here too, not only in ``begin_recording``: a countdown gives
+        # the operator ten seconds in which to clear the selection, and the
+        # frame that matters is the one recording actually starts on.
+        if not self._can_record():
+            return False
         workspace = self._session.workspace
         if workspace is None:
-            self.message.emit(
-                Message(headline="Önce bir proje açın.", severity=Severity.WARNING)
-            )
+            self._refuse("Önce bir proje açın.")
             return False
         session = self._current_session(workspace)
         if session is None:

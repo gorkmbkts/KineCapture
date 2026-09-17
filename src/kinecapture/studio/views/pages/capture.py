@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from kinecapture.studio.services.framing import subject_box
 from kinecapture.studio.services.capture import CaptureMetrics
 from kinecapture.studio.services.session import WorkTarget
 from kinecapture.studio.theme import ThemeTokens
@@ -391,6 +392,7 @@ class CapturePage(StudioPage):
         self.bind(viewmodel.anchor, self._show_anchor)
         self.bind(viewmodel.pose_note, self._show_pose_note)
         self.bind(viewmodel.framing, self._show_framing)
+        self.bind_event(viewmodel.notice, self._show_notice)
         self.bind(viewmodel.mode, self._show_mode)
         self.bind(viewmodel.active_mode, lambda _m: self._show_mode_state())
         self.bind(viewmodel.mode_pending, lambda _p: self._show_mode_state())
@@ -453,6 +455,15 @@ class CapturePage(StudioPage):
         framing = self.viewmodel.observe_framing()
         self.preview.set_framing(
             framing.text, framing.state, self.viewmodel.framing_history.value
+        )
+        # And the box around whoever was picked, resolved against *this* frame
+        # rather than the one the click happened on - the person has moved
+        # since, and a box left where they used to be is a lie.
+        anchor = self.viewmodel.anchor.value
+        self.preview.set_subject_box(
+            subject_box(preview.people, anchor.point_xy)
+            if (preview is not None and anchor is not None)
+            else None
         )
 
     # ----------------------------------------------------------------- slots
@@ -539,6 +550,11 @@ class CapturePage(StudioPage):
             f"kare zaman damgası {anchor.camera_timestamp_ns} ns"
         )
         self.clear_subject_button.setEnabled(True)
+
+    def _show_notice(self, notice: tuple[str, str]) -> None:
+        """Put the refusal on the picture, where the person can read it."""
+        text, severity = notice
+        self.preview.show_notice(text, severity=severity)
 
     def _show_framing(self, framing) -> None:  # noqa: ANN001 - Framing
         """Repeat the badge in the console, with the reason spelled out."""

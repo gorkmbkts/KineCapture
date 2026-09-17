@@ -31,6 +31,7 @@ from kinecapture.studio.viewmodels.capture import (
     CaptureViewModel,
 )
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
+from conftest import choose_subject
 from kinecapture.studio.viewmodels.tasks import InlineRunner
 
 
@@ -154,11 +155,12 @@ def test_a_missing_pose_model_does_not_stop_capture(
 
 
 def test_a_full_round_produces_a_take_waiting_for_its_skeleton(
-    capture: CaptureViewModel,
+    capture: CaptureViewModel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     assert capture.connect()
     seen = []
     capture.message.subscribe(seen.append)
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     time.sleep(0.8)
     capture.refresh()
@@ -177,10 +179,11 @@ def test_a_full_round_produces_a_take_waiting_for_its_skeleton(
 
 
 def test_no_recorded_frames_are_lost_with_the_preview_running(
-    capture: CaptureViewModel,
+    capture: CaptureViewModel, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The interface may skip preview frames; it may not cost recorded ones."""
     assert capture.connect()
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     time.sleep(1.0)
     capture.refresh()
@@ -203,7 +206,7 @@ def test_recording_needs_a_project(config: AppConfig, monkeypatch) -> None:
 
 
 def test_an_empty_project_gets_a_participant_rather_than_a_dead_button(
-    session: SessionService, tmp_path: Path
+    session: SessionService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Recording into an empty project creates its first participant.
 
@@ -223,6 +226,7 @@ def test_an_empty_project_gets_a_participant_rather_than_a_dead_button(
     viewmodel.message.subscribe(seen.append)
     assert viewmodel.connect()
     try:
+        choose_subject(viewmodel, monkeypatch)
         assert viewmodel.start_recording() is True
         participants = workspace.list_participants()
         assert len(participants) == 1
@@ -240,7 +244,7 @@ def test_an_empty_project_gets_a_participant_rather_than_a_dead_button(
 
 
 def test_an_unselected_participant_is_chosen_out_loud(
-    session: SessionService, tmp_path: Path
+    session: SessionService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With several to pick from, the one used is named so it can be corrected."""
     workspace = session.workspace
@@ -254,6 +258,7 @@ def test_an_unselected_participant_is_chosen_out_loud(
     viewmodel.message.subscribe(seen.append)
     assert viewmodel.connect()
     try:
+        choose_subject(viewmodel, monkeypatch)
         assert viewmodel.start_recording() is True
         defaulted = [m for m in seen if m.code == "capture_target_defaulted"]
         assert defaulted, "a defaulted target must be visible, not silent"
@@ -332,6 +337,7 @@ def test_an_anchor_is_written_next_to_the_raw_recording(
     import json
 
     assert capture.connect()
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     time.sleep(0.4)
     packet = capture.service.latest_frame()
@@ -343,11 +349,14 @@ def test_an_anchor_is_written_next_to_the_raw_recording(
     workspace = capture._session.workspace  # noqa: SLF001 - test reaches in
     paths = workspace.take_paths(take)
     anchors = json.loads((paths.raw_dir / "subject_anchors.json").read_text("utf-8"))
-    assert anchors
-    assert anchors[0]["camera_timestamp_ns"] == packet.camera_timestamp_ns
+    # Two: the one made before recording started, which is how an operator
+    # actually works, and this one. Every choice is kept, in the order it was
+    # made, and the raw recording is never rewritten.
+    assert len(anchors) == 2
+    assert anchors[-1]["camera_timestamp_ns"] == packet.camera_timestamp_ns
     # The anchor says what it is: a selection to be resolved later, not an
     # identity already established.
-    assert "requires_offline_association" in anchors[0]["identity_semantics"]
+    assert "requires_offline_association" in anchors[-1]["identity_semantics"]
 
 
 def test_clearing_the_subject_leaves_the_recording_alone(
@@ -383,13 +392,41 @@ def test_low_disk_is_a_warning_with_an_action(capture: CaptureViewModel) -> None
     assert disk.action
 
 
-def test_recording_without_a_subject_warns_but_does_not_stop(
+def test_recording_without_a_subject_is_refused_with_a_reason(
     capture: CaptureViewModel,
 ) -> None:
-    """A take with no subject chosen is still a good recording."""
+    """Not a silently dead button: a refusal that says what to do.
+
+    A take with nobody marked comes back from processing with joint arrays
+    that are NaN from end to end, and no decision made afterwards can fill
+    them in. Two real ZED recordings were lost that way on 17 September while
+    the screen said the choice could be made later.
+    """
+    assert capture.connect()
+    seen = []
+    notices = []
+    capture.message.subscribe(seen.append)
+    capture.notice.subscribe(notices.append)
+
+    assert capture.start_recording() is False
+    assert capture.anchor.value is None
+    refusal = seen[-1]
+    assert refusal.severity is Severity.WARNING
+    assert "kişiyi seçin" in refusal.headline.casefold()
+    # And it says why, not just no.
+    assert "boş" in refusal.detail.casefold()
+    # On the picture too, for whoever is standing in front of the camera.
+    assert notices and "kendinize tıklayın" in notices[-1][0].casefold()
+
+
+def test_a_recording_already_running_still_reports_a_missing_subject(
+    capture: CaptureViewModel,
+) -> None:
+    """The alert no longer promises a repair that does not exist."""
     alerts = capture._alerts_for(  # noqa: SLF001
         CaptureMetrics(connected=True, recording=True)
     )
     warning = next(a for a in alerts if a.key == "no_subject")
     assert warning.level is AlertLevel.WARNING
-    assert "sonradan" in warning.text.casefold()
+    assert "sonradan" not in warning.text.casefold()
+    assert "boş" in warning.text.casefold()

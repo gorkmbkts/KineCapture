@@ -246,6 +246,36 @@ class FramingWatch:
         return self.observed_s >= 1.0 and not self.seconds_out()
 
 
+def subject_box(people, point_xy) -> Optional[tuple[float, float, float, float]]:
+    """The detection the operator's click belongs to, in source pixels.
+
+    Containment first, which is the same test the offline association uses. A
+    single person in the frame has nothing to be confused with, so the one
+    detection is the answer even if the click landed just outside its box -
+    the person has moved since, and the click was about them.
+
+    Returns ``None`` when the question has more than one answer, because
+    drawing a box around the wrong person is worse than drawing none.
+    """
+    people = tuple(people or ())
+    if not people:
+        return None
+    x, y = float(point_xy[0]), float(point_xy[1])
+    inside = [
+        person for person in people
+        if person.bbox[0][0] <= x <= person.bbox[1][0]
+        and person.bbox[0][1] <= y <= person.bbox[1][1]
+    ]
+    if len(inside) == 1:
+        chosen = inside[0]
+    elif len(people) == 1 and not inside:
+        chosen = people[0]
+    else:
+        return None
+    box = chosen.bbox
+    return (float(box[0][0]), float(box[0][1]), float(box[1][0]), float(box[1][1]))
+
+
 __all__ = [
     "COMFORT_MARGIN",
     "Framing",
@@ -253,4 +283,5 @@ __all__ = [
     "REQUIRED_PARTS",
     "SAFE_MARGIN",
     "measure",
+    "subject_box",
 ]

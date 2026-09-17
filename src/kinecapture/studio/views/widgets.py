@@ -384,6 +384,13 @@ class MessageBar(QFrame):
         outer.setContentsMargins(*(tokens.metric("KcSpacingLg"),) * 4)
         outer.setSpacing(tokens.metric("KcSpacingMd"))
 
+        # The headline gets a line to itself. It used to share one with
+        # "Ayrıntılar" and "Kapat", whose padding left it about 120px inside a
+        # 400px card - so "take_20260916T224651_d41e işlendi" arrived on screen
+        # as "take_20260916T22465..." and a warning about a missing subject as
+        # "Bu sürümde işlenen kişi...". A message nobody can read is not a
+        # message. The two buttons moved down to the action row, where there is
+        # room for them and where the other things to press already are.
         row = QHBoxLayout()
         row.setSpacing(tokens.metric("KcSpacingMd"))
         self._icon = QLabel()
@@ -397,11 +404,13 @@ class MessageBar(QFrame):
         self._close_button.clicked.connect(self.clear)
         row.addWidget(self._icon)
         row.addWidget(self._headline, 1)
-        row.addWidget(self._details_button)
-        row.addWidget(self._close_button)
         outer.addLayout(row)
 
-        self._detail = ElidedLabel()
+        # Wrapped, not elided: the sentence that says what to do about the
+        # headline is the half people actually need, and it was being cut at
+        # the first line every time.
+        self._detail = QLabel()
+        self._detail.setWordWrap(True)
         self._detail.setProperty("kcRole", "pageSubtitle")
         outer.addWidget(self._detail)
 
@@ -419,7 +428,9 @@ class MessageBar(QFrame):
         # the take again is a message that made them do the work twice.
         self._actions = QHBoxLayout()
         self._actions.setSpacing(tokens.metric("KcSpacingSm"))
+        self._actions.addWidget(self._details_button)
         self._actions.addStretch(1)
+        self._actions.addWidget(self._close_button)
         outer.addLayout(self._actions)
 
         self.setProperty("kcMessage", "info")
@@ -437,7 +448,9 @@ class MessageBar(QFrame):
             button.clicked.connect(
                 lambda _checked=False, key=action.key: self.action_triggered.emit(key)
             )
-            self._actions.addWidget(button)
+            # Before the trailing stretch, so "Kapat" keeps the right edge and
+            # the things to *do* stay together on the left.
+            self._actions.insertWidget(self._actions.count() - 1, button)
             self._action_buttons.append(button)
 
     def set_tokens(self, tokens: ThemeTokens) -> None:

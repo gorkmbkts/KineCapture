@@ -30,6 +30,7 @@ from kinecapture.studio.services.framing import (
     Framing,
     FramingWatch,
     measure,
+    subject_box,
 )
 
 
@@ -183,3 +184,26 @@ def test_the_window_forgets_and_a_gap_is_not_time_spent_in_a_state() -> None:
     for step in range(1, 12):
         watch.observe(Framing(state="ok"), now=60.0 + step * 0.5)
     assert watch.clean
+
+
+# ------------------------------------------------------- who was picked
+
+
+def test_the_click_is_matched_to_the_detection_that_contains_it() -> None:
+    left, right = _standing(x=300.0), _standing(x=950.0)
+    box = subject_box((left, right), (300.0, 400.0))
+    assert box is not None
+    assert box[0] <= 300.0 <= box[2]
+
+
+def test_a_lone_person_owns_the_click_even_after_they_have_moved() -> None:
+    """The click was about them; they are simply not standing there now."""
+    box = subject_box((_standing(x=640.0),), (20.0, 20.0))
+    assert box is not None
+
+
+def test_two_candidates_and_no_containment_draws_nothing() -> None:
+    """A box around the wrong person is worse than no box."""
+    left, right = _standing(x=300.0), _standing(x=950.0)
+    assert subject_box((left, right), (640.0, 10.0)) is None
+    assert subject_box((), (1.0, 1.0)) is None

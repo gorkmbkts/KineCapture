@@ -174,6 +174,50 @@ def test_the_viewer_paints_a_frame_whose_skeleton_is_all_missing(qapp, tokens) -
         viewer.deleteLater()
 
 
+def _preview_with_a_frame(tokens):
+    """A preview view with a picture in it, at a known source size."""
+    import numpy as np
+
+    from kinecapture.studio.views.preview import PreviewView
+
+    view = PreviewView(tokens)
+    view.set_frame(np.zeros((360, 640, 3), dtype=np.uint8), (640, 360))
+    return view
+
+
+def test_a_notice_on_the_picture_paints_and_then_takes_itself_away(
+    qapp, tokens
+) -> None:
+    """The operator is three metres away and cannot dismiss anything.
+
+    So the message that refuses a recording is drawn on the picture they are
+    already looking at, holds long enough to read, and goes on its own.
+    """
+    from kinecapture.studio.views.preview import NOTICE_HOLD_MS
+
+    view = _preview_with_a_frame(tokens)
+    view.show_notice("Önce görüntüde kendinize tıklayın")
+    assert view.notice_text == "Önce görüntüde kendinize tıklayın"
+    render(view)  # painting it must not throw in either theme
+
+    # It is on a clock, not on a click.
+    assert view._notice_hold.isActive()  # noqa: SLF001 - the clock is the point
+    assert NOTICE_HOLD_MS == 3000
+    view._notice_faded(0.0)  # noqa: SLF001 - jump to the end of the fade
+    assert view.notice_text == ""
+    render(view)
+
+
+def test_the_chosen_person_is_outlined_on_the_picture(qapp, tokens) -> None:
+    """"I clicked something" and "it understood who" are different facts."""
+    view = _preview_with_a_frame(tokens)
+    render(view)
+    view.set_subject_box((100.0, 40.0, 260.0, 330.0))
+    render(view)
+    view.set_subject_box(None)
+    render(view)
+
+
 def test_the_3d_view_paints_with_no_pose(qapp, tokens) -> None:
     view = Skeleton3DView(tokens)
     try:

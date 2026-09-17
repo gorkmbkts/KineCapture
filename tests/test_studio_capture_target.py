@@ -32,6 +32,7 @@ from kinecapture.studio.services.session import SessionService
 from kinecapture.studio.viewmodels.auth import AuthViewModel
 from kinecapture.studio.viewmodels.capture import CaptureViewModel, RecordingPhase
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
+from conftest import choose_subject
 from kinecapture.studio.viewmodels.tasks import InlineRunner
 
 
@@ -84,7 +85,7 @@ def _codes(projects: ProjectsViewModel) -> dict[str, str]:
     return {row.code: row.participant_id for row in projects.participants.value}
 
 
-def _record(capture: CaptureViewModel, *, frames: int = 4):
+def _record(capture: CaptureViewModel, monkeypatch, *, frames: int = 4):
     assert capture.connect()
     deadline = time.time() + 10.0
     while time.time() < deadline:
@@ -93,6 +94,10 @@ def _record(capture: CaptureViewModel, *, frames: int = 4):
             break
         time.sleep(0.02)
     assert capture.metrics.value.connected
+    # Who the recording is of, before it starts. Recording without this is
+    # refused now - see ``choose_subject``.
+    choose_subject(capture, monkeypatch)
+    choose_subject(capture, monkeypatch)
     if not capture.start_recording():
         return None
     deadline = time.time() + 15.0
@@ -108,7 +113,7 @@ def _record(capture: CaptureViewModel, *, frames: int = 4):
 # ------------------------------------------------------------------- target
 def test_the_take_is_written_to_the_selected_participant(
     projects: ProjectsViewModel, capture: CaptureViewModel, session: SessionService
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     assert set(codes) == {"P0001", "P0002"}
     projects.select_participant(codes["P0002"])
@@ -116,7 +121,7 @@ def test_the_take_is_written_to_the_selected_participant(
     capture.refresh_target()
     assert capture.target.value.participant_code == "P0002"
 
-    take = _record(capture)
+    take = _record(capture, monkeypatch)
     assert take is not None
     assert take.participant_id == codes["P0002"]
 
@@ -128,7 +133,7 @@ def test_the_take_is_written_to_the_selected_participant(
 
 def test_without_a_selection_the_default_is_used_but_announced(
     projects: ProjectsViewModel, capture: CaptureViewModel, session: SessionService
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     """No selection is filled in, never silently.
 
     Refusing outright was the first fix, and it was too strong: on a real
@@ -144,6 +149,8 @@ def test_without_a_selection_the_default_is_used_but_announced(
     while time.time() < deadline and not capture.metrics.value.connected:
         time.sleep(0.02)
         capture.refresh()
+
+    choose_subject(capture, monkeypatch)
 
     assert capture.start_recording() is True
     try:
@@ -164,7 +171,7 @@ def test_without_a_selection_the_default_is_used_but_announced(
 
 def test_the_target_cannot_be_changed_while_a_take_is_open(
     projects: ProjectsViewModel, capture: CaptureViewModel, session: SessionService
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     projects.select_participant(codes["P0001"])
     assert capture.connect()
@@ -172,6 +179,7 @@ def test_the_target_cannot_be_changed_while_a_take_is_open(
     while time.time() < deadline and not capture.metrics.value.connected:
         time.sleep(0.02)
         capture.refresh()
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     try:
         seen = []
@@ -226,7 +234,7 @@ def test_choosing_a_mode_while_connected_is_not_called_effective(
 
 def test_applying_the_mode_reconnects_and_reaches_the_recorded_take(
     projects: ProjectsViewModel, capture: CaptureViewModel
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     projects.select_participant(codes["P0001"])
     assert capture.connect()
@@ -237,7 +245,7 @@ def test_applying_the_mode_reconnects_and_reaches_the_recorded_take(
     assert capture.mode_pending.value is False
     assert capture.service.active_profile.enable_body_tracking is True
 
-    take = _record(capture)
+    take = _record(capture, monkeypatch)
     assert take is not None
     # The metadata the take carries is the profile the backend really ran.
     assert take.capture_profile.enable_body_tracking is True
@@ -246,10 +254,10 @@ def test_applying_the_mode_reconnects_and_reaches_the_recorded_take(
 
 def test_the_default_stays_the_minimal_raw_recording(
     projects: ProjectsViewModel, capture: CaptureViewModel
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     projects.select_participant(codes["P0001"])
-    take = _record(capture)
+    take = _record(capture, monkeypatch)
     assert take is not None
     assert take.capture_profile.enable_body_tracking is False
     assert take.capture_profile.store_skeleton is False
@@ -257,7 +265,7 @@ def test_the_default_stays_the_minimal_raw_recording(
 
 def test_the_mode_cannot_be_changed_while_recording(
     projects: ProjectsViewModel, capture: CaptureViewModel
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     projects.select_participant(codes["P0001"])
     assert capture.connect()
@@ -265,6 +273,7 @@ def test_the_mode_cannot_be_changed_while_recording(
     while time.time() < deadline and not capture.metrics.value.connected:
         time.sleep(0.02)
         capture.refresh()
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     try:
         seen = []
@@ -279,7 +288,7 @@ def test_the_mode_cannot_be_changed_while_recording(
 # ---------------------------------------------------------------- stop once
 def test_a_second_stop_does_not_finalise_the_take_twice(
     projects: ProjectsViewModel, capture: CaptureViewModel
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     projects.select_participant(codes["P0001"])
     assert capture.connect()
@@ -287,6 +296,7 @@ def test_a_second_stop_does_not_finalise_the_take_twice(
     while time.time() < deadline and not capture.metrics.value.connected:
         time.sleep(0.02)
         capture.refresh()
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     finished = []
     capture.take_finished.subscribe(finished.append)
@@ -297,7 +307,7 @@ def test_a_second_stop_does_not_finalise_the_take_twice(
 
 def test_the_status_reading_names_the_phase_and_the_owner(
     projects: ProjectsViewModel, capture: CaptureViewModel
-) -> None:
+, monkeypatch: pytest.MonkeyPatch) -> None:
     codes = _codes(projects)
     projects.select_participant(codes["P0002"])
     capture.refresh()
@@ -308,6 +318,7 @@ def test_the_status_reading_names_the_phase_and_the_owner(
     while time.time() < deadline and not capture.metrics.value.connected:
         time.sleep(0.02)
         capture.refresh()
+    choose_subject(capture, monkeypatch)
     assert capture.start_recording()
     try:
         capture.refresh()
