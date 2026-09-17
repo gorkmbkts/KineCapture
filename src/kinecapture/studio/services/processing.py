@@ -66,8 +66,7 @@ class JobState(str, Enum):
 #: the code. An unmapped code is shown verbatim rather than glossed over.
 ISSUE_TEXT = {
     "source_frame_count_mismatch": (
-        "Kaynak kapsamı doğrulanamadı: dosyanın bildirdiği kare sayısı ile "
-        "okunabilen kare sayısı farklı."
+        "Dosya başlığındaki kare sayısı ile okunan kare sayısı farklı."
     ),
     "capture_frames_unmatched": (
         "Kayıt sırasındaki bazı kareler ham kaynakta eşleştirilemedi."
@@ -81,7 +80,22 @@ ISSUE_TEXT = {
     "subject_anchor_outside_source": (
         "Seçim, ham kaynakta bulunmayan bir zaman damgasına işaret ediyor."
     ),
+    "capture_timestamp_duplicated": (
+        "Kamera iki kareye aynı mikrosaniyeyi verdi; kareler sırayla eşleştirildi."
+    ),
+    "subject_anchor_before_recording": (
+        "Kişi seçimi kayıt başlamadan önce yapılmış; ilk kareye uygulandı."
+    ),
+    "review_proxy_unavailable": (
+        "Önizleme videosu üretilemedi; iskelet ve veriler etkilenmedi."
+    ),
+    "review_proxy_desynchronised": (
+        "Önizleme videosunun kare sayısı sürümle uyuşmuyor."
+    ),
+    # Written by versions produced before the code was split in two. Kept so
+    # an older job file still reads as a sentence instead of as a code.
     "review_proxy_incomplete": "Önizleme videosu eksik üretildi.",
+    "source_empty": "Kaynaktan hiç kare okunamadı.",
     "requested_depth_missing": "İstenen derinlik bazı karelerde üretilemedi.",
     "calibration_invalid_or_missing": "Kamera kalibrasyonu okunamadı.",
     "source_timestamp_gap": "Kaynakta zaman damgası boşluğu var.",
@@ -108,9 +122,28 @@ class JobProgress:
     elapsed_s: float = 0.0
     paused_s: float = 0.0
     issues: tuple[str, ...] = ()
+    #: The subset of ``issues`` that kept the version out of the library.
+    blocking_issues: tuple[str, ...] = ()
+    #: Recorded frames and how many were found again in the replayed source.
+    capture_frames: int = 0
+    matched_frames: int = 0
     error: str = ""
     run_id: str = ""
     directory: Optional[Path] = None
+
+    @property
+    def published(self) -> bool:
+        """Whether this attempt produced a version the screens can open."""
+        return self.state in (JobState.COMPLETE, JobState.PARTIAL) and not self.blocking_issues
+
+    @property
+    def coverage_text(self) -> str:
+        """Matched frames as a count, or "" when nothing was declared."""
+        if not self.capture_frames:
+            return ""
+        if self.matched_frames >= self.capture_frames:
+            return f"{self.capture_frames} karenin tamamı eşleşti"
+        return f"{self.capture_frames} kareden {self.matched_frames} tanesi eşleşti"
 
     @property
     def fraction(self) -> Optional[float]:
@@ -322,16 +355,20 @@ class ProcessingService:
             except Exception:  # noqa: BLE001 - caught mid-write; try next poll
                 return None
             staged = candidate.parent.name.startswith(".")
+            will_publish = bool(payload.get("published")) or str(
+                payload.get("state")
+            ) == "complete"
             if (
                 staged
-                and str(payload.get("state")) == "complete"
+                and will_publish
                 and published_dir is not None
                 and not path_exists(published_dir)
             ):
-                # The child writes "complete", then the checksums, then renames
-                # the folder. Reporting complete here sends the user to a
-                # version that is not there yet, so the row keeps running until
-                # the rename lands.
+                # The child writes the final state, then the checksums, then
+                # renames the folder. Announcing the result here sends the user
+                # to a version that is not there yet, so the row keeps running
+                # until the rename lands. ``partial`` gets published too now,
+                # so it has to wait for the same rename.
                 payload["state"] = "running"
             return _progress_from(payload, candidate.parent)
         return None
@@ -348,6 +385,10 @@ class ProcessingService:
         code = job.process.returncode
         if code == 0:
             job.progress = _replace_state(job.progress, JobState.COMPLETE)
+            return
+        if code == 1:
+            # Published, with caveats the job file already lists.
+            job.progress = _replace_state(job.progress, JobState.PARTIAL)
             return
         # A child that died without writing a state is a failure, and saying so
         # is better than leaving a row spinning forever.
@@ -378,6 +419,9 @@ def _progress_from(payload: dict[str, Any], directory: Path) -> JobProgress:
         elapsed_s=float(payload.get("elapsed_s", 0.0) or 0.0),
         paused_s=float(payload.get("paused_s", 0.0) or 0.0),
         issues=tuple(payload.get("issues") or ()),
+        blocking_issues=tuple(payload.get("blocking_issues") or ()),
+        capture_frames=int((payload.get("coverage") or {}).get("capture_frames", 0) or 0),
+        matched_frames=int((payload.get("coverage") or {}).get("matched_frames", 0) or 0),
         error=str(payload.get("error") or ""),
         run_id=str(payload.get("run_id", "")),
         directory=directory,

@@ -55,16 +55,22 @@ QToolTip {
 
 /* ----------------------------------------------------------- surfaces */
 
+/* A surface that draws a border keeps its contents off it. Qt's box model
+   applies this padding to the widget's contents rect, so the layout inside is
+   inset without every caller remembering to set margins - which is how text
+   ended up sitting on the border line in the 16 September screenshots. */
 QFrame[kcSurface="raised"] {
     background-color: @KcSurfaceRaised@;
     border: @KcBorderWidth@px solid @KcBorderSubtle@;
     border-radius: @KcRadiusSurface@px;
+    padding: @KcSpacingXl@px;
 }
 
 QFrame[kcSurface="sunken"] {
     background-color: @KcSurfaceSunken@;
     border: @KcBorderWidth@px solid @KcBorderSubtle@;
     border-radius: @KcRadiusSurface@px;
+    padding: @KcSpacingXl@px;
 }
 
 QFrame[kcSurface="viewport"] {
@@ -77,6 +83,7 @@ QFrame[kcSurface="viewport"] {
 QWidget[kcSurface="header"], QFrame[kcSurface="header"] {
     background-color: @KcSurfaceHeader@;
     border-radius: @KcRadiusSmall@px;
+    padding: @KcSpacingMd@px @KcSpacingLg@px;
 }
 
 QFrame[kcSeparator="horizontal"] {
@@ -636,6 +643,9 @@ QTabWidget::pane {
     border: @KcBorderWidth@px solid @KcBorderSubtle@;
     border-radius: @KcRadiusSmall@px;
     top: -@KcBorderWidth@px;
+    /* The labelling inspector lives in one of these. Without this its
+       headings and its help text were painted against the pane border. */
+    padding: @KcSpacingXl@px;
 }
 
 QTabBar {

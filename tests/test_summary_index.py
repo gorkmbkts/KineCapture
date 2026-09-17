@@ -104,13 +104,21 @@ def test_index_reads_participant_and_session_from_the_path(project: Path) -> Non
     assert take.session_id == "ses_b"
 
 
-def test_partial_runs_are_listed_but_not_counted_as_results(project: Path) -> None:
+def test_a_run_with_caveats_is_still_a_version(project: Path) -> None:
+    """``partial`` means "finished, with notes", not "hidden".
+
+    ``run_b`` carries ``source_frame_count_mismatch``. It was promoted out of
+    staging, so it is a version someone can open; what it is not is flawless,
+    and the index says both things separately.
+    """
     index = build_index(project, force=True)
     take = index.by_id("take_004")
     assert take is not None
     assert len(take.runs) == 2
-    assert [run.run_id for run in take.complete_runs] == ["run_c"]
-    assert take.latest_complete_run.run_id == "run_c"
+    assert [run.run_id for run in take.published_runs] == ["run_b", "run_c"]
+    assert take.latest_published_run.run_id == "run_c"
+    flawless = [run.run_id for run in take.runs if run.is_flawless]
+    assert flawless == ["run_c"]
 
 
 def test_takes_awaiting_processing_are_the_ones_with_no_result(project: Path) -> None:
@@ -127,11 +135,12 @@ def test_pre_policy_takes_are_marked_not_hidden(project: Path) -> None:
     assert index.by_id("take_003") is not None
 
 
-def test_complete_runs_lists_every_finished_version(project: Path) -> None:
+def test_published_runs_lists_every_listable_version(project: Path) -> None:
     index = build_index(project, force=True)
-    pairs = index.complete_runs()
+    pairs = index.published_runs()
     assert [(take.take_id, run.run_id) for take, run in pairs] == [
         ("take_001", "run_a"),
+        ("take_004", "run_b"),
         ("take_004", "run_c"),
     ]
 
@@ -161,7 +170,7 @@ def test_a_changed_take_is_rereard_and_the_rest_are_not(project: Path) -> None:
 
     refreshed = build_index(project)
     assert refreshed.rescanned == 1
-    assert refreshed.by_id("take_002").latest_complete_run.run_id == "run_new"
+    assert refreshed.by_id("take_002").latest_published_run.run_id == "run_new"
 
 
 def test_a_missing_cache_is_not_an_error(project: Path) -> None:
@@ -252,10 +261,10 @@ def test_a_staging_run_claiming_complete_is_not_offered(tmp_path: Path) -> None:
     assert len(runs) == 1
     assert runs[0].state == "complete"      # the claim is reported as it is
     assert not runs[0].promoted
-    assert not runs[0].is_complete          # ...but it is not a result yet
+    assert not runs[0].is_published         # ...but it is not a result yet
     assert runs[0].folder == ".run_abc.partial"
 
     promoted = staging.parent / "run_abc"
     staging.rename(promoted)
     runs = _read_runs(take_dir)
-    assert runs[0].is_complete and runs[0].folder == "run_abc"
+    assert runs[0].is_published and runs[0].folder == "run_abc"

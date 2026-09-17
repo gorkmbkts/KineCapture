@@ -171,8 +171,9 @@ class CapturePage(StudioPage):
         panel.setFixedWidth(_CONSOLE_WIDTH)
         panel.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         column = QVBoxLayout(panel)
-        margin = tokens.metric("KcSpacingXl")
-        column.setContentsMargins(margin, margin, margin, margin)
+        # No margins here: ``QFrame[kcSurface="raised"]`` carries the inset, so
+        # the gap between a border and what it holds is decided in one place.
+        column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(tokens.metric("KcSpacingXl"))
 
         column.addWidget(self._build_target_group(tokens))
@@ -309,6 +310,18 @@ class CapturePage(StudioPage):
         self.guides_box.toggled.connect(self._guides_toggled)
         group.add(self.guides_box)
 
+        self.framing_label = label("", role="fieldLabel")
+        self.framing_label.setWordWrap(True)
+        self.framing_label.setToolTip(
+            "Tüm vücudun kadrajda olup olmadığı. Canlı önizleme pozundan "
+            "ölçülür; kaydedilen veriyi etkilemez."
+        )
+        group.add(self.framing_label)
+        self.framing_advice = label("", role="pageSubtitle")
+        self.framing_advice.setWordWrap(True)
+        self.framing_advice.hide()
+        group.add(self.framing_advice)
+
         self.pose_note = label("", role="pageSubtitle")
         self.pose_note.setWordWrap(True)
         self.pose_note.hide()
@@ -377,6 +390,7 @@ class CapturePage(StudioPage):
         self.bind(viewmodel.alerts, self._show_alerts)
         self.bind(viewmodel.anchor, self._show_anchor)
         self.bind(viewmodel.pose_note, self._show_pose_note)
+        self.bind(viewmodel.framing, self._show_framing)
         self.bind(viewmodel.mode, self._show_mode)
         self.bind(viewmodel.active_mode, lambda _m: self._show_mode_state())
         self.bind(viewmodel.mode_pending, lambda _p: self._show_mode_state())
@@ -434,6 +448,12 @@ class CapturePage(StudioPage):
             from kinecapture.preview.pose import BONES
 
             self.preview.set_people(preview.people, BONES)
+        # Measured per frame and painted over the picture, because the person
+        # who has to act on it is standing three metres away from the keyboard.
+        framing = self.viewmodel.observe_framing()
+        self.preview.set_framing(
+            framing.text, framing.state, self.viewmodel.framing_history.value
+        )
 
     # ----------------------------------------------------------------- slots
     def _show_metrics(self, metrics: CaptureMetrics) -> None:
@@ -519,6 +539,20 @@ class CapturePage(StudioPage):
             f"kare zaman damgası {anchor.camera_timestamp_ns} ns"
         )
         self.clear_subject_button.setEnabled(True)
+
+    def _show_framing(self, framing) -> None:  # noqa: ANN001 - Framing
+        """Repeat the badge in the console, with the reason spelled out."""
+        self.framing_label.setText(framing.text)
+        self.framing_label.setProperty(
+            "kcStatus",
+            {"ok": "live", "tight": "warning", "cut": "error", "crowded": "warning"}.get(
+                framing.state, ""
+            ),
+        )
+        self.framing_label.style().unpolish(self.framing_label)
+        self.framing_label.style().polish(self.framing_label)
+        self.framing_advice.setText(framing.advice)
+        self.framing_advice.setVisible(bool(framing.advice))
 
     def _show_pose_note(self, text: str) -> None:
         """Only takes height when it has something to say."""

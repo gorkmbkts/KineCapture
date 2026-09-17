@@ -11,6 +11,7 @@ No Qt.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
@@ -22,6 +23,7 @@ from kinecapture.studio.services.capture import (
     CaptureService,
     SubjectAnchor,
 )
+from kinecapture.studio.services.framing import Framing, FramingWatch, measure
 from kinecapture.studio.services.messages import Action, Message, Severity, from_error
 from kinecapture.studio.services.session import SessionService, WorkTarget
 
@@ -157,6 +159,12 @@ class CaptureViewModel:
         self.pose_note: Observable[str] = Observable(
             PREVIEW_POSE_DISCLAIMER, name="pose_note"
         )
+        #: Whether the whole person is in shot, right now.
+        self.framing: Observable[Framing] = Observable(Framing(), name="framing")
+        #: And what the worst of the last few seconds was, which is the one
+        #: you can actually read after standing up from a squat.
+        self.framing_history: Observable[str] = Observable("", name="framing_history")
+        self._framing_watch = FramingWatch()
         #: Who the next take belongs to, resolved from the session.
         self.target: Observable[WorkTarget] = Observable(WorkTarget(), name="target")
         #: (participant_id, code) for the target chooser.
@@ -293,6 +301,28 @@ class CaptureViewModel:
         self.mode_pending.set(bool(active) and active != self.mode.value)
 
     # --------------------------------------------------------------- metrics
+    def observe_framing(self) -> Framing:
+        """Measure the live preview and remember it. Called per preview frame.
+
+        Kept in the viewmodel rather than the widget so the rule about what
+        counts as "in shot" is one testable thing, and so the history survives
+        a repaint.
+        """
+        framing = measure(self.service.pose_preview())
+        self.framing.set(framing)
+        if framing.state in ("no_camera", "no_overlay"):
+            self._framing_watch.reset()
+            self.framing_history.set("")
+            return framing
+        self._framing_watch.observe(framing, now=time.monotonic())
+        self.framing_history.set(self._framing_watch.verdict)
+        return framing
+
+    def reset_framing_history(self) -> None:
+        """Start the window again - after moving the camera, for instance."""
+        self._framing_watch.reset()
+        self.framing_history.set("")
+
     def read_status(self) -> RecordingStatus:
         """A cheap reading of the recording, for anyone who only needs that.
 

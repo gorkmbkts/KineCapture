@@ -21,7 +21,16 @@ from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import QPoint, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QMouseEvent, QPainter, QPaintEvent, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontMetrics,
+    QImage,
+    QMouseEvent,
+    QPainter,
+    QPaintEvent,
+    QPen,
+)
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from kinecapture.studio.theme import ThemeTokens
@@ -48,6 +57,10 @@ class PreviewView(QWidget):
         self._mirrored = False
         self._guides = False
         self._countdown = 0
+        #: The live framing verdict, and the worst of the last few seconds.
+        #: Painted over the picture because the person who needs to read it is
+        #: standing in front of the camera, not sitting at the keyboard.
+        self._framing = ("", "", "")
         self.setMinimumSize(320, 180)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setCursor(Qt.CursorShape.CrossCursor)
@@ -83,6 +96,13 @@ class PreviewView(QWidget):
         """Thirds and a head/feet margin, to frame a shot without a second person."""
         if shown != self._guides:
             self._guides = bool(shown)
+            self.update()
+
+    def set_framing(self, text: str, state: str, history: str) -> None:
+        """Say whether the whole person is in shot, and how the last seconds went."""
+        value = (str(text or ""), str(state or ""), str(history or ""))
+        if value != self._framing:
+            self._framing = value
             self.update()
 
     def set_countdown(self, seconds: int) -> None:
@@ -195,6 +215,8 @@ class PreviewView(QWidget):
         self._paint_people(painter)
         if self._guides:
             self._paint_guides(painter, rect)
+        if self._framing[0]:
+            self._paint_framing(painter, rect)
         if self._countdown:
             self._paint_countdown(painter, rect)
         if self._recording:
@@ -231,6 +253,83 @@ class PreviewView(QWidget):
         for fraction in (0.08, 0.92):
             y = rect.top() + rect.height() * fraction
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+
+    #: Verdict state -> the token its badge is painted in.
+    _FRAMING_COLOURS = {
+        "ok": "KcStatusLive",
+        "tight": "KcStatusWarning",
+        "cut": "KcStatusRecording",
+        "crowded": "KcStatusWarning",
+        "no_person": "KcTextMuted",
+        "no_overlay": "KcTextMuted",
+        "no_camera": "KcTextMuted",
+    }
+
+    def _paint_framing(self, painter: QPainter, rect: QRectF) -> None:
+        """A badge across the top of the picture, sized to be read from 3 m.
+
+        Never mirrored with the image: it is text, and a flipped word is
+        unreadable exactly when it matters most.
+        """
+        text, state, history = self._framing
+        tokens = self._tokens
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        font = painter.font()
+        font.setPointSize(max(13, int(rect.height() / 22)))
+        font.setBold(True)
+        painter.setFont(font)
+        metrics = painter.fontMetrics()
+
+        pad = tokens.metric("KcSpacingLg")
+        line_height = metrics.height()
+        height = line_height + pad * 2
+        small_font = QFont(font)
+        small_font.setPointSize(max(10, int(font.pointSize() * 0.7)))
+        small_font.setBold(False)
+        if history:
+            height += QFontMetrics(small_font).height()
+        width = max(
+            metrics.horizontalAdvance(text),
+            QFontMetrics(small_font).horizontalAdvance(history) if history else 0,
+        ) + pad * 2
+        width = min(width, rect.width() - pad * 2)
+        badge = QRectF(
+            rect.center().x() - width / 2.0, rect.top() + pad, width, height
+        )
+
+        background = QColor(tokens.colour("KcSurfaceViewport"))
+        background.setAlpha(205)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(background)
+        painter.drawRoundedRect(
+            badge, tokens.metric("KcRadiusRound"), tokens.metric("KcRadiusRound")
+        )
+        accent = QColor(
+            tokens.colour(self._FRAMING_COLOURS.get(state, "KcTextMuted"))
+        )
+        pen = QPen(accent)
+        pen.setWidth(tokens.metric("KcBorderWidthStrong"))
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(
+            badge, tokens.metric("KcRadiusRound"), tokens.metric("KcRadiusRound")
+        )
+
+        painter.setPen(accent)
+        painter.setFont(font)
+        top = QRectF(badge.left(), badge.top() + pad, badge.width(), line_height)
+        painter.drawText(top, int(Qt.AlignmentFlag.AlignCenter), text)
+        if history:
+            painter.setPen(QColor(tokens.colour("KcTextSecondary")))
+            painter.setFont(small_font)
+            below = QRectF(
+                badge.left(),
+                top.bottom(),
+                badge.width(),
+                QFontMetrics(small_font).height(),
+            )
+            painter.drawText(below, int(Qt.AlignmentFlag.AlignCenter), history)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     def _paint_countdown(self, painter: QPainter, rect: QRectF) -> None:
         """The number, big enough to read from where the athlete is standing."""

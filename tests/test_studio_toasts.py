@@ -18,6 +18,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pytest.importorskip("PySide6")
 
+from PySide6.QtCore import QRect  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from kinecapture.core.config import AppConfig  # noqa: E402
@@ -224,3 +225,34 @@ def test_empty_space_still_belongs_to_the_page(window, app) -> None:
     assert layer.geometry().contains(
         layer.mapFromParent(window.stack.mapFrom(window, outside))
     ) is False
+
+
+def test_a_message_never_covers_a_page_action_bar(window, app) -> None:
+    """Ayarlar keeps its Save button on its own bottom edge.
+
+    The message layer stacks from the bottom-right, which is table background
+    on nearly every screen. On that one it was drawn straight over "Kaydet" -
+    a notification that takes away the action it is telling you about.
+    """
+    window.viewmodel.navigate("settings")
+    app.processEvents()
+    page = window.page("settings")
+    assert page.bottom_reserve() > 0
+
+    window.viewmodel.report(
+        Message(headline="Ham kayıt kaydedildi", severity=Severity.INFO)
+    )
+    app.processEvents()
+    layer = window.toasts
+    assert layer.isVisible()
+
+    button = page.save_button
+    button_rect = QRect(
+        button.mapTo(window, button.rect().topLeft()), button.size()
+    )
+    layer_rect = QRect(
+        layer.mapTo(window, layer.rect().topLeft()), layer.size()
+    )
+    assert not layer_rect.intersects(button_rect), (
+        f"a message at {layer_rect} covers Kaydet at {button_rect}"
+    )

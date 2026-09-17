@@ -675,6 +675,9 @@ class StudioWindow(QMainWindow, BoundView):
         # The inspector belongs to whichever page is now in front, with
         # whatever that page was last left showing.
         self._apply_inspector_target()
+        self.toasts.set_bottom_reserve(
+            page.bottom_reserve() if isinstance(page, StudioPage) else 0
+        )
         self._update_title()
 
     def _show_recording(self, status) -> None:  # noqa: ANN001 - RecordingStatus

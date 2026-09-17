@@ -300,6 +300,11 @@ def test_the_package_names_what_produced_it(version, schema, tmp_path) -> None:
     assert entry["annotation_revision"] > 0
     assert entry["subject_revision"] > 0
     assert entry["source_fingerprint"]
+    # A version may be published carrying recorded caveats. They travel with
+    # it, so the package can be judged years later instead of being trusted.
+    assert entry["processing_state"] in ("complete", "partial")
+    assert isinstance(entry["processing_issues"], list)
+    assert isinstance(entry["processing_coverage"], dict)
 
 
 def test_class_indices_come_from_the_manifest_and_are_stable(

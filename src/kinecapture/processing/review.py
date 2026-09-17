@@ -39,8 +39,19 @@ class ReviewDataset:
     def __init__(self, directory: Path, *, verify: bool = True):
         self.directory = Path(directory)
         self.job = read_json(self.directory / "job.json")
-        if self.job["state"] != "complete":
-            raise ValueError("Only a complete processing version can be annotated")
+        # ``partial`` is a version with recorded caveats, and the library
+        # lists it with them attached; refusing to open one was how a run that
+        # had matched 521 of 524 frames became unreachable. ``running``,
+        # ``cancelled`` and ``failed`` are not versions at all.
+        if self.job.get("state") not in ("complete", "partial"):
+            raise ValueError(
+                "Only a complete or partial processing version can be annotated"
+            )
+        if self.job.get("blocking_issues"):
+            raise ValueError(
+                "This version did not pass a check that annotation depends on: "
+                + ", ".join(self.job["blocking_issues"])
+            )
         if verify and verify_checksum_manifest(read_json(self.directory / "checksums.json"), self.directory):
             raise ValueError("Derived checksum verification failed")
         # The source map is kept as two integer arrays rather than as parsed

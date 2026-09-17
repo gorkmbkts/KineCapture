@@ -136,7 +136,7 @@ class ProcessingViewModel:
         candidates = [
             take
             for take in self._index
-            if not take.is_legacy and not take.complete_runs
+            if not take.is_legacy and not take.published_runs
         ]
         # A take whose writer has not let go is not a candidate for anything.
         # Processing it would read a directory that is still being written.
@@ -144,7 +144,7 @@ class ProcessingViewModel:
         waiting = tuple(t for t in candidates if t.state != OPEN_TAKE_STATE)
         self.open_takes.force(open_takes)
         self.waiting.force(waiting)
-        done = len(self._index.with_complete_runs())
+        done = len(self._index.with_published_runs())
         parts = [f"{len(waiting)} kayıt işlenmeyi bekliyor", f"{done} kayıt işlenmiş"]
         if open_takes:
             parts.append(f"{len(open_takes)} kayıt hâlâ açık (işlenemez)")
@@ -251,32 +251,8 @@ class ProcessingViewModel:
             return
         job._reported = True  # noqa: SLF001 - one message per job, by design
         self.job_finished.emit(job)
-        if state is JobState.COMPLETE:
-            self.message.emit(
-                Message(
-                    headline=f"{job.take.participant_id} kaydı işlendi.",
-                    severity=Severity.INFO,
-                    detail=f"{job.progress.frames_processed} kare.",
-                    code="processing_complete",
-                    technical={"kayıt": job.take.take_id},
-                    actions=(Action("goto:library", "Sonucu incele", primary=True),),
-                )
-            )
-            self.reload(force=True)
-            return
-        if state is JobState.PARTIAL:
-            # Never called complete. The interface says exactly which check
-            # did not pass rather than rounding it up to success.
-            self.message.emit(
-                Message(
-                    headline=f"{job.take.take_id}: kaynak kapsamı doğrulanamadı.",
-                    severity=Severity.WARNING,
-                    detail=" · ".join(job.progress.issue_texts) or "Ayrıntılar işte.",
-                    code="processing_partial",
-                    technical={"issues": list(job.progress.issues)},
-                    actions=(Action("goto:library", "Sürümü incele"),),
-                )
-            )
+        if state in (JobState.COMPLETE, JobState.PARTIAL):
+            self._report_result(job)
             self.reload(force=True)
             return
         if state is JobState.FAILED:
@@ -289,6 +265,85 @@ class ProcessingViewModel:
                     technical={"hata": job.progress.error},
                 )
             )
+
+    def _report_result(self, job: Job) -> None:
+        """Announce a finished version, and offer the screen that uses it.
+
+        Both endings say what happened and both hand over the same way. The
+        old "Sürümü incele" pointed at the library, which on 16 September was
+        empty - the version it named had never been published. The link now
+        carries the directory, so it opens that version in Etiketleme whether
+        or not a list would have shown it.
+        """
+        progress = job.progress
+        # Two notes on the card, the rest behind "Ayrıntılar". Five sentences
+        # in a row is a wall, and the one that matters - how much matched - is
+        # then the hardest to find.
+        texts = list(progress.issue_texts)
+        caveats = " · ".join(texts[:2])
+        if len(texts) > 2:
+            caveats += f" · +{len(texts) - 2} not daha"
+        coverage = progress.coverage_text
+        actions: list[Action] = []
+        if progress.published and progress.directory is not None:
+            actions.append(
+                Action(f"review:{progress.directory}", "Etiketlemeyi aç", primary=True)
+            )
+            actions.append(Action("goto:library", "Sürüm listesi"))
+        else:
+            actions.append(Action("goto:processing", "İşleme ekranı"))
+        if not progress.issues:
+            self.message.emit(
+                Message(
+                    headline=f"{job.take.participant_id} kaydı işlendi.",
+                    severity=Severity.INFO,
+                    detail=" · ".join(
+                        part for part in (f"{progress.frames_processed} kare", coverage) if part
+                    ),
+                    code="processing_complete",
+                    technical={"kayıt": job.take.take_id, "sürüm": str(progress.directory or "")},
+                    actions=tuple(actions),
+                )
+            )
+            return
+        if progress.published:
+            # Published, and the notes are attached to it. Not rounded up to
+            # success and not rounded down to failure: the version exists, the
+            # caveats are on the row, and the operator decides.
+            self.message.emit(
+                Message(
+                    headline=f"{job.take.participant_id} kaydı işlendi · notlarla.",
+                    severity=Severity.WARNING,
+                    detail=" · ".join(
+                        part for part in (coverage, caveats) if part
+                    ) or "Ayrıntılar işte.",
+                    code="processing_published_with_issues",
+                    technical={
+                        "kayıt": job.take.take_id,
+                        "sürüm": str(progress.directory or ""),
+                        "notlar": list(progress.issue_texts),
+                        "issues": list(progress.issues),
+                    },
+                    actions=tuple(actions),
+                )
+            )
+            return
+        self.message.emit(
+            Message(
+                headline=f"{job.take.take_id}: sürüm yayımlanamadı.",
+                severity=Severity.ERROR,
+                detail=" · ".join(
+                    describe_issue(code) for code in progress.blocking_issues
+                ) or caveats or "Ayrıntılar işte.",
+                code="processing_blocked",
+                technical={
+                    "kayıt": job.take.take_id,
+                    "blocking": list(progress.blocking_issues),
+                    "issues": list(progress.issues),
+                },
+                actions=tuple(actions),
+            )
+        )
 
     @property
     def index(self) -> Optional[TakeIndex]:

@@ -62,6 +62,15 @@ class StudioPage(QWidget, BoundView):
     #: is exactly what the 15 September audit found on Etiketleme.
     owns_inspector = False
 
+    def bottom_reserve(self) -> int:
+        """Height of an action bar this page pins to its own bottom edge.
+
+        The floating message layer stacks from the bottom-right, which is
+        table background on nearly every screen. On the one screen that keeps
+        its Save button down there, a notification was drawn over it.
+        """
+        return 0
+
     # ------------------------------------------------------------ inspector
     def inspector_sections(self) -> tuple:
         """What the shell's inspector should show for this page right now.

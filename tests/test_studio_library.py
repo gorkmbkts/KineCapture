@@ -51,8 +51,24 @@ def _version(**overrides) -> VersionRow:
 def test_a_version_with_issues_is_not_ready() -> None:
     row = _version(issues=("source_frame_count_mismatch",))
     assert row.coverage_verified is False
-    assert row.quality_text == "kapsam doğrulanamadı"
     assert row.quality_status == "warning"
+
+
+def test_coverage_is_offered_as_a_count_not_a_verdict() -> None:
+    """521 of 524 is something an operator can weigh. "Doğrulanamadı" is not.
+
+    Both 16 September takes matched over 99% of their frames and the screen had
+    one sentence for it, the same sentence it would use for a recording that
+    matched none.
+    """
+    row = _version(
+        issues=("capture_frames_unmatched",), capture_frames=524, matched_frames=521
+    )
+    assert row.coverage_text == "521/524 kare eşleşti"
+    assert row.quality_text == "521/524 kare eşleşti"
+    row = _version(capture_frames=524, matched_frames=524)
+    assert row.coverage_text == "524 kare eşleşti"
+    assert row.quality_text == "hazır"
 
 
 def test_a_version_without_a_chosen_subject_is_not_ready() -> None:
@@ -72,7 +88,9 @@ def test_a_clean_version_is_ready() -> None:
     ("key", "row", "expected"),
     [
         ("ready", _version(), True),
-        ("ready", _version(issues=("x",)), False),
+        # A coverage note is something to read before annotating, not a reason
+        # the version cannot be annotated - publishing it already decided that.
+        ("ready", _version(issues=("x",)), True),
         ("ready", _version(subject_status="needs_subject_selection"), False),
         ("needs_subject", _version(subject_status="needs_subject_selection"), True),
         ("needs_subject", _version(), False),
@@ -126,13 +144,21 @@ def project(tmp_path: Path) -> Path:
             "issues": ["source_frame_count_mismatch"],
         },
     }
+    # An attempt still in staging. This is what "not a result" means now: the
+    # folder is dot-prefixed because nothing renamed it, so no screen may list
+    # it. A promoted run with recorded caveats is a different thing entirely.
+    runs[".run_d.partial"] = {
+        "state": "running",
+        "skeleton_format": "zed_body_38",
+        "issues": [],
+    }
     for run_id, extra in runs.items():
         directory = take_dir / "derived" / "processing" / run_id
         directory.mkdir(parents=True)
         (directory / "job.json").write_text(
             json.dumps(
                 {
-                    "run_id": run_id,
+                    "run_id": run_id.lstrip(".").removesuffix(".partial"),
                     "frames_processed": 300,
                     "subject_status": "associated",
                     "schema_version": "1.1.0",
@@ -145,17 +171,23 @@ def project(tmp_path: Path) -> Path:
     return root
 
 
-def test_only_finished_versions_are_listed(project: Path) -> None:
-    """A partial attempt is not a result and is not offered as one."""
+def test_only_published_versions_are_listed(project: Path) -> None:
+    """A staged attempt is not a result; a published one with notes is.
+
+    ``run_c`` carries ``source_frame_count_mismatch`` and is listed, with the
+    caveat on its row. ``run_d`` never left its staging folder, so it is not.
+    """
     index = build_index(project, force=True)
     rows = LibraryService().versions(index)
-    assert {row.run_id for row in rows} == {"run_a", "run_b"}
+    assert {row.run_id for row in rows} == {"run_a", "run_b", "run_c"}
+    caveated = next(row for row in rows if row.run_id == "run_c")
+    assert caveated.coverage_verified is False
 
 
 def test_sibling_count_shows_there_is_something_to_compare(project: Path) -> None:
     index = build_index(project, force=True)
     rows = LibraryService().versions(index)
-    assert all(row.sibling_versions == 2 for row in rows)
+    assert all(row.sibling_versions == 3 for row in rows)
 
 
 def test_parameters_come_from_the_version_itself(project: Path) -> None:
@@ -198,10 +230,10 @@ def library(project: Path) -> LibraryViewModel:
     return LibraryViewModel(_Session(project), runner=InlineRunner())
 
 
-def test_reload_lists_the_finished_versions(library: LibraryViewModel) -> None:
+def test_reload_lists_the_published_versions(library: LibraryViewModel) -> None:
     library.reload(force=True)
-    assert len(library.rows.value) == 2
-    assert "2 sürüm gösteriliyor" in library.summary.value
+    assert len(library.rows.value) == 3
+    assert "3 sürüm gösteriliyor" in library.summary.value
 
 
 def test_the_summary_names_what_is_unresolved(library: LibraryViewModel) -> None:
@@ -223,7 +255,7 @@ def test_filtering_does_not_re_read_the_project(
     library.set_filter("multi")
     library.set_filter("all")
     assert calls == []
-    assert len(library.rows.value) == 2
+    assert len(library.rows.value) == 3
 
 
 def test_selecting_shows_the_other_versions_of_the_same_take(
@@ -231,7 +263,11 @@ def test_selecting_shows_the_other_versions_of_the_same_take(
 ) -> None:
     library.reload(force=True)
     library.select(library.rows.value[0])
-    assert {row.run_id for row in library.comparison.value} == {"run_a", "run_b"}
+    assert {row.run_id for row in library.comparison.value} == {
+        "run_a",
+        "run_b",
+        "run_c",
+    }
 
 
 def test_clearing_the_selection_clears_the_comparison(library: LibraryViewModel) -> None:

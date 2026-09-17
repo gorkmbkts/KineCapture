@@ -275,6 +275,12 @@ class TakeWriter:
         self._recording_status: Optional[dict[str, Any]] = None
         self._previous_timestamp: Optional[int] = None
         self._timestamp_gaps = 0
+        #: Frames the SDK told us it did not write into the SVO, and frames on
+        #: which it repeated the previous camera timestamp. Counted rather than
+        #: flagged: "2 of 524" and "all of them" are not the same recording,
+        #: and a boolean cannot tell them apart.
+        self._native_unwritten = 0
+        self._timestamp_repeats = 0
         self._gap_sum = self._gap_squared_sum = 0.0
         self._closed = False
         self._started_monotonic = time.perf_counter()
@@ -487,6 +493,7 @@ class TakeWriter:
         if packet.recording_status is not None:
             self._recording_status = dict(packet.recording_status)
             if packet.recording_status.get("status") is False:
+                self._native_unwritten += 1
                 self._integrity_issues.add("native_recording_status_failed")
         ts = packet.camera_timestamp_ns
         if ts < 0 or (ts == 0 and packet.origin.value != "synthetic"):
@@ -495,8 +502,15 @@ class TakeWriter:
             gap = (ts - self._previous_timestamp) / 1e6
             self._gap_sum += gap
             self._gap_squared_sum += gap * gap
-            if gap <= 0:
+            if gap < 0:
                 self._integrity_issues.add("camera_timestamp_non_monotonic")
+            elif gap == 0:
+                # The ZED gave two consecutive frames the same timestamp once
+                # in 524 frames and twice in 1648 on 16 September. Time did not
+                # go backwards and no frame was lost; calling it
+                # "non-monotonic" demoted two intact recordings.
+                self._timestamp_repeats += 1
+                self._integrity_issues.add("camera_timestamp_repeated")
             if gap > 1500 / self.take.capture_profile.fps:
                 self._timestamp_gaps += 1
         self._previous_timestamp = ts
@@ -505,6 +519,44 @@ class TakeWriter:
             self._backend_dropped = max(
                 self._backend_dropped, max(0, int(packet.backend_dropped_frames) - self._backend_drop_baseline)
             )
+
+    def _raw_source_loss(self) -> str:
+        """Why the immutable source is incomplete, or an empty string.
+
+        A sentence rather than a list of codes, because this is what ends up in
+        the take's notes and in front of the operator.
+        """
+        reasons: list[str] = []
+        if self._frames_written == 0:
+            reasons.append("hiç kare yazılmadı")
+        if self._frames_dropped:
+            reasons.append(f"{self._frames_dropped} kare yazma kuyruğunda kayboldu")
+        if self._backend_dropped:
+            reasons.append(f"kamera {self._backend_dropped} kareyi düşürdü")
+        if self._native_unwritten:
+            reasons.append(
+                f"SDK {self._native_unwritten} karenin SVO'ya yazılmadığını bildirdi"
+            )
+        if "camera_timestamp_missing" in self._integrity_issues:
+            reasons.append("bazı karelerde kamera zaman damgası yok")
+        if "camera_timestamp_non_monotonic" in self._integrity_issues:
+            reasons.append("kamera zaman damgası geriye gitti")
+        return " · ".join(reasons)
+
+    def _integrity_summary(self) -> str:
+        """What was measured that is worth saying but is not missing data."""
+        notes: list[str] = []
+        if self._timestamp_repeats:
+            notes.append(
+                f"kamera {self._timestamp_repeats} karede önceki zaman damgasını "
+                "tekrarladı"
+            )
+        if self._timestamp_gaps:
+            notes.append(f"{self._timestamp_gaps} karede beklenenden büyük aralık")
+        rest = sorted(self._integrity_issues - {"camera_timestamp_repeated"})
+        if rest:
+            notes.append(", ".join(rest))
+        return " · ".join(notes) or "kayıt bütünlüğü notları var"
 
     def note_raw_failure(self, reason: str) -> None:
         """Record that the immutable source is not trustworthy.
@@ -595,20 +647,36 @@ class TakeWriter:
         # A take whose immutable source is incomplete is not a finished take.
         # It keeps every byte it did manage to write - nothing is deleted - but
         # it says PARTIAL, so it can never be mistaken for a reprocessable
-        # recording later.
-        if self._frames_dropped or self._backend_dropped or self._integrity_issues or self._frames_written == 0:
-            self.note_raw_failure(f"Kayıt bütünlüğü: queue={self._frames_dropped}, backend={self._backend_dropped}, issues={sorted(self._integrity_issues)}, frames={self._frames_written}")
+        # recording later. Missing frames and merely imperfect ones are both
+        # written down and answered differently: only frames that are actually
+        # absent decide the state. Until 17 September the two were one test
+        # (``or self._integrity_issues``), so a camera that stamped one
+        # microsecond twice demoted a take whose 524 frames were all on disk,
+        # under a note about an RGB-D archive that had been switched off on
+        # purpose.
+        lost = self._raw_source_loss()
+        if lost:
+            self.note_raw_failure(lost)
             metrics.raw_archive_failure = self._external_raw_failure
+        elif self._integrity_issues:
+            note = self._integrity_summary()
+            take.notes = f"{take.notes}\n[Kayıt notu: {note}]".strip()
+            logger.warning("Kayıt notlarla tamamlandı: %s", note)
         if state is TakeState.FINALIZED and metrics.has_raw_archive_loss:
             state = TakeState.PARTIAL
             reason = metrics.raw_archive_failure or (
                 f"renk {metrics.color_frames_dropped}, derinlik "
                 f"{metrics.depth_frames_dropped} kare arşivlenemedi"
             )
-            take.notes = (
-                f"{take.notes}\n[Ham RGB-D arşivi eksik: {reason}]"
-            ).strip()
-            logger.error("Ham arşiv eksik, kayıt PARTIAL: %s", reason)
+            # The archive wording only applies when the archive is what was
+            # lost. It used to be printed over every kind of loss.
+            label = (
+                "Ham RGB-D arşivi eksik"
+                if (metrics.color_frames_dropped or metrics.depth_frames_dropped)
+                else "Ham kaynak eksik"
+            )
+            take.notes = f"{take.notes}\n[{label}: {reason}]".strip()
+            logger.error("%s, kayıt PARTIAL: %s", label, reason)
         take.state = state
         take.processing_status = "live" if self._skeleton is not None else "awaiting_processing"
 
@@ -716,6 +784,8 @@ class TakeWriter:
                 "backend_drop_delta": self._backend_dropped,
                 "backend_drop_baseline": self._backend_drop_baseline,
                 "timestamp_gaps_over_1_5_intervals": self._timestamp_gaps,
+                "timestamp_repeats": self._timestamp_repeats,
+                "native_frames_unwritten": self._native_unwritten,
                 "timestamp_gap_max_ms": metrics.max_frame_gap_ms,
                 "timestamp_gap_std_ms": (max(0.0, self._gap_squared_sum / max(1, self._frames_written - 1) - (self._gap_sum / max(1, self._frames_written - 1)) ** 2) ** 0.5),
                 "last_sdk_recording_status": self._recording_status,

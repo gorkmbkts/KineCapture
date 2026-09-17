@@ -64,7 +64,14 @@ from kinecapture.features.roles import resolve_roles
 from kinecapture.visualization.skeleton_spec import SkeletonSpec
 
 #: Bumped whenever the scoring below could produce a different decision.
-ASSOCIATION_ALGORITHM_VERSION = "1.1.0"
+#:
+#: 1.2.0: the subject's body signature is measured only from frames the
+#: tracker reports as resolved, and a single contradicting frame no longer
+#: ends the association. Both come from the 16 September recordings, where the
+#: ZED reported a 0.88 m body for six frames and a 1.74 m body on the seventh -
+#: the same person, 17 ms apart - and the lock treated the difference as a
+#: person swap for the remaining 1638 frames.
+ASSOCIATION_ALGORITHM_VERSION = "1.2.0"
 
 
 class SubjectLockState(str, Enum):
@@ -115,6 +122,10 @@ class AssociationPolicy:
     #: drop a body for a frame or two and come back with the same id, and
     #: scoring candidates during that blink only manufactures ambiguity.
     lost_grace_seconds: float = 0.5
+    #: Consecutive frames whose evidence has to contradict the signature before
+    #: the lock gives up on an id the tracker is still reporting. One frame is
+    #: noise; on 16 September one frame cost 1638.
+    contradiction_frames: int = 3
     #: Weights of the three evidence terms; they sum to 1.
     weight_position: float = 0.4
     weight_limb_ratio: float = 0.4
@@ -203,9 +214,24 @@ class SubjectSignature:
             limb_lengths=merged, stature=stature, samples=min(total, 300)
         )
 
+    #: Segments a measurement needs before it describes a person rather than
+    #: whatever the tracker has resolved so far.
+    MIN_SEGMENTS = 6
+
     @property
     def is_usable(self) -> bool:
-        return len(self.limb_lengths) >= 3
+        """Enough of a body to be a description of a person.
+
+        Three segments is not. The ZED body fitter takes a few frames to
+        converge and reports a fragment until it does: in the 16 September
+        take the first six frames measured three segments and a 0.475 m
+        stature, and the seventh - same person, same tracking id, 17 ms later -
+        measured eleven segments and 1.621 m. With the fragment enshrined as
+        the subject's proportions, the real body scored 0.0 against it, the
+        lock called that a contradiction, and the remaining 516 frames were
+        recorded with no subject at all.
+        """
+        return len(self.limb_lengths) >= self.MIN_SEGMENTS and math.isfinite(self.stature)
 
     def similarity(self, other: "SubjectSignature") -> tuple[float, float]:
         """``(limb ratio score, stature score)``, each 0..1 or NaN."""
@@ -241,6 +267,22 @@ class SubjectSignature:
 
 def _vertical_axis_index(spec: SkeletonSpec) -> int:
     return {"x": 0, "y": 1, "z": 2}.get((spec.vertical_axis or "y").lower(), 1)
+
+
+def _is_resolved(body: BodyPose) -> bool:
+    """Whether the tracker says it has actually resolved this body.
+
+    The ZED reports ``OFF`` for the first frames of a detection while the body
+    fitter converges, and the skeleton it hands over meanwhile is a partial
+    one: in the 16 September squat take, frames 0-5 came back ``off`` with 27
+    valid joints and a 0.877 m stature, and frame 6 came back ``ok`` with 38
+    joints and 1.740 m. Those first frames are perfectly good *poses* - they
+    are kept and annotated like any other - but they are not a description of
+    who the person is, and measuring the subject's proportions from them made
+    the real body look like a stranger.
+    """
+    state = getattr(body.tracking_state, "value", body.tracking_state)
+    return str(state).lower() == "ok"
 
 
 def _root_position(body: BodyPose, spec: SkeletonSpec) -> Optional[np.ndarray]:
@@ -329,6 +371,9 @@ class SubjectLock:
 
         self._last_seen_position: Optional[np.ndarray] = None
         self._last_seen_timestamp_ns: Optional[int] = None
+        #: How many frames in a row have disagreed with the signature while the
+        #: tracker kept reporting the same id. Reset by any frame that agrees.
+        self._contradiction_run = 0
         self._selection: dict[str, Any] = {}
         self._counters = {
             "locked_frames": 0,
@@ -369,8 +414,15 @@ class SubjectLock:
             self.subject_id = new_id("subj")
         self.tracking_id = int(body.tracking_id)
         self.state = SubjectLockState.LOCKED
+        self._contradiction_run = 0
         if self.spec is not None:
-            self.signature = SubjectSignature.measure(body, self.spec)
+            # Only a resolved measurement is adopted. Taking the tracker's
+            # first, half-converged frame would define the subject as a
+            # fragment; the signature stays empty until a real one arrives,
+            # and an empty signature simply vetoes nothing.
+            measured = SubjectSignature.measure(body, self.spec)
+            usable = _is_resolved(body) and measured.is_usable
+            self.signature = measured if usable else SubjectSignature()
         self._remember(body, timestamp_ns)
         self._seen_ids.add(int(body.tracking_id))
         # A deliberate operator choice overrides an earlier co-visibility
@@ -472,14 +524,42 @@ class SubjectLock:
             contradiction = gap > self.policy.give_up_seconds
             if point is not None and self._last_seen_position is not None:
                 contradiction |= float(np.linalg.norm(point-self._last_seen_position)) > max(0.5, self.policy.plausible_speed*gap)
-            if self.spec is not None and self.signature.is_usable:
+            # Body proportions are evidence about *which person* this is, so
+            # they can only overrule the tracker when there is another person
+            # for it to be. One body in the frame, carrying the subject's own
+            # id, leaves no competing hypothesis - and what did change is the
+            # measurement, not the person: the ZED re-fits its model every
+            # frame and its output moves with posture. In the 16 September
+            # squat take the same person measured a 1.709 m joint extent
+            # standing and 1.064 m at the bottom of a squat, with thigh length
+            # moving 25%. Vetoing there protected nobody and cost 1409 frames
+            # of the exercise the recording exists to capture.
+            if (
+                len(present) > 1
+                and self.spec is not None
+                and self.signature.is_usable
+                and _is_resolved(body)
+            ):
                 limb, stature = self.signature.similarity(SubjectSignature.measure(body, self.spec))
                 contradiction |= any(math.isfinite(v) and v < 0.3 for v in (limb, stature))
             if contradiction:
+                self._contradiction_run += 1
+                if self._contradiction_run < self.policy.contradiction_frames:
+                    # One frame that disagrees is tracker noise, not a person
+                    # swapping places with another. The frame is still recorded
+                    # as subject-absent - nothing is guessed - but the lock is
+                    # kept so the next frame can settle it. Giving up here is
+                    # what turned one bad frame into 1638 unusable ones.
+                    self.state = SubjectLockState.TEMPORARILY_LOST
+                    self._counters["lost_frames"] += 1
+                    return FrameAssociation(
+                        self.state, None, float("nan"), "evidence_conflict_pending"
+                    )
                 self.state = SubjectLockState.AMBIGUOUS
                 self._counters["ambiguous_frames"] += 1
                 self._log("same_id_evidence_conflict", frame_index=frame_index, timestamp_ns=timestamp_ns)
                 return FrameAssociation(self.state, None, float("nan"), "same_id_evidence_conflict")
+            self._contradiction_run = 0
             if body.tracking_state.value not in ("ok", "off") or not body.valid_joint_mask.any():
                 self.state = SubjectLockState.TEMPORARILY_LOST
                 self._counters["lost_frames"] += 1
@@ -496,10 +576,12 @@ class SubjectLock:
                     ),
                 )
             self.state = SubjectLockState.LOCKED
-            if self.spec is not None:
-                self.signature = self.signature.blend(
-                    SubjectSignature.measure(body, self.spec)
-                )
+            if self.spec is not None and _is_resolved(body):
+                measured = SubjectSignature.measure(body, self.spec)
+                # An unconverged frame contributes nothing: averaging it in
+                # would drag the subject's proportions towards a fragment.
+                if measured.is_usable:
+                    self.signature = self.signature.blend(measured)
             self._remember(body, timestamp_ns)
             # Everyone else on screen right now is, provably, not the subject.
             self._covisible_ids.update(

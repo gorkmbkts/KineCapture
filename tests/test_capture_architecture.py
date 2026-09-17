@@ -82,6 +82,14 @@ def test_preview_and_listeners_cannot_backpressure_recording(workspace, session,
 
 
 def test_same_tracker_id_cannot_override_conflicting_geometry():
+    """An impossible jump never gets the subject, however the id is labelled.
+
+    A body four metres away is not the person who was here 33 ms ago, so that
+    frame is recorded with no subject at all. What *ends* the association is
+    the impossibility persisting: a single frame of it is a tracker glitch,
+    and treating one such frame as final is what left 1409 frames of a squat
+    recording with nobody in them on 16 September.
+    """
     backend = MockCameraBackend(width=160,height=120)
     backend.connect(); backend.start_preview()
     body = backend.grab_frame().bodies[0]
@@ -89,9 +97,32 @@ def test_same_tracker_id_cannot_override_conflicting_geometry():
     lock.select(body, frame_index=0,timestamp_ns=1_000_000_000,spec=backend.skeleton)
     stranger = replace(body, root_position=body.root_position+np.array([4,0,0]),
                        joint_positions_xyz=body.joint_positions_xyz+np.array([4,0,0]))
-    association = lock.update([stranger],frame_index=1,timestamp_ns=1_033_333_333)
-    assert association.state is SubjectLockState.AMBIGUOUS and association.tracking_id is None
-    assert lock.update([body],frame_index=2,timestamp_ns=1_066_666_666).tracking_id is None
+    first = lock.update([stranger],frame_index=1,timestamp_ns=1_033_333_333)
+    assert first.tracking_id is None
+    assert first.state is SubjectLockState.TEMPORARILY_LOST
+
+    # Still impossible, frame after frame: now the lock stops and waits.
+    for index, offset in enumerate((2, 3), start=2):
+        last = lock.update([stranger], frame_index=index,
+                           timestamp_ns=1_000_000_000 + offset * 33_333_333)
+        assert last.tracking_id is None
+    assert last.state is SubjectLockState.AMBIGUOUS
+    assert lock.update([body],frame_index=4,timestamp_ns=1_133_333_333).tracking_id is None
+
+
+def test_one_impossible_frame_does_not_end_the_recording():
+    """The glitch frame is refused; the frames either side of it are not."""
+    backend = MockCameraBackend(width=160,height=120)
+    backend.connect(); backend.start_preview()
+    body = backend.grab_frame().bodies[0]
+    lock = SubjectLock()
+    lock.select(body, frame_index=0,timestamp_ns=1_000_000_000,spec=backend.skeleton)
+    glitch = replace(body, root_position=body.root_position+np.array([4,0,0]),
+                     joint_positions_xyz=body.joint_positions_xyz+np.array([4,0,0]))
+    assert lock.update([glitch],frame_index=1,timestamp_ns=1_033_333_333).tracking_id is None
+    recovered = lock.update([body],frame_index=2,timestamp_ns=1_066_666_666)
+    assert recovered.state is SubjectLockState.LOCKED
+    assert recovered.tracking_id == int(body.tracking_id)
 
 
 def test_failed_publication_leaves_recording_recoverable(workspace, session, monkeypatch):

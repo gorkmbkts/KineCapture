@@ -48,6 +48,24 @@ class ProcessingRunSummary:
     state: str = "unknown"
     frames: int = 0
     issues: tuple[str, ...] = ()
+    #: The subset of ``issues`` that stopped this version being published.
+    #: Empty for every version a screen can list, by construction.
+    blocking_issues: tuple[str, ...] = ()
+    #: Frames the live recording wrote, and how many of them were found again
+    #: in the replayed source. Carried as numbers so a list row can say
+    #: "521/524" instead of asking the reader to trust a yes/no.
+    capture_frames: int = 0
+    matched_frames: int = 0
+    #: When this attempt started, and when its job file was last written.
+    #: Several versions of one take share the take's timestamp, so this is the
+    #: only thing that can put them in the order they were produced.
+    created_at: str = ""
+    job_mtime_ns: int = 0
+
+    @property
+    def order_key(self) -> tuple:
+        """Oldest first. Falls back to the file's own clock, then the name."""
+        return (self.created_at, self.job_mtime_ns, self.run_id)
     subject_status: str = ""
     body_format: str = ""
     schema_version: str = ""
@@ -62,16 +80,27 @@ class ProcessingRunSummary:
     promoted: bool = True
 
     @property
-    def is_complete(self) -> bool:
+    def is_published(self) -> bool:
         """Finished **and** promoted to its final folder.
 
-        A staging folder can already contain a job file claiming ``complete``:
-        processing writes the state, then the checksums, then renames. Trusting
-        that claim gave the library a version whose directory did not exist
-        yet. Promotion is the event that makes a version real, so it is what
-        this asks about.
+        A staging folder can already contain a job file claiming a finished
+        state: processing writes the state, then the checksums, then renames.
+        Trusting the claim gave the library a version whose directory did not
+        exist yet. Promotion is the event that makes a version real, so it is
+        what this asks about.
+
+        ``partial`` counts. A version with recorded caveats is still a version
+        - that is the whole point of recording the caveats - and refusing to
+        list it is how two perfectly annotatable 16 September recordings became
+        invisible. What a version may *not* be is unfinished or broken, and
+        those never reach a promoted folder.
         """
-        return self.state == "complete" and self.promoted
+        return self.promoted and self.state in ("complete", "partial")
+
+    @property
+    def is_flawless(self) -> bool:
+        """Published with nothing at all to report. Never rounded up to."""
+        return self.is_published and self.state == "complete" and not self.issues
 
     def to_dict(self) -> dict[str, Any]:
         payload = asdict(self)
@@ -108,15 +137,15 @@ class TakeSummary:
 
     @property
     def awaits_processing(self) -> bool:
-        return self.processing_status == "awaiting_processing" and not self.complete_runs
+        return self.processing_status == "awaiting_processing" and not self.published_runs
 
     @property
-    def complete_runs(self) -> tuple[ProcessingRunSummary, ...]:
-        return tuple(run for run in self.runs if run.is_complete)
+    def published_runs(self) -> tuple[ProcessingRunSummary, ...]:
+        return tuple(run for run in self.runs if run.is_published)
 
     @property
-    def latest_complete_run(self) -> Optional[ProcessingRunSummary]:
-        runs = self.complete_runs
+    def latest_published_run(self) -> Optional[ProcessingRunSummary]:
+        runs = self.published_runs
         return runs[-1] if runs else None
 
     @property
@@ -192,6 +221,11 @@ def _read_runs(take_dir: Path) -> tuple[ProcessingRunSummary, ...]:
                 state=str(job.get("state", "unknown")),
                 frames=int(job.get("frames_processed", 0) or 0),
                 issues=tuple(job.get("issues") or ()),
+                blocking_issues=tuple(job.get("blocking_issues") or ()),
+                capture_frames=int((job.get("coverage") or {}).get("capture_frames", 0) or 0),
+                matched_frames=int((job.get("coverage") or {}).get("matched_frames", 0) or 0),
+                created_at=str(job.get("created_at") or ""),
+                job_mtime_ns=_mtime_ns(job_path),
                 subject_status=str(job.get("subject_status", "")),
                 body_format=str(job.get("skeleton_format") or ""),
                 schema_version=str(job.get("schema_version", "")),
@@ -200,6 +234,8 @@ def _read_runs(take_dir: Path) -> tuple[ProcessingRunSummary, ...]:
                 has_depth=(child / "depth").is_dir(),
             )
         )
+    # Produced order, so "the latest version" means the latest one.
+    runs.sort(key=lambda run: run.order_key)
     return tuple(runs)
 
 
@@ -358,17 +394,17 @@ class TakeIndex:
     def awaiting_processing(self) -> list[TakeSummary]:
         return [take for take in self.sorted_takes() if take.awaits_processing]
 
-    def with_complete_runs(self) -> list[TakeSummary]:
-        return [take for take in self.sorted_takes() if take.complete_runs]
+    def with_published_runs(self) -> list[TakeSummary]:
+        return [take for take in self.sorted_takes() if take.published_runs]
 
     def legacy_takes(self) -> list[TakeSummary]:
         return [take for take in self.sorted_takes() if take.is_legacy]
 
-    def complete_runs(self) -> list[tuple[TakeSummary, ProcessingRunSummary]]:
-        """Every finished version in the project, newest take last."""
+    def published_runs(self) -> list[tuple[TakeSummary, ProcessingRunSummary]]:
+        """Every listable version in the project, newest take last."""
         pairs: list[tuple[TakeSummary, ProcessingRunSummary]] = []
         for take in self.sorted_takes():
-            pairs.extend((take, run) for run in take.complete_runs)
+            pairs.extend((take, run) for run in take.published_runs)
         return pairs
 
     def __len__(self) -> int:

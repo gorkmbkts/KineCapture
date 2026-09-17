@@ -122,9 +122,7 @@ def test_midstream_cancel_closes_source_without_publishing(raw_take):
     assert job['state']=='cancelled' and job['frames_processed']==4 and closed
 
 
-@pytest.mark.parametrize("fault", ["count", "timestamp", "position", "exception"])
-def test_fault_never_publishes_complete(raw_take, fault):
-    _, paths = raw_take
+def _broken_source(fault):
     class Broken(SyntheticSource):
         def __iter__(self):
             for i, packet in enumerate(super().__iter__()):
@@ -133,10 +131,50 @@ def test_fault_never_publishes_complete(raw_take, fault):
                 if i == 4 and fault == "timestamp": packet = replace(packet, camera_timestamp_ns=7)
                 if i == 4 and fault == "position": packet = replace(packet, source_position=7)
                 yield packet
-    partial = process_take(paths.root, ProcessingConfig(store_proxy=False, store_depth=False), source_factory=Broken)
-    assert read_json(partial / "job.json")["state"] in ("partial", "failed")
-    with pytest.raises(ValueError, match="complete"):
-        ReviewDataset(partial)
+    return Broken
+
+
+@pytest.mark.parametrize("fault", ["position", "exception"])
+def test_a_fault_that_breaks_annotation_is_never_published(raw_take, fault):
+    """Frame position is the annotation contract; a hole in it hides the run.
+
+    These are the faults where the version would be *wrong* rather than
+    incomplete: a label boundary would no longer identify a frame, or the run
+    never finished at all. Such a run stays in its dot-prefixed staging folder,
+    which no listing reads and no reader opens.
+    """
+    _, paths = raw_take
+    staged = process_take(paths.root, ProcessingConfig(store_proxy=False, store_depth=False),
+                          source_factory=_broken_source(fault))
+    assert staged.name.startswith(".") and staged.name.endswith(".partial")
+    job = read_json(staged / "job.json")
+    assert job["state"] in ("partial", "failed") and not job.get("published")
+    with pytest.raises(ValueError):
+        ReviewDataset(staged)
+
+
+@pytest.mark.parametrize("fault,expected", [
+    ("count", "source_frame_count_mismatch"),
+    ("timestamp", "source_timestamp_non_monotonic"),
+])
+def test_a_fault_that_only_costs_coverage_is_published_with_the_fault_recorded(
+    raw_take, fault, expected
+):
+    """Nine frames of sixteen is a short version, not a broken one.
+
+    Until 17 September both endings were the same folder rename that never
+    happened, so two 16 September recordings that had matched 99.4% and 99.7%
+    of their frames were unreachable from every screen. The caveat is recorded,
+    the state stays ``partial``, and the version can be opened and annotated.
+    """
+    _, paths = raw_take
+    run = process_take(paths.root, ProcessingConfig(store_proxy=False, store_depth=False),
+                       source_factory=_broken_source(fault))
+    assert not run.name.startswith(".")
+    job = read_json(run / "job.json")
+    assert job["state"] == "partial" and job["published"] is True
+    assert expected in job["issues"] and not job["blocking_issues"]
+    ReviewDataset(run).close()
 
 
 def test_derived_tamper_is_not_annotation_ready(raw_take):
@@ -179,6 +217,48 @@ def test_source_anchor_drives_subject_arrays_and_features(raw_take):
     assert np.isfinite(arrays["joint_angles_deg"]).any()
 
 
+def test_a_subject_picked_before_record_still_names_the_subject(raw_take):
+    """Picking the person happens before pressing record, not during.
+
+    Both 16 September takes carry an anchor stamped 3.7 s and 1.6 s before
+    their first recorded frame, taken while the preview was running. Matching
+    it strictly against the recording found nothing, so the version was written
+    with ``subject_anchor_outside_source`` and a joint array that was NaN from
+    end to end. It is applied to the first recorded frame, it still has to land
+    on a real body there, and the offset is written into the job file.
+    """
+    take, paths = raw_take
+    config = ProcessingConfig(store_proxy=False, store_depth=False)
+    source = SyntheticSource(paths, take, config.profile(take))
+    packet = next(iter(source))
+    points = packet.bodies[0].joint_positions_2d
+    anchor_payload = {
+        # A second and a half before the recording starts.
+        "camera_timestamp_ns": packet.camera_timestamp_ns - 1_600_000_000,
+        "source_resolution": list(packet.resolution),
+        "point_xy": np.nanmean(points, axis=0).tolist(),
+        "bbox_xyxy": np.r_[np.nanmin(points, axis=0), np.nanmax(points, axis=0)].tolist(),
+    }
+    write_json(paths.raw_dir / "subject_anchors.json", [anchor_payload])
+    source.close()
+
+    run = process_take(paths.root, config)
+    job = read_json(run / "job.json")
+    assert "subject_anchor_outside_source" not in job["issues"]
+    assert "subject_anchor_before_recording" in job["issues"]
+    applied = job["subject_anchors"][0]
+    assert applied["position"] == 0
+    assert applied["method"] == "source_image_anchor_preroll"
+    assert applied["offset_ms"] == pytest.approx(1600.0, abs=1.0)
+    assert job["subject_status"] == "associated"
+
+    review = ReviewDataset(run)
+    try:
+        assert review.arrays()["subject_present"].all()
+    finally:
+        review.close()
+
+
 # --------------------------------------------- processing 1.1.0 derived layer
 #
 # Raw file access below goes through ``long_path``. The application already
@@ -194,7 +274,7 @@ def test_a_version_carries_arrays_summary_and_previews(raw_take):
     run = process_take(paths.root, ProcessingConfig(store_depth=True, store_proxy=True))
     job = read_json(run / "job.json")
     assert job["schema_version"] == "1.1.0"
-    if job["issues"] == ["review_proxy_incomplete"]:
+    if job["issues"] == ["review_proxy_unavailable"]:
         # OpenCV cannot open an extended-length path, so on a long temp path
         # there is no proxy and therefore no previews. That is the known
         # platform limit, not a defect in what this test is about.

@@ -48,6 +48,14 @@ class VersionRow:
     schema_version: str = ""
     subject_status: str = ""
     issues: tuple[str, ...] = ()
+    #: Recorded frames, and how many were found again in the replayed source.
+    capture_frames: int = 0
+    matched_frames: int = 0
+    #: When this version was produced. Versions of one take all carry the
+    #: take's start time, so sorting on that alone left them in the order of
+    #: the random hex in their folder names.
+    created_at: str = ""
+    job_mtime_ns: int = 0
     has_thumbnails: bool = False
     has_summary: bool = False
     has_depth: bool = False
@@ -67,11 +75,26 @@ class VersionRow:
         return self.subject_status == "associated"
 
     @property
+    def coverage_text(self) -> str:
+        """How much of the recording was found again, as a count.
+
+        "kapsam doğrulanamadı" was the only thing the screen said about a
+        version that had matched 521 of its 524 frames. A number lets the
+        operator decide; a verdict decides for them, and decided wrongly.
+        """
+        if not self.capture_frames:
+            return ""
+        missing = self.capture_frames - self.matched_frames
+        if missing <= 0:
+            return f"{self.capture_frames} kare eşleşti"
+        return f"{self.matched_frames}/{self.capture_frames} kare eşleşti"
+
+    @property
     def quality_text(self) -> str:
-        if not self.coverage_verified:
-            return "kapsam doğrulanamadı"
         if not self.subject_chosen:
             return "kişi seçilmedi"
+        if not self.coverage_verified:
+            return self.coverage_text or "kapsam notları var"
         return "hazır"
 
     @property
@@ -105,7 +128,7 @@ class LibraryService:
         ("all", "Tümü"),
         ("ready", "Etiketlemeye hazır"),
         ("needs_subject", "Kişi seçilmemiş"),
-        ("unverified", "Kapsam doğrulanamadı"),
+        ("unverified", "Kapsam notu olan"),
         ("annotated", "Etiketlenmiş"),
         ("multi", "Birden fazla sürüm"),
     )
@@ -115,10 +138,18 @@ class LibraryService:
             return []
         rows: list[VersionRow] = []
         for take in index:
-            finished = take.complete_runs
+            finished = take.published_runs
             for run in finished:
                 rows.append(self._row(take, run, len(finished)))
-        rows.sort(key=lambda row: (row.started_at, row.run_id), reverse=True)
+        rows.sort(
+            key=lambda row: (
+                row.started_at,
+                row.created_at,
+                row.job_mtime_ns,
+                row.run_id,
+            ),
+            reverse=True,
+        )
         return rows
 
     def _row(
@@ -145,6 +176,10 @@ class LibraryService:
             schema_version=run.schema_version,
             subject_status=run.subject_status,
             issues=run.issues,
+            capture_frames=run.capture_frames,
+            matched_frames=run.matched_frames,
+            created_at=run.created_at,
+            job_mtime_ns=run.job_mtime_ns,
             has_thumbnails=run.has_thumbnails,
             has_summary=run.has_summary,
             has_depth=run.has_depth,
@@ -155,7 +190,11 @@ class LibraryService:
     @staticmethod
     def matches(row: VersionRow, key: str) -> bool:
         if key == "ready":
-            return row.coverage_verified and row.subject_chosen
+            # A listed version is one that can be annotated correctly - that
+            # is what publishing it decided. What is left to ask is whether
+            # anybody is in it. A coverage note is a note, not a blocker; the
+            # "Kapsam notu olan" filter is there for reading those.
+            return row.subject_chosen
         if key == "needs_subject":
             return not row.subject_chosen
         if key == "unverified":

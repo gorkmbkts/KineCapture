@@ -239,7 +239,15 @@ class SettingsPage(StudioPage):
         self._content = QWidget()
         self._content.setMaximumWidth(CONTENT_WIDTH)
         self._content_layout = QVBoxLayout(self._content)
-        self._content_layout.setContentsMargins(0, 0, tokens.metric("KcSpacingLg"), 0)
+        # Every side, not just the right. The form used to start on the exact
+        # pixel where the scroll viewport did, so the section heading and the
+        # first field label sat against the edge of their container.
+        self._content_layout.setContentsMargins(
+            tokens.metric("KcSpacingXl"),
+            tokens.metric("KcSpacingLg"),
+            tokens.metric("KcSpacingXl"),
+            tokens.metric("KcSpacingXl"),
+        )
         self._content_layout.setSpacing(tokens.metric("KcSpacingLg"))
         self.scroll.setWidget(self._content)
         columns.addWidget(self.scroll, 1)
@@ -262,6 +270,12 @@ class SettingsPage(StudioPage):
 
         self.save_button.clicked.connect(self._save)
         self.discard_button.clicked.connect(self._discard)
+
+    def bottom_reserve(self) -> int:
+        """The save bar, plus the gap above it. Measured, not guessed."""
+        return self.save_button.sizeHint().height() + self._tokens.metric(
+            "KcSpacingXxl"
+        ) * 2
 
     # -------------------------------------------------------------- binding
     def attach(self, viewmodel: SettingsViewModel) -> None:

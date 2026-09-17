@@ -150,7 +150,7 @@ class ProjectService:
                 {"total": 0, "processed": 0, "awaiting": 0, "legacy": 0, "last": ""},
             )
             entry["total"] += 1
-            if take.complete_runs:
+            if take.published_runs:
                 entry["processed"] += 1
             if take.awaits_processing:
                 entry["awaiting"] += 1

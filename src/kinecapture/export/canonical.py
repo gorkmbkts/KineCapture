@@ -11,8 +11,10 @@ because it was "probably fine", and never repaired on the way out.
 
 Four gates, in the order they can fail:
 
-1. The processing run must be complete and promoted, and its derived files
-   must still match their checksums.
+1. The processing run must be a published version - promoted out of staging,
+   with no issue that would make annotating it wrong - and its derived files
+   must still match their checksums. Recorded caveats travel with it into the
+   package's manifest rather than keeping it out.
 2. Somebody must have said who the recording is about, and every stretch the
    tracker was unsure about must have an answer.
 3. The annotation document must validate against this version - every anchor
@@ -450,6 +452,12 @@ def _write_version(
             "run_id": dataset.run_id,
             "take_id": str(dataset.job.get("take_id", "")),
             "source_fingerprint": dataset.source_fingerprint,
+            # What the version's own job file recorded about itself. A package
+            # that says "1645 of 1648 recorded frames were matched" can be
+            # judged years later; one that stays silent about it cannot.
+            "processing_state": str(dataset.job.get("state", "")),
+            "processing_issues": list(dataset.job.get("issues") or ()),
+            "processing_coverage": dict(dataset.job.get("coverage") or {}),
             "annotation_revision": document.revision,
             "subject_revision": subject.revision,
             "athlete_tracker_id": subject.athlete_tracker_id,

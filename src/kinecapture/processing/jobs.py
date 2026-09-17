@@ -18,6 +18,7 @@ import numpy as np
 from kinecapture import APP_VERSION, SKELETON_STREAM_SCHEMA_VERSION
 from kinecapture.capture.subject_lock import SubjectLock
 from kinecapture.core.fingerprint import hash_file, hash_payload, checksum_manifest
+from kinecapture.core.ids import utc_now_iso
 from kinecapture.core.jsonio import read_json, read_jsonl, write_json, JsonlWriter
 from kinecapture.core.paths import long_path, ensure_dir, path_exists
 from kinecapture.dataset.workspace import TakePaths
@@ -42,6 +43,26 @@ from .thumbnails import DEFAULT_THUMBNAIL_COUNT, build_thumbnails
 #: preview images. ``ReviewDataset`` reads both layouts, so every run produced
 #: by 1.0.0 stays openable; nothing is migrated and nothing is rewritten.
 PROCESSING_SCHEMA_VERSION = "1.1.0"
+
+#: Issues that make a version unusable, as opposed to imperfect.
+#:
+#: Every issue is measured, written into ``job.json`` and shown on the library
+#: screen. Only these hide the version, because only these mean the annotator
+#: would be working against something that is wrong rather than something that
+#: is incomplete. The 16 September takes are why the distinction exists: 521 of
+#: 524 recorded frames matched the replayed source, every artefact was written
+#: and verified, and the version still spent its life in a dot-prefixed staging
+#: folder that no screen lists and no reader opens.
+BLOCKING_ISSUES = frozenset({
+    #: Nothing was decoded. There is no version, only an empty folder.
+    "source_empty",
+    #: Frame position is the annotation contract. If positions are not
+    #: 0, 1, 2, ... then a label boundary does not identify a frame.
+    "source_position_discontinuity",
+    #: A proxy holding a different number of frames than the version would put
+    #: picture N in front of someone labelling frame M.
+    "review_proxy_desynchronised",
+})
 
 #: Frames to ignore before quoting a rate. The first inferences pay for model
 #: warm-up, and an estimate built from them is wrong in the direction that
@@ -149,9 +170,26 @@ def source_identity(paths: TakePaths, take: Take) -> dict:
             "capture_provenance": take.camera_info.to_dict() if take.camera_info else None}
 
 
-def _associate_anchor(packet, anchors, lock, spec, issues):
-    for anchor in anchors:
-        if anchor["camera_timestamp_ns"] // 1000 != packet.camera_timestamp_ns // 1000:
+def _anchor_is_due(anchor, packet, *, first_frame: bool) -> bool:
+    """Whether this anchor is the operator's answer for this frame.
+
+    An exact timestamp match is the normal case. The exception is an anchor
+    taken while the preview was running, *before* record was pressed - which
+    is when picking the subject actually happens. Both 16 September takes
+    carry one, 3.7 s and 1.6 s ahead of their first recorded frame. Discarding
+    them produced a version whose joint arrays were NaN from end to end, with
+    ``subject_anchor_outside_source`` as the only explanation. Such an anchor
+    is applied to the first recorded frame instead, still has to pass the same
+    containment test against a real body, and the offset is written down.
+    """
+    anchor_us = anchor["camera_timestamp_ns"] // 1000
+    frame_us = packet.camera_timestamp_ns // 1000
+    return anchor_us == frame_us or (first_frame and anchor_us < frame_us)
+
+
+def _associate_anchor(packet, anchors, lock, spec, issues, applied, *, first_frame=False):
+    for index, anchor in enumerate(anchors):
+        if index in applied or not _anchor_is_due(anchor, packet, first_frame=first_frame):
             continue
         x, y = anchor["point_xy"]
         candidates = []
@@ -162,12 +200,31 @@ def _associate_anchor(packet, anchors, lock, spec, issues):
             finite = points[np.isfinite(points).all(axis=1)]
             if len(finite) and (finite.min(axis=0) <= [x,y]).all() and (finite.max(axis=0) >= [x,y]).all():
                 candidates.append(body)
+        method = "source_image_anchor"
+        if not candidates and len(packet.bodies) == 1:
+            # One person in the frame leaves the click nothing else to mean.
+            # Given its own method name so the provenance never claims the
+            # stricter containment test was the thing that passed.
+            candidates = list(packet.bodies)
+            method = "sole_body_in_frame"
+        offset_ms = (packet.camera_timestamp_ns - anchor["camera_timestamp_ns"]) / 1e6
+        # Compared at microsecond resolution, the same grain the match uses.
+        # The SVO stores timestamps in microseconds and replays them with the
+        # last three digits zeroed, so an exact match still differs by a few
+        # hundred nanoseconds - which is not an anchor taken before recording.
+        preroll = anchor["camera_timestamp_ns"] // 1000 < packet.camera_timestamp_ns // 1000
         if len(candidates) == 1:
+            if preroll:
+                method += "_preroll"
+                issues.add("subject_anchor_before_recording")
             lock.select(candidates[0], frame_index=packet.source_position,
-                        timestamp_ns=packet.camera_timestamp_ns, spec=spec, method="source_image_anchor")
+                        timestamp_ns=packet.camera_timestamp_ns, spec=spec, method=method)
         else:
             issues.add("subject_anchor_unresolved")
             lock.clear()
+            method = "unresolved"
+        applied[index] = {"anchor": index, "position": packet.source_position,
+                          "method": method, "offset_ms": round(offset_ms, 3)}
     return lock.update(packet.bodies, frame_index=packet.source_position,
                        timestamp_ns=packet.camera_timestamp_ns).to_record()
 
@@ -236,6 +293,10 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
     os.mkdir(long_path(stage))
     job = {"schema_version": PROCESSING_SCHEMA_VERSION, "app_version": APP_VERSION,
            "run_id": run_id, "take_id": take.take_id, "take_dir": str(paths.root),
+           # When this attempt started. Several versions of one take share the
+           # take's own timestamp, so without this a list of them can only be
+           # sorted by the random hex in the folder name.
+           "created_at": utc_now_iso(),
            "state": "running", "restart_of": restart_of, "parameters": parameters,
            "source": source, "calibration_override_sha256": calibration_hash,
            "frames_processed": 0, "paused": False, "rate_fps": None, "eta_s": None,
@@ -248,6 +309,9 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
     source_mapping = []
     matched_capture = set()
     lock = SubjectLock()
+    #: Anchor index -> where it landed and how. Written into the job file so a
+    #: reader can see which frame the subject choice actually came from.
+    anchors_applied: dict[int, dict[str, Any]] = {}
     depth_buffer, depth_positions = [], []
     depth_chunks = []
     # Per-frame signals for the timeline summary, collected as we go so the
@@ -341,7 +405,7 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
                   "length_unit": processing_info.length_unit, "target_fps": processing_info.target_fps}
         stream.write(header)
         mapping.write({"record": "header", "schema_version": PROCESSING_SCHEMA_VERSION,
-                       "source_fingerprint": source["fingerprint"], "matching": "unique camera timestamp floor(ns/1000); no nearest or positional fallback"})
+                       "source_fingerprint": source["fingerprint"], "matching": "camera timestamp floor(ns/1000); rows sharing a microsecond are claimed in acquisition order; no nearest or positional fallback"})
         if config.store_proxy:
             proxy = ProxyVideoWriter(stage / "proxy.mp4", fps=processing_info.target_fps, target_width=config.proxy_width)
         for packet in reader:
@@ -357,10 +421,19 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
             issues.update(packet.integrity_issues)
             if any(body.body_format != spec.name or body.num_joints != spec.num_joints for body in packet.bodies):
                 raise ValueError("Body format/shape changed during processing")
-            association = _associate_anchor(packet, anchors, lock, spec, issues)
+            association = _associate_anchor(packet, anchors, lock, spec, issues,
+                                            anchors_applied, first_frame=not positions)
             subject = next((b for b in packet.bodies if b.tracking_id == association.get("tracker_id")), None)
             matches = capture_by_time.get(packet.camera_timestamp_ns // 1000, [])
-            captured = matches[0] if len(matches) == 1 else None
+            if len(matches) > 1:
+                # The camera stamped two consecutive frames with the same
+                # microsecond - once in 524 frames and twice in 1648 on
+                # 16 September. Refusing to match either of them threw away
+                # both frames' coverage and called an ambiguity something that
+                # order resolves: capture rows and replayed frames are each in
+                # acquisition order, so the first unclaimed row is this one.
+                issues.add("capture_timestamp_duplicated")
+            captured = next((row for row in matches if row["i"] not in matched_capture), None)
             if captured is None:
                 issues.add("source_capture_timestamp_unmatched_or_ambiguous")
             else:
@@ -414,13 +487,19 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
         mapping = None
         if proxy:
             proxy.close()
-            if proxy.unavailable_reason or proxy.frames_written != len(positions):
-                issues.add("review_proxy_incomplete")
+            if proxy.unavailable_reason:
+                # No scrub video. The review screen says so; the skeleton, the
+                # arrays and the previews are untouched by it.
+                issues.add("review_proxy_unavailable")
+            elif proxy.frames_written != len(positions):
+                issues.add("review_proxy_desynchronised")
             proxy = None
-        if not positions or expected_count != len(positions):
+        if not positions:
+            issues.add("source_empty")
+        elif expected_count != len(positions):
             issues.add("source_frame_count_mismatch")
-        for anchor in anchors:
-            if not any(ts // 1000 == anchor["camera_timestamp_ns"] // 1000 for ts in timestamps):
+        for index in range(len(anchors)):
+            if index not in anchors_applied:
                 issues.add("subject_anchor_outside_source")
         if len(matched_capture) != len(capture_rows):
             issues.add("capture_frames_unmatched")
@@ -465,9 +544,23 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
         if config.thumbnail_count and positions:
             job["thumbnails"] = build_thumbnails(
                 stage, stage / "proxy.mp4", len(positions), count=config.thumbnail_count)
+        matched = len(matched_capture)
+        # Coverage as numbers, not as a verdict. "521 of 524 frames matched"
+        # is something an operator can weigh; "kapsam doğrulanamadı" is not.
+        job["coverage"] = {
+            "capture_frames": len(capture_rows),
+            "matched_frames": matched,
+            "unmatched_frames": len(capture_rows) - matched,
+            "source_frames": len(positions),
+            "declared_source_frames": expected_count,
+            "matched_ratio": (matched / len(capture_rows)) if capture_rows else None,
+        }
+        job["subject_anchors"] = [anchors_applied[i] for i in sorted(anchors_applied)]
+        blocking = sorted(issues & BLOCKING_ISSUES)
         job.update(state="partial" if issues else "complete", issues=sorted(issues),
+                   blocking_issues=blocking, published=not blocking,
                    subject_status="associated" if any(b is not None for b in selected) else "needs_subject_selection",
-                   depth_chunks=depth_chunks, capture_frames_unmatched=len(capture_rows)-len(matched_capture))
+                   depth_chunks=depth_chunks, capture_frames_unmatched=len(capture_rows)-matched)
         gaps = np.diff(np.asarray(timestamps, dtype=np.int64)) / 1e6
         job["timestamp_qc"] = {"max_gap_ms": float(gaps.max()) if gaps.size else None,
                                "gap_std_ms": float(gaps.std()) if gaps.size else None,
@@ -476,14 +569,17 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
         manifest = checksum_manifest({p.relative_to(Path(long_path(stage))).as_posix(): p
             for p in Path(long_path(stage)).rglob("*") if p.is_file() and p.name != "checksums.json"})
         write_json(stage / "checksums.json", manifest)
-        if job["state"] == "complete":
+        # Publication is decided by usability, not by perfection. A version
+        # that carries recorded caveats is still a version; one that cannot be
+        # annotated correctly stays in staging, where nothing will open it.
+        if not blocking:
             os.rename(long_path(stage), long_path(final))
             return final
         return stage
     except (Cancelled, KeyboardInterrupt) as exc:
-        job.update(state="cancelled", error=str(exc))
+        job.update(state="cancelled", published=False, error=str(exc))
     except Exception as exc:
-        job.update(state="failed", error=f"{type(exc).__name__}: {exc}")
+        job.update(state="failed", published=False, error=f"{type(exc).__name__}: {exc}")
     finally:
         for owned in (stream, mapping, proxy, reader):
             if owned is not None:

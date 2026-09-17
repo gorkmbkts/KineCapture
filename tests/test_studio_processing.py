@@ -23,6 +23,7 @@ from kinecapture.dataset.summary_index import TakeSummary, build_index
 from kinecapture.domain.enums import BackendKind
 from kinecapture.studio.services.processing import (
     ISSUE_TEXT,
+    Job,
     JobProgress,
     JobState,
     ProcessingService,
@@ -124,8 +125,14 @@ def test_partial_is_never_called_complete() -> None:
 
 
 def test_coverage_issues_are_explained_not_shown_as_codes() -> None:
+    """A sentence about what happened, not a verdict and not a code.
+
+    This one used to read "kaynak kapsamı doğrulanamadı", which is a judgement
+    about the whole version for what is a one-frame disagreement between the
+    SVO header and its playback.
+    """
     text = describe_issue("source_frame_count_mismatch")
-    assert "kapsamı doğrulanamadı" in text
+    assert "kare sayısı" in text
     assert "_" not in text
     # An unknown code is shown as-is rather than silently dropped.
     assert describe_issue("brand_new_code") == "brand_new_code"
@@ -139,6 +146,39 @@ def test_every_mapped_issue_reads_as_a_sentence() -> None:
 
 def test_cancelling_says_the_recording_is_safe() -> None:
     assert "ham kaydı silmez" in CANCEL_NOTE.casefold()
+
+
+def test_a_finished_version_is_announced_with_a_link_to_itself(
+    processing: ProcessingViewModel, recorded: SessionService
+) -> None:
+    """"Sürümü incele" has to reach the version, not a list that may not have it.
+
+    On 16 September it pointed at İşlenen Videolar, which was empty - the
+    version it was announcing had never been published. The link now carries
+    the folder, so it opens that version in Etiketleme either way.
+    """
+    processing.reload(force=True)
+    take = processing.waiting.value[0]
+    directory = Path(take.directory) / "derived" / "processing" / "run_done"
+    job = Job(take=take)
+    job.progress = JobProgress(
+        state=JobState.PARTIAL,
+        frames_processed=522,
+        issues=("capture_frames_unmatched",),
+        capture_frames=524,
+        matched_frames=522,
+        directory=directory,
+    )
+    seen: list = []
+    processing.message.subscribe(seen.append)
+    processing._report_if_finished(job)  # noqa: SLF001 - that is what is under test
+
+    assert len(seen) == 1
+    message = seen[0]
+    assert message.actions[0].key == f"review:{directory}"
+    assert message.actions[0].primary
+    # And it says how much matched instead of only that something did not.
+    assert "522" in message.detail and "524" in message.detail
 
 
 # -------------------------------------------------------------------- queue
@@ -197,7 +237,7 @@ def test_without_a_project_the_screen_says_so(config: AppConfig, monkeypatch) ->
 #: partial. That is the environment, not the code under test: these tests are
 #: about the child process finishing, so a run whose *only* complaint is the
 #: proxy counts as finished.
-_PATH_LENGTH_ISSUES = frozenset({"review_proxy_incomplete"})
+_PATH_LENGTH_ISSUES = frozenset({"review_proxy_unavailable", "review_proxy_incomplete"})
 
 
 def assert_finished_cleanly(progress) -> None:  # noqa: ANN001 - JobProgress

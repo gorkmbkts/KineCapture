@@ -220,6 +220,54 @@ def test_the_viewport_of_a_scroll_area_is_painted_by_us() -> None:
     assert "QScrollArea > QWidget > QWidget" in template
 
 
+#: Containers that draw a border of their own. Whatever they hold has to be
+#: held *inside* it, not printed on the line.
+BORDERED_CONTAINERS = (
+    "QTabWidget::pane",
+    'QFrame[kcSurface="raised"]',
+    'QFrame[kcSurface="sunken"]',
+    "QGroupBox",
+)
+
+
+@pytest.mark.parametrize("selector", BORDERED_CONTAINERS)
+def test_a_container_that_draws_a_border_keeps_its_contents_off_it(
+    selector: str,
+) -> None:
+    """Padding is declared next to the border that makes it necessary.
+
+    Every one of these rules drew a border and then let a layout start on the
+    pixel after it. In the 16 September screenshots the labelling inspector's
+    heading and its help text were printed against the pane outline.
+    """
+    template = load_template()
+    block = template.split(selector, 1)[1].split("}", 1)[0]
+    assert "padding" in block, f"{selector} draws a border with nothing inside it"
+
+
+def test_a_tab_pane_really_insets_what_it_holds(app) -> None:
+    """The box model, not the text of the rule: measured through Qt."""
+    from PySide6.QtWidgets import QLabel, QTabWidget, QVBoxLayout, QWidget
+
+    app.setStyleSheet(stylesheet_for("dark"))
+    tabs = QTabWidget()
+    page = QWidget()
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.addWidget(QLabel("Hareketler"))
+    layout.addStretch(1)
+    tabs.addTab(page, "Etiket")
+    tabs.resize(320, 400)
+    tabs.show()
+    app.processEvents()
+    try:
+        inset = page.mapTo(tabs, page.rect().topLeft()).x()
+        assert inset >= 8, f"the pane insets its contents by only {inset}px"
+    finally:
+        tabs.close()
+        app.setStyleSheet("")
+
+
 @pytest.mark.parametrize("theme", theme_names())
 def test_the_generated_sheet_has_no_unresolved_token(theme: str) -> None:
     sheet = stylesheet_for(theme)

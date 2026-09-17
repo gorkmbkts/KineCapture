@@ -187,6 +187,10 @@ class ToastLayer(QWidget):
         super().__init__(host)
         self._tokens = tokens
         self._host = host
+        #: Pixels to keep clear along the bottom of the host. A page with an
+        #: action bar pinned there sets this, because a message that covers
+        #: "Kaydet" is worse than no message at all.
+        self._bottom_reserve = 0
         self._toasts: list[Toast] = []
         # NOT transparent for mouse events: that attribute takes the whole
         # subtree out of hit-testing, which left "Ayrıntılar" and "Kapat"
@@ -265,6 +269,14 @@ class ToastLayer(QWidget):
             self._resize_to_host()
         return False
 
+    def set_bottom_reserve(self, pixels: int) -> None:
+        """Say how much of the host's bottom edge belongs to the page."""
+        pixels = max(0, int(pixels))
+        if pixels == self._bottom_reserve:
+            return
+        self._bottom_reserve = pixels
+        self._relayout()
+
     def _resize_to_host(self) -> None:
         self._relayout()
 
@@ -306,7 +318,7 @@ class ToastLayer(QWidget):
         host = self._host.rect()
         self.setGeometry(
             max(0, host.width() - width - margin),
-            max(0, host.height() - total - margin),
+            max(0, host.height() - total - margin - self._bottom_reserve),
             width,
             total,
         )

@@ -94,8 +94,8 @@ class LibraryViewModel:
     def _summary_text(self, rows: tuple[VersionRow, ...]) -> str:
         if not self._all:
             return "Henüz işlenmiş sürüm yok."
-        ready = sum(1 for r in self._all if r.coverage_verified and r.subject_chosen)
-        unverified = sum(1 for r in self._all if not r.coverage_verified)
+        ready = sum(1 for r in self._all if r.subject_chosen)
+        noted = sum(1 for r in self._all if not r.coverage_verified)
         no_subject = sum(1 for r in self._all if not r.subject_chosen)
         parts = [
             f"{len(rows)} / {len(self._all)} sürüm gösteriliyor",
@@ -103,10 +103,10 @@ class LibraryViewModel:
         ]
         if no_subject:
             parts.append(f"{no_subject} kişi seçilmemiş")
-        if unverified:
-            # Named rather than folded into a total: this is the one that must
-            # not be mistaken for a finished result.
-            parts.append(f"{unverified} kapsam doğrulanamadı")
+        if noted:
+            # Counted separately rather than folded into the total: a note is
+            # something to read before annotating, not a reason not to.
+            parts.append(f"{noted} kapsam notu var")
         return " · ".join(parts)
 
     # ------------------------------------------------------------- selection

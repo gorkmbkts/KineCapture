@@ -35,8 +35,13 @@ def main():
                       "declared": job.get("source_frames_declared"), "rate_fps": job.get("rate_fps"),
                       "thumbnails": len((job.get("thumbnails") or {}).get("entries", [])),
                       "summary_levels": len((job.get("summary") or {}).get("levels", [])),
-                      "issues": job.get("issues"), "error": job.get("error")}, ensure_ascii=False))
-    return 0 if job["state"] == "complete" else 2
+                      "issues": job.get("issues"), "blocking": job.get("blocking_issues"),
+                      "coverage": job.get("coverage"), "error": job.get("error")}, ensure_ascii=False))
+    # 0 published without caveats, 1 published with recorded caveats, 2 not
+    # published. Three outcomes because they call for three different actions.
+    if job["state"] == "complete":
+        return 0
+    return 1 if job.get("published") else 2
 
 if __name__ == "__main__":
     raise SystemExit(main())

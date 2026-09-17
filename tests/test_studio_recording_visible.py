@@ -114,7 +114,7 @@ def _take(take_id: str, state: str) -> TakeSummary:
 
 
 class _Index(list):
-    def with_complete_runs(self):  # noqa: ANN201
+    def with_published_runs(self):  # noqa: ANN201
         return []
 
     def legacy_takes(self):  # noqa: ANN201
