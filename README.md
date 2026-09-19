@@ -1115,3 +1115,15 @@ kişi-yok boşluğunun üzerinden hesaplanmaması.
 Bu bir **araştırma ve dataset üretim aracıdır**. Ölçümler ve türetilen
 çıktılar klinik olarak doğrulanmış bir değerlendirme değildir ve öyle
 sunulmamalıdır.
+
+
+## Proje bilgisi nerede
+
+Kod ve testler gerçek davranışın birincil kaynağıdır. Kararların, doğrulamaların
+ve tarihin nerede tutulduğu için:
+
+- [KineCapture Wiki](knowledge/index.md) — insan ana sayfası
+- [MEMORY_INDEX](MEMORY_INDEX.md) — kısa AI başlangıç haritası
+- [Sistem haritası](knowledge/architecture/system-map.md) — paket sorumlulukları
+- [Veri hattı](knowledge/concepts/pipeline.md) — kayıt, işleme, etiketleme, export
+- [Açık sorular](knowledge/open-questions.md) — bilinen açıklar ve riskler
