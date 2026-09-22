@@ -93,10 +93,12 @@ def run_studio(config: AppConfig) -> int:
 
     window = build_window(config)
     install_exception_hook(window)
-    if window.current_window_state().maximised:
-        window.showMaximized()
-    else:
-        window.show()
+    # Always maximised. Decided on 20 September: the labelling screen is a
+    # four-band layout solved from the window's own size, and supporting
+    # arbitrary window sizes was buying flexibility nobody wanted at the cost
+    # of a layout that had to give something up on a small one. A remembered
+    # "restored" geometry is therefore not honoured on startup.
+    window.showMaximized()
     return application.exec()
 
 

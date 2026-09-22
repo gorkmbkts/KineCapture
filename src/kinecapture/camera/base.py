@@ -154,6 +154,20 @@ class CameraBackend(ABC):
         """
         return False
 
+    @property
+    def native_recording_path_limit(self) -> Optional[int]:
+        """Longest target path this backend's recorder can actually open.
+
+        ``None`` means "no limit of its own" - a backend that writes through
+        Python, which handles a long Windows path through the extended-length
+        prefix. A vendor library that takes a plain path string does have a
+        limit, and it has to say so, because the caller is the only place that
+        knows the path *before* a recording is attempted. Discovered on
+        20 September: a 281-character target came back as ``SVO RECORDING
+        ERROR`` and was reported to the user as a disk or permission problem.
+        """
+        return None
+
     def stop_native_recording(self) -> None:
         """Stop the backend's own recording. Idempotent."""
         return None

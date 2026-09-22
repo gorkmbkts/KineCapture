@@ -21,6 +21,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 
+from kinecapture.features.roles import missing_roles, resolve_roles
+from kinecapture.visualization.skeleton_spec import SkeletonSpec
 from kinecapture.core.errors import ValidationError
 from kinecapture.core.ids import new_id
 from kinecapture.processing.annotations import (
@@ -30,6 +32,7 @@ from kinecapture.processing.annotations import (
     JointStatus,
     MovementSample,
     Readiness,
+    RolesOrigin,
     save_annotations,
     validate_document,
 )
@@ -60,11 +63,32 @@ class AnnotationStore:
     frames: int = 0
     known_exercises: tuple[str, ...] = ()
     known_error_classes: tuple[str, ...] = ()
+    #: This version's skeleton. Roles are checked against it, because a role
+    #: is a claim about a joint and the formats do not have the same joints:
+    #: BODY_18 has no pelvis, spine or head; BODY_38 has no head-centre or
+    #: hand. ``None`` means the skeleton is unknown and no such check is made
+    #: - the honest position when the version did not record one, rather than
+    #: a guess that would reject good labels.
+    skeleton: Optional[SkeletonSpec] = None
 
     _undo: list[AnnotationDocument] = field(default_factory=list, repr=False)
     _redo: list[AnnotationDocument] = field(default_factory=list, repr=False)
     _dirty: bool = False
     _listeners: list[Callable[[], None]] = field(default_factory=list, repr=False)
+
+    # ------------------------------------------------------------- skeleton
+    def unavailable_roles(self, roles: Sequence[str]) -> tuple[str, ...]:
+        """Which of ``roles`` this version's skeleton cannot provide."""
+        if self.skeleton is None or not roles:
+            return ()
+        return missing_roles(self.skeleton, tuple(roles))
+
+    def available_roles(self) -> tuple[str, ...]:
+        """The roles this version can actually carry, in a stable order."""
+        if self.skeleton is None:
+            return ()
+        resolved = resolve_roles(self.skeleton)
+        return tuple(sorted(r for r, index in resolved.items() if index is not None))
 
     # -------------------------------------------------------- notification
     def subscribe(self, listener: Callable[[], None]) -> Callable[[], None]:
@@ -269,14 +293,46 @@ class AnnotationStore:
         affected_roles: Sequence[str] = (),
         joint_status: JointStatus = JointStatus.UNREVIEWED,
         note: str = "",
+        roles_origin: RolesOrigin = RolesOrigin.UNKNOWN,
+        roles_revision: int = 0,
     ) -> None:
-        """Class, joints, status and note in **one** operation and one undo step.
+        """Class, joints, status, provenance and note in **one** operation.
 
-        Applying these separately could leave an interval carrying a new class
-        with the previous interval's joints - a wrong label that looks complete.
+        One operation and one undo step, because they are one decision.
+        Applying them separately could leave an interval carrying a new class
+        with the previous interval's joints - a wrong label that looks
+        complete - and it would let the joints and the record of *where they
+        came from* disagree, which is worse: an inherited default would then
+        be indistinguishable from a reviewed one.
         """
         sample = self._require(sample_id)
         roles = tuple(affected_roles)
+        unavailable = self.unavailable_roles(roles)
+        if unavailable:
+            # Refused rather than dropped. Silently keeping the roles this
+            # format does have would store a *different* claim from the one
+            # that was made, and nothing downstream could tell.
+            raise ValidationError(
+                "Bu kaydın iskeleti şu eklemleri içermiyor: "
+                + ", ".join(role.replace("_", " ") for role in unavailable),
+                field="affected_roles",
+                code="roles_not_in_skeleton",
+                remedy=(
+                    "Bu sürümde bulunan eklemleri seçin ya da kaydı bu "
+                    "eklemleri içeren bir gövde biçimiyle yeniden işleyin."
+                ),
+                details={
+                    "roles": list(roles),
+                    "unavailable": list(unavailable),
+                    "skeleton": self.skeleton.name if self.skeleton else "",
+                },
+            )
+        if roles and roles_origin is RolesOrigin.UNKNOWN:
+            raise ValidationError(
+                "Eklem listesi kökeni bildirilmeden yazılamaz.",
+                code="roles_without_origin",
+                details={"roles": list(roles)},
+            )
         if roles and joint_status is not JointStatus.SELECTED:
             # Not silently promoted to SELECTED. That status means a person
             # looked at the skeleton and picked those joints; inferring it from
@@ -300,10 +356,45 @@ class AnnotationStore:
                 affected_roles=roles,
                 joint_status=joint_status,
                 note=note,
+                roles_origin=roles_origin if roles else RolesOrigin.UNKNOWN,
+                roles_revision=int(roles_revision) if roles else 0,
             ),
         )
         self._begin()
         self._commit(self._replace_sample(sample_id, updated))
+
+    def apply_class_defaults(
+        self,
+        sample_id: str,
+        interval_id: str,
+        *,
+        error_class: str,
+        default_roles: Sequence[str],
+        revision: int,
+        note: str = "",
+    ) -> None:
+        """Label an interval with a class and the joints that class declares.
+
+        This is the fast path JOINT-04 asks for: choosing a class the project
+        already knows applies its joints without asking again. What it records
+        is that the joints were *inherited* - ``roles_origin`` is
+        ``class_default`` and the revision copied is written down - so nothing
+        downstream can mistake them for a per-repetition judgement, and a
+        later edit to the class leaves this interval untouched.
+        """
+        roles = tuple(dict.fromkeys(str(role) for role in default_roles if role))
+        self.label_error(
+            sample_id,
+            interval_id,
+            error_class=error_class,
+            affected_roles=roles,
+            joint_status=(
+                JointStatus.SELECTED if roles else JointStatus.UNREVIEWED
+            ),
+            note=note,
+            roles_origin=RolesOrigin.CLASS_DEFAULT if roles else RolesOrigin.UNKNOWN,
+            roles_revision=int(revision) if roles else 0,
+        )
 
     def remove_error(self, sample_id: str, interval_id: str) -> None:
         sample = self._require(sample_id)

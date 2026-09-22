@@ -8,15 +8,83 @@ No Qt.
 
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 from kinecapture.dataset.summary_index import TakeIndex
 from kinecapture.studio.services.library import LibraryService, VersionRow
 from kinecapture.studio.services.messages import Action, Message, Severity, from_error
+from kinecapture.studio.services.processing import describe_issue
 from kinecapture.studio.services.session import SessionService
 
 from .observable import Event, Observable
 from .tasks import InlineRunner, TaskRunner
+
+logger = logging.getLogger(__name__)
+
+
+def _coverage_warning(row: VersionRow) -> Optional[Message]:
+    """What this version is short of, on the axis it is short on.
+
+    Three separate questions, answered separately:
+
+    * were all the recorded frames found again in the raw source?
+    * was the chosen person actually tracked through them?
+    * and is there anything recorded that took nothing away?
+
+    Only the first two can make a version incomplete. The third is said in the
+    detail, never in the headline, because an informational note is not a
+    warning - and treating it as one is how "Bu sürümün kaynak kapsamı
+    doğrulanamadı" came to be shown for a note about when the athlete was
+    chosen.
+    """
+    source_ok = row.coverage_verified
+    subject_ok = row.subject_verified is not False
+    if source_ok and subject_ok:
+        return None
+
+    facts: list[str] = []
+    if row.capture_frames:
+        facts.append(f"kaynak {row.matched_frames}/{row.capture_frames} kare eşleşti")
+    if row.subject_text:
+        facts.append(row.subject_text)
+
+    if not subject_ok and not source_ok:
+        headline = "Bu sürümde hem kaynak hem kişi kapsamı eksik."
+        remedy = (
+            "Yeniden işleme kişi takibini yeniden dener; ham kayıtta olmayan "
+            "kareyi geri getiremez."
+        )
+    elif not subject_ok:
+        headline = "Bu sürümde seçilen kişi kaydın tamamında izlenemedi."
+        remedy = (
+            "Etiketleyebilirsiniz, fakat kişi bulunmayan karelerde eklem "
+            "verisi yok. Yeniden işleme bu kısmı düzeltebilir."
+        )
+    else:
+        headline = "Bu sürümde ham kaynağın bazı kareleri eşleştirilemedi."
+        remedy = (
+            "Etiketleyebilirsiniz. Yeniden işleme eşleşmeyi tekrar dener; ham "
+            "kayıtta olmayan kareyi geri getiremez."
+        )
+
+    notes = [describe_issue(code) for code in row.informational_issues]
+    detail = " · ".join(facts)
+    detail = f"{detail}. {remedy}" if detail else remedy
+    if notes:
+        detail = f"{detail} Ayrıca {len(notes)} bilgi notu var."
+    return Message(
+        headline=headline,
+        severity=Severity.WARNING,
+        detail=detail,
+        code="coverage_incomplete",
+        technical={
+            "kaynak": f"{row.matched_frames}/{row.capture_frames}",
+            "kişi": row.subject_text or "kaydedilmedi",
+            "eksik_bulgular": list(row.source_issues),
+            "bilgi_notları": list(row.informational_issues),
+        },
+    )
 
 
 class LibraryViewModel:
@@ -40,6 +108,14 @@ class LibraryViewModel:
         )
         self.busy: Observable[bool] = Observable(False, name="busy")
         self.summary: Observable[str] = Observable("", name="summary")
+        #: ``(run_id, derived_bytes, raw_bytes)`` for the selected version.
+        #: Walking a 2.7 GB folder takes long enough to be felt, so it happens
+        #: on a worker and arrives here when it is ready. The run id travels
+        #: with it so the view can tell whether the answer is still about the
+        #: version on screen.
+        self.selected_sizes: Observable[tuple[str, Optional[int], Optional[int]]] = (
+            Observable(("", None, None), name="sizes")
+        )
         self.message: Event[Message] = Event()
         #: Emitted when the user asks to label a version. The shell routes it.
         self.open_for_review: Event[VersionRow] = Event()
@@ -47,6 +123,13 @@ class LibraryViewModel:
         #: computed with the settings in force now. The shell routes it to
         #: the processing queue; the existing version is never touched.
         self.recompute_requested: Event[VersionRow] = Event()
+        #: Bumped on every selection. A size measurement carrying an old token
+        #: belongs to a version the user has already moved off and is dropped
+        #: rather than allowed to land on the one now showing.
+        self._selection_token = 0
+        #: Measured sizes, kept for the life of the screen. The folders do not
+        #: change under us, and walking one twice is the cost this avoids.
+        self._size_cache: dict[str, tuple[Optional[int], Optional[int]]] = {}
 
     @property
     def filters(self):  # noqa: ANN201
@@ -84,7 +167,13 @@ class LibraryViewModel:
 
     def _apply_filter(self) -> None:
         key = self.filter_key.value
-        rows = tuple(row for row in self._all if self._service.matches(row, key))
+        # Grouped, so the versions of one take are read together; still a flat
+        # list, so each of them stays separately selectable and labellable.
+        rows = tuple(
+            self._service.grouped(
+                [row for row in self._all if self._service.matches(row, key)]
+            )
+        )
         self.rows.force(rows)
         self.summary.set(self._summary_text(rows))
         current = self.selected.value
@@ -112,10 +201,41 @@ class LibraryViewModel:
     # ------------------------------------------------------------- selection
     def select(self, row: Optional[VersionRow]) -> None:
         self.selected.set(row)
+        # Every selection invalidates any measurement still in flight.
+        self._selection_token += 1
+        token = self._selection_token
         if row is None:
             self.comparison.force(())
+            self.selected_sizes.force(("", None, None))
             return
         self.comparison.force(tuple(self._service.versions_of(list(self._all), row.take_id)))
+        self._load_sizes(row, token)
+
+    def _load_sizes(self, row: VersionRow, token: int) -> None:
+        """Measure the version on disk, off the interface's thread."""
+        cached = self._size_cache.get(row.run_id)
+        if cached is not None:
+            self.selected_sizes.force((row.run_id, *cached))
+            return
+        # Nothing known yet: say so rather than leaving the previous version's
+        # numbers on screen while this one is being measured.
+        self.selected_sizes.force((row.run_id, None, None))
+
+        def work() -> tuple[Optional[int], Optional[int]]:
+            return self._service.sizes_for(row)
+
+        def done(sizes: tuple[Optional[int], Optional[int]]) -> None:
+            self._size_cache[row.run_id] = sizes
+            if token != self._selection_token:
+                # A later selection won. The answer is kept for when this
+                # version is chosen again, but it must not be shown now.
+                return
+            self.selected_sizes.force((row.run_id, *sizes))
+
+        def failed(exc: BaseException) -> None:
+            logger.debug("Sürüm boyutu ölçülemedi (%s): %s", row.run_id, exc)
+
+        self._runner.run(work, done, failed)
 
     def parameters(self, row: VersionRow) -> dict:
         return self._service.parameters_of(row)
@@ -126,21 +246,13 @@ class LibraryViewModel:
         target = row or self.selected.value
         if target is None:
             return False
-        if not target.coverage_verified:
-            # Allowed, but not silently: the annotator should know the source
-            # coverage did not check out before they spend an hour on it.
-            self.message.emit(
-                Message(
-                    headline="Bu sürümün kaynak kapsamı doğrulanamadı.",
-                    severity=Severity.WARNING,
-                    detail=(
-                        "Etiketleyebilirsiniz, fakat sonuç eksiksiz sayılmaz. "
-                        "Gerekirse yeniden işleyin."
-                    ),
-                    code="coverage_unverified",
-                    technical={"issues": list(target.issues)},
-                )
-            )
+        warning = _coverage_warning(target)
+        if warning is not None:
+            # Allowed, but not silently: the annotator should know what is
+            # missing before they spend an hour on it - and *which* thing is
+            # missing. One sentence used to cover a two-frame source gap and a
+            # recording with the athlete tracked in 42% of its frames.
+            self.message.emit(warning)
         self.open_for_review.emit(target)
         return True
 

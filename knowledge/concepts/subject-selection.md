@@ -1,7 +1,7 @@
 ---
 type: concept
 status: verified
-updated: 2026-09-18
+updated: 2026-09-21
 tags:
   - subject-lock
   - capture
@@ -12,12 +12,20 @@ tags:
 ## Güncel davranış
 
 - Kayıt için kişi seçimi zorunludur; anchor yoksa `_can_record()` reddeder.
-- Red nedeni hem pencerede hem görüntü üstünde geçici kartla gösterilir.
+- Red nedeni tek bildirim kartıyla gösterilir; görüntü üstündeki ikinci
+  kopya 21 Eylül onarımında kaldırıldı (önceki çift gösterim `superseded`).
 - Seçilen kişinin çerçevesi önizlemede çizilir.
 - Kayıt öncesi anchor ilk kaydedilen kareye uygulanır.
 - Vücut imzası yalnız `tracking_state == ok` karelerinden hesaplanır.
 - İmza vetosu yalnız çok bedenli karelerde ve üç çelişki karesinden sonra
   devreye girer.
+- Uzuv kanıtı varsa duruşla değişen eklem bulutu yüksekliği tek başına veto
+  edemez. `AMBIGUOUS`, yalnız kendi tracker kimliğinin 30 kesintisiz uyumlu
+  karesiyle kurtarılabilir; başka kişiye geçmez.
+- Çelişkili kare görülme zamanını yeniler, **güvenilir konumu ve imzayı
+  değiştirmez**. Mevcut sıçrama regresyon testleri ve uzun çelişki sonrası
+  dönüş testiyle doğrulandı; ayrıntı
+  [onarım raporunda](../reports/capture-tracking-gui-repair-validation.md).
 
 ## Kanıt sınırı
 

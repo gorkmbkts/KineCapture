@@ -43,6 +43,7 @@ from .widgets import label
 
 #: Window key -> (title, what it answers). The key is what the menu passes.
 WINDOW_TITLES = {
+    "capture": ("Yakalama Durumu", "Kamera, kadraj ve uyarılar"),
     "log": ("Log Konsolu", "Uygulamanın kendi kaydettikleri"),
     "diagnostics": ("Tanılama", "Ortam, paketler, SDK ve kamera"),
     "device": ("Cihaz Bilgisi", "Bağlı kameranın kendi beyanı"),

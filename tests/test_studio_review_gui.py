@@ -126,9 +126,13 @@ def test_drawing_on_the_timeline_creates_exactly_one_movement(page) -> None:
     rows = page.viewmodel.movements.value
     assert len(rows) == 1
     assert rows[0].start < rows[0].end
-    # What the list shows and what the document holds are the same interval.
-    assert page.movement_list.count() == 1
-    assert str(rows[0].start) in page.movement_list.item(0).text()
+    # What the screen shows and what the document holds are the same
+    # interval. The repeated movement list is gone - it sat above every
+    # editor showing what the timeline already shows - so the timeline's own
+    # boxes and the editor are what is asked.
+    boxes = [i for i in page.timeline.intervals if i.lane == "movements"]
+    assert len(boxes) == 1
+    assert boxes[0].start == rows[0].start
 
 
 def test_a_number_key_labels_the_selected_movement(page) -> None:
@@ -194,7 +198,8 @@ def test_the_timeline_and_the_list_stay_one_selection(page) -> None:
 
     viewmodel.select_movement(second)
     assert page.timeline.selected == second
-    assert page.movement_list.currentItem().data(Qt.ItemDataRole.UserRole) == second
+    assert page.editor_bar.mode == "movement"
+    assert page.editor_bar.movement_start.value() == 8
 
     viewmodel.select_movement(first)
     assert page.timeline.selected == first
@@ -203,9 +208,9 @@ def test_the_timeline_and_the_list_stay_one_selection(page) -> None:
 def test_undo_puts_the_screen_back(page) -> None:
     viewmodel = page.viewmodel
     viewmodel.add_movement(3, 9)
-    assert page.movement_list.count() == 1
+    assert len([i for i in page.timeline.intervals if i.lane == "movements"]) == 1
     viewmodel.undo()
-    assert page.movement_list.count() == 0
+    assert [i for i in page.timeline.intervals if i.lane == "movements"] == []
     assert not viewmodel.movements.value
 
 

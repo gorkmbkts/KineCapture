@@ -18,7 +18,10 @@ from functools import lru_cache
 from importlib import resources
 from typing import Any, Mapping
 
-TOKENS_SCHEMA_VERSION = "1.1.0"
+#: 1.3.0 adds ``KcEditorBarMaxHeight``: the ceiling on the contextual editor
+#: band, past which extra height would make it a wide empty box rather than a
+#: better editor. Additive, so 1.2.0 tokens still load.
+TOKENS_SCHEMA_VERSION = "1.3.0"
 
 #: Tokens whose colour is allowed to mean something. Documented here as well as
 #: in ``tokens.json`` because this is the list code reads.

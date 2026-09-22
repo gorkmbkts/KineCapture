@@ -31,6 +31,7 @@ from kinecapture.processing.annotations import (
     JointStatus,
     MovementSample,
     Readiness,
+    RolesOrigin,
     load_annotations,
 )
 from kinecapture.recording.take_writer import TakeWriter
@@ -195,6 +196,10 @@ def test_correctness_is_derived_never_chosen(opened) -> None:
         error_class="knee_valgus",
         affected_roles=("left_knee",),
         joint_status=JointStatus.SELECTED,
+        # Since 19 September a joint list has to say where it came from: an
+        # inherited class default and a per-repetition judgement are two
+        # different claims and the store refuses to store one as the other.
+        roles_origin=RolesOrigin.REVIEWED,
     )
     assert store.document.samples[0].correctness is Correctness.INCORRECT
 

@@ -22,8 +22,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -33,6 +34,7 @@ from kinecapture.processing.annotations import (
     CANONICAL_ANNOTATION_SCHEMA_VERSION,
     AnnotationDocument,
 )
+from kinecapture.processing.floor import FloorPlane
 from kinecapture.processing.review import ReviewDataset
 from kinecapture.visualization.skeleton_spec import SkeletonSpec, try_get_skeleton_spec
 
@@ -40,6 +42,36 @@ logger = logging.getLogger(__name__)
 
 #: Array written by the ``tracker_joint_positions_2d`` feature.
 JOINTS_2D_KEY = "joint_positions_2d"
+JOINT_VALID_KEY = "joint_valid_mask"
+
+
+class LoadStage(str, Enum):
+    """What a version's open is doing, in the words the screen uses.
+
+    These are the *real* steps, in the order they run. The only one with an
+    honest percentage is ``VERIFY``, which is measured in bytes and is where
+    essentially all of the time goes; the rest report themselves as steps and
+    the screen shows an indeterminate bar for them rather than a number
+    nothing measured.
+    """
+
+    JOB = "job"
+    VERIFY = "verify"
+    MAP = "map"
+    VIDEO = "video"
+    SKELETON = "skeleton"
+    READY = "ready"
+
+
+#: Stage -> the sentence the screen shows while it is running.
+STAGE_TEXT = {
+    LoadStage.JOB: "Kayıt doğrulanıyor",
+    LoadStage.VERIFY: "Türetilmiş dosyalar doğrulanıyor",
+    LoadStage.MAP: "Kare eşlemesi okunuyor",
+    LoadStage.VIDEO: "Video hazırlanıyor",
+    LoadStage.SKELETON: "İskelet hazırlanıyor",
+    LoadStage.READY: "Hazır",
+}
 
 
 @dataclass(frozen=True)
@@ -61,13 +93,53 @@ class ReviewSession:
         self._job = dataset.job
         self._spec: Optional[SkeletonSpec] = None
         self._video_checked = False
+        self._floor: Optional[FloorPlane] = None
         self._joints_2d_reason = ""
         self._has_joints_2d: Optional[bool] = None
 
     # -------------------------------------------------------------- lifecycle
     @classmethod
-    def open(cls, directory: str | Path, *, verify: bool = True) -> "ReviewSession":
-        return cls(ReviewDataset(Path(directory), verify=verify))
+    def open(
+        cls,
+        directory: str | Path,
+        *,
+        verify: bool = True,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ) -> "ReviewSession":
+        """Open a version, reporting what it is doing while it does it.
+
+        ``progress`` receives ``(stage, done, total)``. The stages carry real
+        work and are named for what the person is waiting on rather than for
+        the function running; see :class:`LoadStage`.
+        """
+        return cls(
+            ReviewDataset(
+                Path(directory),
+                verify=verify,
+                progress=progress,
+                cancelled=cancelled,
+            )
+        )
+
+    def prepare_video(self) -> Availability:
+        """Open the proxy decoder now rather than on the first frame request.
+
+        Called from the worker during loading so the 130 ms this costs is paid
+        before the editor appears, not in the middle of the first repaint.
+        """
+        return self.video
+
+    def prime(self, frames: int = 300) -> None:
+        """Read the first window of joints, so the 3-D view can frame itself.
+
+        Everything here is a read the screen would do anyway on its first
+        paint. Doing it on the worker is the difference between an editor that
+        appears finished and one that fills in while being looked at.
+        """
+        self.joints_3d_window(0, min(self.frames, max(1, frames)))
+        # Touching this resolves the array store's key list once.
+        _ = self.joints_2d_available
 
     def close(self) -> None:
         self.dataset.close()
@@ -200,7 +272,8 @@ class ReviewSession:
         points = self.dataset.window(JOINTS_2D_KEY, position, position + 1)
         if points.size == 0:
             return None
-        points = np.asarray(points[0], dtype=np.float32)
+        points = np.asarray(points[0], dtype=np.float32).copy()
+        points[~self._measured_2d(points, position)] = np.nan
         if frame_size is None:
             return points
         source = self.source_size
@@ -213,6 +286,31 @@ class ReviewSession:
         scaled[:, 0] *= scale_x
         scaled[:, 1] *= scale_y
         return scaled
+
+    def _measured_2d(self, points: np.ndarray, position: int) -> np.ndarray:
+        """Which of these pixels the tracker actually measured.
+
+        The ZED reports ``(-1, -1)`` for a joint it could not place in the
+        image - a sentinel, not a coordinate. The array stores it verbatim,
+        which is right: the raw passthrough is the raw passthrough. What is
+        not right is drawing a bone to it. On the 20 September take that put
+        four white lines from the athlete's shoulders to just off the
+        top-left corner of every frame where a face landmark was hidden.
+
+        Two things are asked. The run's own validity mask, when it has one -
+        that is the tracker's answer, not a guess. And the coordinate itself:
+        a negative pixel is not a place in an image, whatever produced it.
+        """
+        finite = np.isfinite(points).all(axis=1)
+        inside = (points >= 0).all(axis=1)
+        measured = finite & inside
+        try:
+            mask = self.dataset.window(JOINT_VALID_KEY, position, position + 1)
+        except Exception:  # noqa: BLE001 - an older run may not carry one
+            return measured
+        if mask.size:
+            measured &= np.asarray(mask[0], dtype=bool)
+        return measured
 
     def joints_3d(self, position: int) -> Optional[np.ndarray]:
         """``[J, 3]`` for one frame. NaN where the tracker had nothing."""
@@ -257,6 +355,19 @@ class ReviewSession:
     @property
     def thumbnails(self):  # noqa: ANN201 - ThumbnailIndex
         return self.dataset.thumbnails
+
+    # ----------------------------------------------------------------- floor
+    @property
+    def floor(self) -> FloorPlane:
+        """The plane this version measured, or a plane that says it did not.
+
+        Read from ``job.json``; the SDK is never started here. A run produced
+        before floors were measured has no block at all, and that reads as
+        "not attempted" rather than as a floor at zero.
+        """
+        if self._floor is None:
+            self._floor = FloorPlane.from_dict(self._job.get("floor_plane"))
+        return self._floor
 
     # ------------------------------------------------------------ annotations
     def empty_document(self) -> AnnotationDocument:
@@ -308,4 +419,11 @@ class ReviewSession:
         self.close()
 
 
-__all__ = ["Availability", "JOINTS_2D_KEY", "ReviewSession"]
+__all__ = [
+    "Availability",
+    "JOINTS_2D_KEY",
+    "JOINT_VALID_KEY",
+    "LoadStage",
+    "STAGE_TEXT",
+    "ReviewSession",
+]

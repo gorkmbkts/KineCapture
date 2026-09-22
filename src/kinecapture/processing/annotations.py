@@ -44,7 +44,15 @@ logger = logging.getLogger(__name__)
 #: anatomical roles, review stamp - to the 1.0.0 document, which carried only
 #: interval boundaries. Additive: a 1.0.0 document loads with empty classes and
 #: is reported as unreviewed rather than being guessed at.
-CANONICAL_ANNOTATION_SCHEMA_VERSION = "1.1.0"
+#:
+#: 1.2.0 adds ``roles_origin`` and ``roles_revision`` to an error interval:
+#: whether the affected joints were inherited from the class definition or
+#: chosen for this repetition, and which revision of the definition was
+#: copied. Additive, and deliberately not defaulted: an interval written
+#: before this reads back as ``unknown``, which is neither of the two - it is
+#: the honest statement that nothing recorded how those joints were arrived
+#: at. Back-filling them would be inventing provenance.
+CANONICAL_ANNOTATION_SCHEMA_VERSION = "1.2.0"
 
 #: Written into every document. Read it before writing a tool against one.
 BOUNDARY_CONTRACT = "canonical_source_boundaries_inclusive"
@@ -125,6 +133,25 @@ class Anchor:
             ) from exc
 
 
+class RolesOrigin(str, Enum):
+    """Where an interval's affected-joint list came from.
+
+    This is the distinction JOINT-04 exists for. A class defines the joints it
+    is about once; applying that definition to a new interval is convenient
+    and correct, and it is **not** the same claim as a person having looked at
+    that repetition and chosen those joints. A release that confused the two
+    would present inherited defaults as per-repetition evidence.
+
+    ``UNKNOWN`` is for intervals written before this was recorded. It is not a
+    synonym for either of the other two: nothing is known about how those
+    joints were arrived at, and that is what it says.
+    """
+
+    UNKNOWN = "unknown"
+    CLASS_DEFAULT = "class_default"
+    REVIEWED = "reviewed"
+
+
 @dataclass(frozen=True)
 class ErrorInterval:
     """One error, localised in time, inside one movement.
@@ -141,13 +168,24 @@ class ErrorInterval:
     affected_roles: tuple[str, ...] = ()
     joint_status: JointStatus = JointStatus.UNREVIEWED
     note: str = ""
+    #: How ``affected_roles`` was arrived at. See :class:`RolesOrigin`.
+    roles_origin: RolesOrigin = RolesOrigin.UNKNOWN
+    #: Which revision of the class definition was copied, when it was. Zero
+    #: when the roles did not come from a class definition. This is what lets
+    #: a class be edited later without silently rewriting earlier decisions.
+    roles_revision: int = 0
 
     @property
     def is_classified(self) -> bool:
         return bool(self.error_class)
 
+    @property
+    def roles_were_reviewed(self) -> bool:
+        """True only when a person chose these joints for *this* interval."""
+        return self.roles_origin is RolesOrigin.REVIEWED
+
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "interval_id": self.interval_id,
             "start": self.start.to_dict(),
             "end": self.end.to_dict(),
@@ -156,6 +194,12 @@ class ErrorInterval:
             "joint_status": self.joint_status.value,
             "note": self.note,
         }
+        if self.roles_origin is not RolesOrigin.UNKNOWN or self.roles_revision:
+            # Written only when there is something to say, so a document with
+            # no joint provenance is byte-identical to a 1.1.0 one.
+            payload["roles_origin"] = self.roles_origin.value
+            payload["roles_revision"] = int(self.roles_revision)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "ErrorInterval":
@@ -167,6 +211,16 @@ class ErrorInterval:
             # as one would invent a review that never happened.
             logger.warning("Bilinmeyen eklem durumu '%s'; unreviewed sayıldı", raw_status)
             status = JointStatus.UNREVIEWED
+        raw_origin = str(payload.get("roles_origin", RolesOrigin.UNKNOWN.value))
+        try:
+            origin = RolesOrigin(raw_origin)
+        except ValueError:
+            # An unrecognised word is not a provenance somebody recorded.
+            # Treating it as "reviewed" would manufacture evidence.
+            logger.warning(
+                "Bilinmeyen eklem kökeni '%s'; unknown sayıldı", raw_origin
+            )
+            origin = RolesOrigin.UNKNOWN
         return cls(
             interval_id=str(payload.get("interval_id") or new_id("err")),
             start=Anchor.from_dict(payload["start"]),
@@ -175,6 +229,8 @@ class ErrorInterval:
             affected_roles=tuple(str(r) for r in payload.get("affected_roles") or ()),
             joint_status=status,
             note=str(payload.get("note", "")),
+            roles_origin=origin,
+            roles_revision=int(payload.get("roles_revision") or 0),
         )
 
 
@@ -480,6 +536,7 @@ __all__ = [
     "JointStatus",
     "MovementSample",
     "Readiness",
+    "RolesOrigin",
     "annotation_path",
     "load_annotations",
     "save_annotations",

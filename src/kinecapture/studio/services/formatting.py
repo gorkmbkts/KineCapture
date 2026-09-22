@@ -104,7 +104,30 @@ def short_id(value: str) -> str:
     return text.rsplit("_", 1)[-1] if "_" in text else text
 
 
+def file_size(value: Optional[int]) -> str:
+    """Bytes, in the unit a person would say them in.
+
+    ``None`` means *not measured yet or not measurable* and comes back as the
+    missing marker, never as "0 B". A version whose size has not been read is
+    not a version that takes no space, and showing a zero there would be a
+    claim about disk usage that nothing checked.
+    """
+    if value is None:
+        return MISSING
+    size = float(value)
+    if size < 1000:
+        return f"{int(size)} B"
+    for unit in ("KB", "MB", "GB", "TB"):
+        size /= 1000.0
+        if size < 1000 or unit == "TB":
+            # One decimal below 100, none above: "1.4 GB" reads, "1.4 TB"
+            # reads, and "847.3 MB" is three digits of noise.
+            return f"{size:.1f} {unit}" if size < 100 else f"{size:.0f} {unit}"
+    return MISSING  # pragma: no cover - the loop always returns
+
+
 __all__ = [
+    "file_size",
     "MISSING",
     "duration",
     "local_date",

@@ -1,7 +1,7 @@
 ---
 type: concept
 status: verified
-updated: 2026-09-18
+updated: 2026-09-19
 tags:
   - annotation
   - features
@@ -21,6 +21,14 @@ tags:
   anlamları birbirinden ayrılır.
 - Annotation değişiklikleri tek atomik yazım ve tek undo adımıdır.
 - Ham kayıt ve eski sidecar'lar yerinde göç ettirilmez; kayıpsız okunur.
+- Hata sınıfı, adı **ve** hangi eklemlerle ilgili olduğunu birlikte taşır
+  (`LabelOption.default_roles`, `roles_revision`). Eklemsiz yeni sınıf
+  reddedilir; yarım bir sınıf, bir sonraki etiketleyiciye aynı anatomik
+  soruyu yeniden sordurur.
+- Bir aralıktaki eklemler **miras mı yoksa bu tekrar için mi seçildi** ayrımı
+  kayıtta duruyor: `RolesOrigin` = `unknown` · `class_default` · `reviewed`.
+  Sınıf varsayılanı asla "bakıldı" sayılmaz. Kanonik sidecar **1.2.0**,
+  kanonik paket **1.1.0** bu alanları taşır; eski sürümler `unknown` okunur.
 
 ## Feature katmanı
 

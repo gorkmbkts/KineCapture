@@ -61,6 +61,46 @@ _REST_POSE: dict[str, tuple[float, float, float]] = {
     "right_hip": (-0.11, 0.93, 2.50),
     "right_knee": (-0.12, 0.52, 2.50),
     "right_ankle": (-0.12, 0.08, 2.50),
+    # --- the rest of the ZED vocabularies ---------------------------------
+    # Spine, in the order BODY_38 chains them.
+    "naval_spine": (0.00, 1.10, 2.50),
+    "spine_1": (0.00, 1.05, 2.50),
+    "spine_2": (0.00, 1.18, 2.50),
+    "spine_3": (0.00, 1.30, 2.50),
+    # Face landmarks. Small offsets around the head, forward of it, because
+    # a face points the way the body does.
+    "nose": (0.00, 1.62, 2.60),
+    "left_eye": (0.03, 1.66, 2.58),
+    "right_eye": (-0.03, 1.66, 2.58),
+    "left_ear": (0.07, 1.64, 2.50),
+    "right_ear": (-0.07, 1.64, 2.50),
+    # Clavicles sit between the neck and the shoulder.
+    "left_clavicle": (0.08, 1.46, 2.50),
+    "right_clavicle": (-0.08, 1.46, 2.50),
+    # Hand chain, continuing down the arm past the wrist.
+    "left_hand": (0.28, 0.86, 2.50),
+    "left_handtip": (0.29, 0.80, 2.50),
+    "left_thumb": (0.25, 0.85, 2.53),
+    "right_hand": (-0.28, 0.86, 2.50),
+    "right_handtip": (-0.29, 0.80, 2.50),
+    "right_thumb": (-0.25, 0.85, 2.53),
+    "left_hand_thumb_4": (0.25, 0.83, 2.54),
+    "right_hand_thumb_4": (-0.25, 0.83, 2.54),
+    "left_hand_index_1": (0.29, 0.83, 2.51),
+    "right_hand_index_1": (-0.29, 0.83, 2.51),
+    "left_hand_middle_4": (0.30, 0.78, 2.50),
+    "right_hand_middle_4": (-0.30, 0.78, 2.50),
+    "left_hand_pinky_1": (0.30, 0.84, 2.47),
+    "right_hand_pinky_1": (-0.30, 0.84, 2.47),
+    # Foot chain, forward of and below the ankle.
+    "left_foot": (0.12, 0.03, 2.60),
+    "right_foot": (-0.12, 0.03, 2.60),
+    "left_big_toe": (0.10, 0.02, 2.64),
+    "right_big_toe": (-0.10, 0.02, 2.64),
+    "left_small_toe": (0.16, 0.02, 2.62),
+    "right_small_toe": (-0.16, 0.02, 2.62),
+    "left_heel": (0.12, 0.03, 2.43),
+    "right_heel": (-0.12, 0.03, 2.43),
 }
 
 
@@ -391,7 +431,14 @@ class MockCameraBackend(CameraBackend):
 
         joints = np.zeros((spec.num_joints, 3), dtype=np.float32)
         for i, joint_name in enumerate(spec.joint_names):
-            x, y, z = _REST_POSE[joint_name]
+            try:
+                x, y, z = _REST_POSE[joint_name]
+            except KeyError:
+                raise KeyError(
+                    f"Mock jeneratöründe '{joint_name}' eklemi için duruş yok "
+                    f"({spec.name}). Bu gövde biçimi sentetik olarak "
+                    "üretilemez."
+                ) from None
             x += lateral
             z += depth_offset
             if joint_name.endswith(("_wrist", "_elbow")):

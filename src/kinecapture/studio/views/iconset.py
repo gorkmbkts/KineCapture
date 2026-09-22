@@ -59,6 +59,56 @@ ICON_NAMES: dict[str, str] = {
     "last": "skip-forward",
     "step-back": "chevron-left",
     "step-forward": "chevron-right",
+    "loop": "repeat",
+    "speed": "gauge",
+    # Capture. Recording is a dot, stopping a square - the two shapes every
+    # recorder has used since tape, so the meaning does not rest on red.
+    # ("record" above is the *destination* icon for Yakalama and stays a
+    # camera; these two are the action.)
+    "record-start": "circle",
+    "record-stop": "square",
+    "marker": "flag",
+    "connect": "plug",
+    "disconnect": "unplug",
+    # The labelling tools. "Gez", "Hareket çiz" and "Hata çiz" were words in a
+    # row of identical buttons; they are three different jobs and now look it.
+    "navigate": "move",
+    "draw-movement": "activity",
+    "draw-fault": "triangle-alert",
+    "snap": "magnet",
+    "zoom-in": "zoom-in",
+    "zoom-out": "zoom-out",
+    "zoom-all": "scan",
+    "undo": "undo-2",
+    "redo": "redo-2",
+    "save": "save",
+    "saved": "circle-check",
+    "more": "ellipsis",
+    # The right-hand panel's vertical strip, and the camera tools on it.
+    "camera-tools": "box",
+    "labels": "tag",
+    "people": "users",
+    "summary": "list",
+    "compass": "compass",
+    "centre": "crosshair",
+    "fit": "scan",
+    "floor": "grid-3x3",
+    "overlay-on": "eye",
+    "overlay-off": "eye-off",
+    "save-view": "bookmark",
+    "previous-view": "rotate-ccw",
+    "joints": "bone",
+    # Shared small actions.
+    "add": "plus",
+    "delete": "trash-2",
+    "edit": "square-pen",
+    "back": "arrow-left",
+    "next": "arrow-right",
+    "filter": "filter",
+    "layers": "layers",
+    "busy": "loader-circle",
+    "clock": "clock",
+    "collapse": "chevrons-up-down",
 }
 
 

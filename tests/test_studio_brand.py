@@ -139,8 +139,14 @@ def test_the_sign_in_screen_leads_with_the_crest(app, tmp_path, monkeypatch) -> 
         assert gate.crest.pixmap() is not None
         assert not gate.crest.pixmap().isNull()
         assert gate.crest.accessibleName() == CREST_NAME
-        assert gate.institution.text() == CREST_NAME
-        # Large: this is the one screen where the institution leads.
+        # The institution's name is *in* the mark. A second, smaller copy of it
+        # underneath was removed on 19 September; the accessible name and the
+        # tooltip are what carry it now, so nothing is lost to a reader that
+        # cannot see the crest.
+        assert gate.crest.toolTip() == CREST_NAME
+        assert not hasattr(gate, "institution")
+        # Large: this is the one screen where the institution leads. Grown by
+        # about an eighth in the same change.
         assert gate.crest.width() >= 96
         # And it follows the theme with everything else.
         window.viewmodel.set_theme("light")

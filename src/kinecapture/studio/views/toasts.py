@@ -89,6 +89,35 @@ class Toast(MessageBar):
 
         self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
 
+    def preferred_width(self) -> int:
+        """The width at which this card's buttons stop needing a second row.
+
+        Not a demand: :class:`ToastLayer` clamps it to what the window has.
+        Asked so that a card with three actions is a little wider rather than
+        two rows tall, which is easier to read and easier to aim at.
+        """
+        row = self.layout().itemAt(self.layout().count() - 1)
+        buttons = [
+            row.itemAt(i).widget()
+            for i in range(row.count())
+            if row.itemAt(i).widget() is not None
+        ]
+        visible = [b for b in buttons if not b.isHidden()]
+        if not visible:
+            return 0
+        spacing = row.spacing() if hasattr(row, "spacing") else 6
+        margins = self.layout().contentsMargins()
+        return (
+            sum(max(b.minimumWidth(), b.sizeHint().width()) for b in visible)
+            + spacing * (len(visible) - 1)
+            + margins.left()
+            + margins.right()
+            # A couple of pixels of slack. Asking for exactly the width the
+            # row needs leaves the flow one rounding error away from wrapping,
+            # and a wrapped row is a card twice as tall for no reason.
+            + 4
+        )
+
     # --------------------------------------------------------------- content
     def present(self, message: Message, *, repeated: bool = False) -> None:
         self.show_message(message)
@@ -192,6 +221,7 @@ class ToastLayer(QWidget):
         #: "Kaydet" is worse than no message at all.
         self._bottom_reserve = 0
         self._toasts: list[Toast] = []
+        self._laying_out = False
         # NOT transparent for mouse events: that attribute takes the whole
         # subtree out of hit-testing, which left "Ayrıntılar" and "Kapat"
         # painted but dead. Instead the layer is only ever as big as the cards
@@ -219,8 +249,13 @@ class ToastLayer(QWidget):
             return existing
 
         toast = Toast(self._tokens, key, self)
-        toast.setFixedWidth(self._tokens.metric("KcToastWidth"))
+        toast.setFixedWidth(self._card_width())
         toast.action_triggered.connect(self._action)
+        # A card that grows - because its actions wrapped onto a second line -
+        # has to be measured again. Without this the extra line was drawn
+        # outside the rectangle the layer had given it, which is how a
+        # sentence arrived on screen cut off halfway through a word.
+        toast.resized.connect(self._relayout)
         self._toasts.append(toast)
         while len(self._toasts) > MAX_TOASTS:
             self._toasts.pop(0).setParent(None)
@@ -277,11 +312,32 @@ class ToastLayer(QWidget):
         self._bottom_reserve = pixels
         self._relayout()
 
+    def _card_width(self) -> int:
+        """How wide a card is, and why it is not simply the token.
+
+        The token is a *starting* width. A card carrying several actions can
+        need more than that before its buttons start clipping, and a host too
+        narrow to hold even the token needs less. Between those, the cards all
+        share one width, because a corner of cards at four different widths
+        reads as four different things.
+        """
+        wanted = self._tokens.metric("KcToastWidth")
+        for toast in self._toasts:
+            wanted = max(wanted, toast.preferred_width())
+        room = self._host.width() - 2 * self._tokens.metric("KcSpacingXl")
+        return max(240, min(wanted, room if room > 0 else wanted))
+
     def _resize_to_host(self) -> None:
         self._relayout()
 
     def _relayout(self) -> None:
         """Stack the cards in the bottom-right corner, newest lowest.
+
+        Re-entrant calls are ignored. A card emits ``resized`` while it is
+        being filled, which arrives in the middle of this - and measuring a
+        card whose width has not been set yet returned the height it would
+        need if its buttons wrapped onto three rows. That number then became
+        the card's height, and the card was twice as tall as its content.
 
         Not the top-right: that is where every screen keeps its action
         buttons, and a message there covered "Etiketle" and "Yeni sürüm
@@ -289,27 +345,49 @@ class ToastLayer(QWidget):
         the far end of the timeline on the labelling screen, so a message
         never sits on the video, the inspector or a control.
         """
+        if self._laying_out:
+            return
         if not self._toasts:
             self.hide()
             return
+        self._laying_out = True
+        try:
+            self._lay_out_cards()
+        finally:
+            self._laying_out = False
+
+    def _lay_out_cards(self) -> None:
         margin = self._tokens.metric("KcSpacingXl")
         gap = self._tokens.metric("KcSpacingMd")
-        width = self._tokens.metric("KcToastWidth")
+        width = self._card_width()
 
-        # Measure first: the layer is sized to its contents, so it has to know
-        # how tall the stack is before it can be placed.
-        heights: list[int] = []
+        # Width first, for every card, then heights. Asking one card for its
+        # height while another still has last pass's width is how a card
+        # measured itself as three rows of buttons tall.
         for toast in self._toasts:
             toast.setFixedWidth(width)
-            # The height has to be asked for *after* the width is fixed and the
-            # layout has run, or a card with a detail line comes out cut off.
             layout = toast.layout()
             if layout is not None:
+                layout.invalidate()
                 layout.activate()
+
+        heights: list[int] = []
+        for toast in self._toasts:
+            layout = toast.layout()
+            # The *layout's* hint, not the widget's. A widget caches its own
+            # size hint and hands back the cached one; a card that had once
+            # been measured while its buttons wrapped onto three rows kept
+            # reporting that height afterwards, and was drawn twice as tall
+            # as anything in it.
+            hint = (
+                layout.sizeHint().height()
+                if layout is not None
+                else toast.sizeHint().height()
+            )
             heights.append(
                 max(
                     toast.heightForWidth(width) if toast.hasHeightForWidth() else 0,
-                    toast.sizeHint().height(),
+                    hint,
                     toast.minimumSizeHint().height(),
                 )
             )

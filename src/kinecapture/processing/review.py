@@ -12,7 +12,7 @@ next front end reuse this file unchanged.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import numpy as np
 
@@ -35,9 +35,34 @@ from .summary import TimelineSummary
 from .thumbnails import ThumbnailIndex
 
 
+class Cancelled(RuntimeError):
+    """The caller asked for this open to stop; nothing here is half-applied."""
+
+
 class ReviewDataset:
-    def __init__(self, directory: Path, *, verify: bool = True):
+    def __init__(
+        self,
+        directory: Path,
+        *,
+        verify: bool = True,
+        progress: Optional[Callable[[str, int, int], None]] = None,
+        cancelled: Optional[Callable[[], bool]] = None,
+    ):
+        """Open one processing version.
+
+        ``progress`` is called with ``(stage, done, total)`` as the open runs.
+        The stages are real work, not a decorative sequence: reading the job
+        file, re-hashing every derived file against ``checksums.json``, and
+        parsing the source map. The checksum stage is measured in bytes and on
+        a 2.7 GB version is 99% of the time, so it is the one that carries a
+        percentage; the others report ``total = 0`` and are shown as steps.
+
+        ``cancelled`` is polled inside the checksum walk. A caller that has
+        moved to another version stops paying for this one immediately.
+        """
         self.directory = Path(directory)
+        report = progress or (lambda _stage, _done, _total: None)
+        report("job", 0, 0)
         self.job = read_json(self.directory / "job.json")
         # ``partial`` is a version with recorded caveats, and the library
         # lists it with them attached; refusing to open one was how a run that
@@ -52,8 +77,19 @@ class ReviewDataset:
                 "This version did not pass a check that annotation depends on: "
                 + ", ".join(self.job["blocking_issues"])
             )
-        if verify and verify_checksum_manifest(read_json(self.directory / "checksums.json"), self.directory):
-            raise ValueError("Derived checksum verification failed")
+        if verify:
+            report("verify", 0, 0)
+            problems = verify_checksum_manifest(
+                read_json(self.directory / "checksums.json"),
+                self.directory,
+                progress=lambda done, total: report("verify", done, total),
+                cancelled=cancelled,
+            )
+            if cancelled is not None and cancelled():
+                raise Cancelled("Sürüm açma iptal edildi.")
+            if problems:
+                raise ValueError("Derived checksum verification failed")
+        report("map", 0, 0)
         # The source map is kept as two integer arrays rather than as parsed
         # rows. An hour at 60 FPS is 216000 frames; as dicts plus a tuple-keyed
         # index that measured 222 MB, and as arrays it is 3.5 MB. The rows
@@ -68,6 +104,7 @@ class ReviewDataset:
             stamps.append(int(row["cam_ns"]))
         self._positions = np.asarray(positions, dtype=np.int64)
         self._stamps = np.asarray(stamps, dtype=np.int64)
+        report("map", 1, 1)
         # Strictly increasing source positions are the normal case and make
         # every anchor unique, so lookup is a binary search over the array. A
         # damaged source that repeats a position falls back to a dictionary
@@ -292,4 +329,10 @@ class ReviewDataset:
         self.close()
 
 
-__all__ = ["CANONICAL_ANNOTATION_SCHEMA_VERSION", "Anchor", "AnnotationDocument", "ReviewDataset"]
+__all__ = [
+    "CANONICAL_ANNOTATION_SCHEMA_VERSION",
+    "Anchor",
+    "AnnotationDocument",
+    "Cancelled",
+    "ReviewDataset",
+]

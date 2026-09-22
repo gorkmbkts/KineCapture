@@ -22,7 +22,7 @@ from PySide6.QtWidgets import QApplication, QStyleFactory, QWidget
 
 from kinecapture.studio.theme import ThemeTokens, load_tokens, stylesheet_for
 
-from . import qssassets
+from . import fonts, qssassets
 from .palette import palette_for
 
 #: The one style that honours a palette on every control. Set once; changing
@@ -37,6 +37,10 @@ def apply_application_theme(theme: str | ThemeTokens) -> ThemeTokens:
     if application is None:
         return tokens
     _ensure_style(application)
+    # The brand face has to be registered before the stylesheet names it, or
+    # the sign-in wordmark silently falls to the next family in the chain.
+    # Cached, so the theme toggle does not re-read the file.
+    fonts.load_brand_font()
     # Images first: the stylesheet references them by name, and a sheet applied
     # before they exist draws nothing where an arrow should be.
     qssassets.install(tokens)

@@ -44,6 +44,9 @@ where = ["src"]
 "kinecapture.studio.theme" = ["tokens.json", "studio.qss.tmpl"]
 # Lucide icons, ISC licensed, shipped verbatim with their licence text.
 "kinecapture.studio.views.icons" = ["*.svg", "LICENSE.lucide.txt"]
+# Space Grotesk, SIL Open Font License 1.1, shipped verbatim with OFL.txt.
+# Bundled rather than fetched: the sign-in screen must not need a network.
+"kinecapture.studio.views.fonts" = ["*.ttf", "OFL.txt"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

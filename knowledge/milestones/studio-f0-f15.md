@@ -31,6 +31,16 @@ tags:
 - 16 Eylül: kayıt hedefi, gerçek ayar durumu, global kayıt kontrolü ve GUI/UX.
 - 17 Eylül: yayımlama kullanılabilirliği, anchor, imza ısınması ve kalite ayrımı.
 - 18 Eylül: gerçek ZED ile kişi seçili zincir ve veri kalitesi ölçümü.
+- 19 Eylül: Studio GUI son iyileştirmesi, kendi 17 fazlık planıyla ayrı
+  yürütüldü. Kapsam yalnız `studio/`; eski `gui/` dokunulmadı. Kalıcı
+  sonuçlar: token şeması 1.2.0 ve paketlenmiş marka fontu; bildirim katmanı
+  sayfa yığınından ayrıldı; Etiketleme'ye girişte native pencere yeniden
+  oluşturma giderildi; 3B iskelet anatomik renk ve küre eklemlerle yeniden
+  yazıldı; zemin düzlemi offline ölçülüyor (processing 1.2.0); hata sınıfı
+  kendi eklemlerini taşıyor (canonical annotation 1.2.0, release 1.1.0);
+  sağ panel kelime sekmesi yerine ikon şeridi.
+  Ayrıntı: [faz planı](../plans/studio-gui-refinement-implementation.md) ·
+  [doğrulama raporu](../reports/studio-gui-refinement-validation.md).
 
 Tam faz kanıtı ve commitleri:
 [faz planı](../archive/reports/FAZ_PLANI_PYSIDE6_STUDIO.md),

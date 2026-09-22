@@ -210,6 +210,11 @@ class TimelineView(QWidget):
         self._position = 0
         self._invalidate()
 
+    @property
+    def intervals(self) -> tuple[Interval, ...]:
+        """What is drawn on the lanes right now."""
+        return tuple(self._intervals)
+
     def set_intervals(self, intervals: Sequence[Interval]) -> None:
         self._intervals = list(intervals)
         self._invalidate()
@@ -363,6 +368,11 @@ class TimelineView(QWidget):
             self._tokens.name,
             len(self._intervals),
             self._active_movement,
+            # The selected interval is drawn with a stronger fill and edge, so
+            # it belongs to the cached layer's identity. Selection changes at
+            # human pace; the playhead, which moves per frame, deliberately
+            # does not appear here.
+            self._selected,
             id(self.lane_source),
         )
         if self._static is None or self._static_key != key:
@@ -695,9 +705,22 @@ class TimelineView(QWidget):
         radius = 3.0
         classified = interval.colour_index >= 0
         is_error = interval.lane == "errors"
+        selected = interval.key == self._selected
 
+        # Translucent enough that the ruler, the grid and the interval's own
+        # text stay readable through it; the class is carried by the edge and
+        # the label as much as by the fill. Solid blocks made a busy take
+        # unreadable, which is what the 19 September review asked to fix.
         fill = QColor(base)
-        fill.setAlpha(60 if dimmed else (150 if classified else 90))
+        if dimmed:
+            alpha = tokens.metric("KcIntervalFillAlphaDimmed")
+        elif not classified:
+            alpha = tokens.metric("KcIntervalFillAlphaDimmed")
+        elif selected:
+            alpha = tokens.metric("KcIntervalFillAlphaSelected")
+        else:
+            alpha = tokens.metric("KcIntervalFillAlpha")
+        fill.setAlpha(alpha)
         if is_error and classified:
             # A fault is a different kind of thing from a movement, so it is
             # drawn differently as well as in a different colour family: a
@@ -706,7 +729,7 @@ class TimelineView(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(rect, radius, radius)
             hatch = QColor(base)
-            hatch.setAlpha(110 if not dimmed else 50)
+            hatch.setAlpha(alpha * 2)
             painter.setBrush(QBrush(hatch, Qt.BrushStyle.BDiagPattern))
             painter.drawRoundedRect(rect, radius, radius)
         else:
@@ -714,8 +737,10 @@ class TimelineView(QWidget):
             painter.setPen(Qt.PenStyle.NoPen)
             painter.drawRoundedRect(rect, radius, radius)
 
+        # The edge is what a light fill leans on, so it is drawn at full
+        # strength and gets a second pixel on the selected interval.
         edge = QPen(QColor(base))
-        edge.setWidth(1)
+        edge.setWidth(2 if selected else 1)
         if not classified:
             # Nothing chosen yet: an open box, not a coloured one.
             edge = QPen(QColor(tokens.colour("KcStatusWarning")))
@@ -728,7 +753,9 @@ class TimelineView(QWidget):
             # The cap: a solid bar along the top of every fault interval, so
             # the fault track reads as a different data type at a glance.
             cap = QColor(base)
-            cap.setAlpha(120 if dimmed else 255)
+            cap.setAlpha(
+                alpha * 2 if dimmed else tokens.metric("KcIntervalEdgeAlpha")
+            )
             painter.fillRect(
                 QRectF(rect.left(), rect.top(), rect.width(), 3.0), cap
             )

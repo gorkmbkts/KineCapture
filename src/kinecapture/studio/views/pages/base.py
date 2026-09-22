@@ -9,7 +9,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtWidgets import QVBoxLayout, QWidget
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QHBoxLayout, QVBoxLayout, QWidget
 
 from kinecapture.studio.services.messages import Message
 from kinecapture.studio.theme import ThemeTokens
@@ -43,8 +44,24 @@ class StudioPage(QWidget, BoundView):
         self._subtitle.setProperty("kcRole", "pageSubtitle")
         self.messages = MessageBar(tokens, self)
 
-        self._outer.addWidget(self._title)
-        self._outer.addWidget(self._subtitle)
+        # The heading, and room beside it for whatever this screen's one
+        # top-level action is. A screen with no such action lays out exactly as
+        # it did before: the stretch simply takes the whole right-hand side.
+        self._header = QWidget(self)
+        header_row = QHBoxLayout(self._header)
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(tokens.metric("KcSpacingLg"))
+        heading = QVBoxLayout()
+        heading.setContentsMargins(0, 0, 0, 0)
+        heading.setSpacing(tokens.metric("KcSpacingXs"))
+        heading.addWidget(self._title)
+        heading.addWidget(self._subtitle)
+        header_row.addLayout(heading, 1)
+        self._header_actions = QHBoxLayout()
+        self._header_actions.setContentsMargins(0, 0, 0, 0)
+        self._header_actions.setSpacing(tokens.metric("KcSpacingMd"))
+        header_row.addLayout(self._header_actions, 0)
+        self._outer.addWidget(self._header)
         # Kept for a page used on its own (a test, a tool window). Inside the
         # shell every message goes to the floating layer instead, so this stays
         # hidden and costs no height - a notification must not resize the work.
@@ -61,6 +78,25 @@ class StudioPage(QWidget, BoundView):
     #: never a second, emptier inspector competing with the real one - which
     #: is exactly what the 15 September audit found on Etiketleme.
     owns_inspector = False
+
+    #: True when that panel is not optional. The shell then never hides it and
+    #: its toggle says so instead of pretending to control it. Etiketleme's
+    #: panel carries the camera, the label summary and the athlete: it is not
+    #: decoration beside the work, it is part of it. On 20 September the global
+    #: toggle - a preference belonging to a panel that does not exist on that
+    #: screen - hid it, and the button went on showing "open" while it was gone.
+    inspector_is_permanent = False
+
+    def add_header_action(self, widget: QWidget) -> QWidget:
+        """Put ``widget`` on the heading's line, at the right-hand end.
+
+        For the one control a screen is *about* rather than one of several it
+        offers - Yakalama's "Bağlan", which belongs beside the word "Yakalama"
+        and above the panel it affects, not down in the transport row with the
+        record button it has nothing to do with.
+        """
+        self._header_actions.addWidget(widget, 0, Qt.AlignmentFlag.AlignVCenter)
+        return widget
 
     def bottom_reserve(self) -> int:
         """Height of an action bar this page pins to its own bottom edge.
@@ -82,7 +118,8 @@ class StudioPage(QWidget, BoundView):
         return ()
 
     def set_inspector_visible(self, visible: bool) -> None:
-        """Only called on a page that owns its inspector."""
+        """Only called on a page that owns its inspector, and never with
+        ``False`` on one whose panel is permanent."""
 
     # ------------------------------------------------------------ lifecycle
     def apply_tokens(self, tokens: ThemeTokens) -> None:

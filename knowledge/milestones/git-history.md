@@ -1,7 +1,7 @@
 ---
 type: milestone-index
 status: generated
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 
 # Git kilometre taşları
@@ -44,3 +44,4 @@ kronolojik giriş noktasıdır.
 | 2026-09-17 | `b12d7f4` | Add comprehensive tests for studio components |
 | 2026-09-18 | `1b8238d` | Refactor tests and introduce new features for version handling and framing validation |
 | 2026-09-18 | `62a0456` | Implement subject selection and notification system in capture workflow |
+| 2026-09-19 | `714193a` | Add prompt index and update knowledge source management script |

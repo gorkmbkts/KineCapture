@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtGui import QCloseEvent, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication,
@@ -52,6 +52,7 @@ from kinecapture.studio.viewmodels.processing import ProcessingViewModel
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
 from kinecapture.studio.viewmodels.settings import SettingsViewModel
 from kinecapture.studio.viewmodels.shell import ShellViewModel
+from kinecapture.studio.viewmodels.navigation import DEFAULT_DESTINATION
 
 from .auth import AuthView
 from .contextbar import ContextBar
@@ -96,6 +97,11 @@ class StudioWindow(QMainWindow, BoundView):
         #: Set by the library when a version is chosen; read by the labelling
         #: screen when it opens. F8 turns this into the real handover.
         self.pending_review: object = None
+        #: Where the labelling screen should land once that version is open:
+        #: "subject", "open_error", "no_exercise" or "labels". Carried beside
+        #: the version rather than inside it, because the same version is
+        #: reached from the library with no particular thing to fix.
+        self.pending_review_focus: str = ""
         #: Helper windows, built on first open and reused afterwards.
         self._tool_windows: dict[str, object] = {}
         #: Diagnostics as a state machine rather than a value that may be None.
@@ -110,23 +116,36 @@ class StudioWindow(QMainWindow, BoundView):
         #: panel is part of doing the work there; the shell's generic one
         #: starts closed, because an empty panel is not.
         self._inspector_by_page: dict[str, bool] = {}
+        #: The one-pixel widget that makes this window RHI-backed from the
+        #: start. See :meth:`_prime_gl_surface`.
+        self._gl_primer = None
         self.log_buffer = LogBuffer().install()
         self._settings_service = SettingsService(viewmodel.session.config)
         self.auth_viewmodel = AuthViewModel(viewmodel.session)
 
+        #: Whether this window has ever been maximised. Only then is a
+        #: restore something to answer; see :meth:`changeEvent`.
+        self._was_maximised = False
         self.setWindowTitle("KineCapture Studio")
+        self._apply_single_size_chrome()
         self.setMinimumSize(
             self._tokens.metric("KcWindowMinWidth"),
             self._tokens.metric("KcWindowMinHeight"),
         )
+        # A size to fall back on, immediately superseded by the maximised
+        # state: `showEvent` maximises whatever is behind it. Kept because a
+        # widget with no size at all cannot be laid out even once.
         self.resize(self._state.width, self._state.height)
 
         self._build()
         self._connect()
         self.apply_theme(viewmodel.theme.value)
 
-        self.viewmodel.navigate(self._state.active_page)
+        # Never the remembered tab: every launch starts on Projeler, so the
+        # project for this session is a choice somebody makes rather than one
+        # the previous run made for them.
         self._show_page(self.viewmodel.active_page.value)
+        self._refresh_gates()
         self.inspector.setVisible(self._state.inspector_open)
         self.context_bar.inspector_button.setChecked(self._state.inspector_open)
         self._update_gate()
@@ -136,11 +155,86 @@ class StudioWindow(QMainWindow, BoundView):
         self._context_timer.timeout.connect(self._tick)
         self._context_timer.start()
 
+    def _apply_single_size_chrome(self) -> None:
+        """One target size: maximised windowed, with no way back to a small one.
+
+        Decided by the user on 21 September. The screens here are solved from
+        the window's own size - the labelling screen's four bands, the capture
+        stage - and every size other than "maximised on this display" was a
+        layout somebody had to compromise. So the two title-bar controls that
+        lead away from it are removed and closing is left alone.
+
+        ``CustomizeWindowHint`` is what makes the other hints exhaustive: with
+        it, a hint that is not named is a button that is not there. Set before
+        the window is ever shown, because changing flags afterwards destroys
+        the native window and makes a new one - which is the same flicker
+        :meth:`_prime_gl_surface` exists to avoid.
+
+        This is *not* borderless fullscreen: the title bar, the frame and the
+        taskbar entry all stay.
+        """
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.CustomizeWindowHint
+            | Qt.WindowType.WindowTitleHint
+            | Qt.WindowType.WindowSystemMenuHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
+
+    def changeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming
+        """Go back to maximised if anything ever un-maximises the window.
+
+        The title-bar buttons are gone, but they are not the only route out:
+        Win+Down, a double click on the title bar and a few accessibility
+        tools all send a restore. The window is meant to have one size, so a
+        restore is answered by maximising again rather than by leaving the
+        interface at a size no layout here was solved for.
+
+        The guard is on *going back*, not on being normal. A window that was
+        never maximised is left exactly as it is - which is what a test
+        driving this shell at 1129x700 needs, and measured: without the
+        distinction, simply showing the window turned every sized test window
+        into a maximised one and every layout measurement with it.
+        """
+        super().changeEvent(event)
+        if event.type() is not QEvent.Type.WindowStateChange:
+            return
+        state = self.windowState()
+        if state & Qt.WindowState.WindowMaximized:
+            self._was_maximised = True
+            return
+        if state & (
+            Qt.WindowState.WindowMinimized | Qt.WindowState.WindowFullScreen
+        ):
+            return
+        if not self._was_maximised or not self.isVisible():
+            return
+        # Queued: Qt is in the middle of applying the old state, and setting
+        # it again from inside the notification is ignored on Windows.
+        QTimer.singleShot(0, self.showMaximized)
+
     def _tick(self) -> None:
         """One shell heartbeat: the context bar, the recording, the inspector."""
         self.viewmodel.refresh_context()
+        self._refresh_gates()
         if self.inspector.isVisible():
             self._refresh_inspector()
+
+    def _refresh_gates(self) -> None:
+        """Dim the steps this session cannot enter yet, and say why.
+
+        Driven from the same :meth:`ShellViewModel.gate_reason` the navigation
+        itself asks, so the bar and the refusal can never disagree - and so a
+        shortcut, a notification action or a direct call meets the same rule a
+        button does.
+        """
+        reasons = {
+            item.key: self.viewmodel.gate_reason(item.key)
+            for item in self.viewmodel.destinations
+        }
+        reasons = {key: why for key, why in reasons.items() if why}
+        if reasons != self.nav_bar.gated:
+            self.nav_bar.set_gated(reasons)
 
     # ------------------------------------------------------------- assembly
     def _build(self) -> None:
@@ -149,6 +243,7 @@ class StudioWindow(QMainWindow, BoundView):
         outer = shell_layout
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
+        self._prime_gl_surface(central)
 
         self.context_bar = ContextBar(self._tokens, self)
         outer.addWidget(self.context_bar)
@@ -158,11 +253,26 @@ class StudioWindow(QMainWindow, BoundView):
         self.splitter.setChildrenCollapsible(False)
         self.splitter.setHandleWidth(self._tokens.metric("KcBorderWidth"))
 
-        self.stack = QStackedWidget(self)
-        self.splitter.addWidget(self.stack)
+        # The pages, and the layer messages are drawn on, inside one container.
+        #
+        # The layer is a child of the *container*, not of the stack. Qt's
+        # QStackedLayout calls raise() on the page it is switching to, which
+        # lifts that page above every sibling - including a message layer that
+        # had raised itself when the message arrived. Measured on 19 September:
+        # after one page change the widget under the toast's own centre was the
+        # page, so "Kapat" and "Ayrıntılar" were painted but unreachable. Put
+        # one level up, the layer is never a sibling of a page and nothing in
+        # Qt restacks it.
+        self.page_area = QWidget(self)
+        area = QVBoxLayout(self.page_area)
+        area.setContentsMargins(0, 0, 0, 0)
+        area.setSpacing(0)
+        self.stack = QStackedWidget(self.page_area)
+        area.addWidget(self.stack)
+        self.splitter.addWidget(self.page_area)
         # Messages are drawn over the page, never inserted into it: the video,
         # the 3-D view and the timeline keep their geometry to the pixel.
-        self.toasts = ToastLayer(self._tokens, self.stack)
+        self.toasts = ToastLayer(self._tokens, self.page_area)
 
         self.inspector = self._build_inspector()
         self.splitter.addWidget(self.inspector)
@@ -187,6 +297,47 @@ class StudioWindow(QMainWindow, BoundView):
         self.gate.addWidget(self.auth_view)
         self.gate.addWidget(self.shell_body)
         self.setCentralWidget(self.gate)
+
+    def _prime_gl_surface(self, parent: QWidget) -> None:
+        """Make this window able to hold a 3-D view before anybody looks at it.
+
+        Qt composites a ``QOpenGLWidget`` through a QRhi-backed surface, and
+        the top-level window has to be created that way. Adding the *first*
+        one to a window that is already on screen therefore destroys the
+        native window and makes a new one - which is what a user sees as
+        "the window disappeared and came back" the first time they open
+        Etiketleme.
+
+        Measured on 19 September, real window, PySide6 6.10.1:
+
+            no primer   winId 983812 -> 1049348   recreated
+            primed      winId 2754504 -> 2754504  unchanged
+
+        The primer is one pixel, never shown, and never paints: what matters
+        is that it exists before ``show()``, so the window is created RHI-
+        backed in the first place. It is *not* a hide/show trick over the
+        symptom - the native window is never replaced at all afterwards.
+
+        A machine with no working GL must still start, so a failure here is
+        logged and dropped: the worst case is the old behaviour.
+        """
+        try:
+            from PySide6.QtOpenGLWidgets import QOpenGLWidget
+        except ImportError as exc:  # pragma: no cover - Qt ships this
+            logger.info("3B yüzey hazırlanamadı: %s", exc)
+            return
+        try:
+            primer = QOpenGLWidget(parent)
+            primer.setObjectName("kcGlPrimer")
+            primer.setFixedSize(1, 1)
+            # Never composited and never painted; it exists to decide how the
+            # top-level window is created.
+            primer.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+            primer.hide()
+        except Exception as exc:  # noqa: BLE001 - see docstring
+            logger.info("3B yüzey hazırlanamadı: %s", exc)
+            return
+        self._gl_primer = primer
 
     def _build_tools_button(self) -> QToolButton:
         """The six helper windows, behind one button.
@@ -229,6 +380,13 @@ class StudioWindow(QMainWindow, BoundView):
 
     def _tool_provider(self, key: str):  # noqa: ANN201
         """What each window reads, resolved fresh every refresh."""
+        if key == "capture":
+            # Where the Capture screen's camera, framing and alert state went
+            # when the 21 September decision took it off that screen. Asked of
+            # the page, so the window and the screen read the same values; the
+            # page is built lazily, so a window opened before Yakalama has
+            # ever been visited says so rather than inventing a reading.
+            return self._capture_status_sections
         if key == "diagnostics":
             return self._diagnostics_sections
         if key == "device":
@@ -301,6 +459,25 @@ class StudioWindow(QMainWindow, BoundView):
         finally:
             self._diagnostics_delivering = False
 
+    def _capture_status_sections(self):  # noqa: ANN201 - tuple[Section, ...]
+        """The Capture screen's own camera and framing state, or why not."""
+        from kinecapture.studio.services.inspectors import Row, Section
+
+        page = self._pages.get("capture")
+        gather = getattr(page, "status_sections", None)
+        if gather is None:
+            return (
+                Section(
+                    "Yakalama",
+                    (Row("Durum", "Yakalama ekranı bu oturumda henüz açılmadı"),),
+                    note=(
+                        "Kamera ve kadraj durumu Yakalama ekranı bir kez "
+                        "açıldıktan sonra okunur."
+                    ),
+                ),
+            )
+        return gather()
+
     def _camera_info(self):  # noqa: ANN201
         capture = self._viewmodels.get("capture")
         service = getattr(capture, "service", None)
@@ -370,6 +547,14 @@ class StudioWindow(QMainWindow, BoundView):
         self.inspector_title.setText(f"İNCELEME · {page.destination.title.upper()}")
         self.inspector_body.show_sections(sections)
 
+    @staticmethod
+    def _inspector_is_permanent(page) -> bool:  # noqa: ANN001 - StudioPage
+        return bool(
+            isinstance(page, StudioPage)
+            and page.owns_inspector
+            and page.inspector_is_permanent
+        )
+
     def _inspector_wanted(self, page) -> bool:  # noqa: ANN001 - StudioPage
         """Whether this screen's inspector should be open right now.
 
@@ -390,6 +575,21 @@ class StudioWindow(QMainWindow, BoundView):
         if not isinstance(page, StudioPage):
             return
         key = page.destination.key
+        button = self.context_bar.inspector_button
+        if self._inspector_is_permanent(page):
+            # Nothing to decide. The page's panel is part of the page, the
+            # shell has no panel of its own here, and a toggle that cannot
+            # change anything says so rather than lying about its state.
+            page.set_inspector_visible(True)
+            self.inspector.setVisible(False)
+            button.setChecked(True)
+            button.setEnabled(False)
+            button.setToolTip(
+                "Bu ekranın yardımcı paneli kalıcıdır; gizlenemez."
+            )
+            return
+        button.setEnabled(True)
+        button.setToolTip("İnceleme panelini aç/kapat  (F9)")
         if visible is None:
             visible = self._inspector_wanted(page)
         else:
@@ -398,7 +598,7 @@ class StudioWindow(QMainWindow, BoundView):
         self.inspector.setVisible(bool(visible) and not owns)
         if owns:
             page.set_inspector_visible(bool(visible))
-        self.context_bar.inspector_button.setChecked(bool(visible))
+        button.setChecked(bool(visible))
         if visible and not owns:
             self._refresh_inspector()
 
@@ -653,6 +853,10 @@ class StudioWindow(QMainWindow, BoundView):
 
     def _signed_in(self) -> None:
         self._update_gate()
+        # Signing in is the other moment a session begins. Projeler again,
+        # whatever page the window happens to be showing behind the form.
+        self.viewmodel.navigate(DEFAULT_DESTINATION)
+        self._refresh_gates()
         self.viewmodel.refresh_context()
         current = self.stack.currentWidget()
         if isinstance(current, StudioPage):
@@ -668,6 +872,12 @@ class StudioWindow(QMainWindow, BoundView):
         if previous is not None and previous is not page and isinstance(previous, StudioPage):
             previous.page_deactivated()
         self.stack.setCurrentWidget(page)
+        # Belt and braces. The layer lives above the stack, so nothing Qt does
+        # to the pages can bury it - but a page that grows a native child (the
+        # 3-D view does) is the one case where the platform, not the layout,
+        # decides the order, so the layer is put back on top after every
+        # switch. Cheap: one call per page change, not per frame.
+        self.toasts.raise_()
         self.nav_bar.set_active(key)
         page.page_activated()
         if key in self._stale:
@@ -720,6 +930,18 @@ class StudioWindow(QMainWindow, BoundView):
             theme=self.viewmodel.theme.value,
         )
         return self.viewmodel.window_state(base)
+
+    def showEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming
+        """Maximised, however the window was asked to appear.
+
+        The 20 September decision is that this is the only supported way to
+        run the studio, so it is enforced where every path meets - `show()`,
+        `showNormal()` and a restored geometry alike - rather than only at
+        startup, where a later `show()` would have slipped past it.
+        """
+        super().showEvent(event)
+        if not self.isMaximized() and not self.isFullScreen():
+            self.showMaximized()
 
     def set_state_path(self, path) -> None:  # noqa: ANN001 - Path or None
         self._state_path = path

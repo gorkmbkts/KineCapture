@@ -250,6 +250,8 @@ class SearchProxy(QSortFilterProxyModel):
         # is the expensive one this class exists to avoid.
         self.setDynamicSortFilter(False)
         self._needle = ""
+        #: A second term every row must match as well, set by a filter control.
+        self._required = ""
 
     def sort(  # noqa: N802 - Qt naming
         self, column: int, order: Qt.SortOrder = Qt.SortOrder.AscendingOrder
@@ -269,10 +271,24 @@ class SearchProxy(QSortFilterProxyModel):
         # accumulate until an upgrade breaks something.
         self.invalidate()
 
+    def set_required(self, text: str) -> None:
+        """A second term every row must also match, for a chosen filter.
+
+        Kept apart from the search term so the two *narrow together* rather
+        than replacing each other: choosing a participant and then typing a
+        date must leave the rows that satisfy both, not the rows that satisfy
+        whichever was set last.
+        """
+        required = text.strip().casefold()
+        if required == self._required:
+            return
+        self._required = required
+        self.invalidate()
+
     def filterAcceptsRow(  # noqa: N802
         self, source_row: int, source_parent: QModelIndex
     ) -> bool:
-        if not self._needle:
+        if not self._needle and not self._required:
             return True
         model = self.sourceModel()
         # One call per row, not one per cell: the source keeps a joined,
@@ -280,7 +296,11 @@ class SearchProxy(QSortFilterProxyModel):
         haystack = model.data(
             model.index(source_row, 0, source_parent), SEARCH_ROLE
         )
-        return bool(haystack) and self._needle in haystack
+        if not haystack:
+            return False
+        if self._required and self._required not in haystack:
+            return False
+        return not self._needle or self._needle in haystack
 
 
 def configure_columns(  # noqa: ANN001

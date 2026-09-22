@@ -205,15 +205,17 @@ def test_recording_needs_a_project(config: AppConfig, monkeypatch) -> None:
     assert seen and "proje" in seen[0].headline.casefold()
 
 
-def test_an_empty_project_gets_a_participant_rather_than_a_dead_button(
+def test_an_empty_project_refuses_rather_than_inventing_a_participant(
     session: SessionService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Recording into an empty project creates its first participant.
+    """A recording never creates the person it is about.
 
-    This used to refuse, and the screen disabled the button to match. On a
-    real ZED that was a camera showing a live image with a record button that
-    did nothing and said nothing. There is no ambiguity to protect in an empty
-    project, so the participant is created and *named* instead.
+    This used to create the first participant rather than refuse, so a record
+    attempt answered "whose recording is this?" by itself. On 20 September
+    that produced a participant in a project the operator had not meant to
+    record into, inside a data folder a measurement script had left behind -
+    and the recording then failed anyway. Creating a participant is an action
+    on Projeler now.
     """
     import shutil
 
@@ -221,32 +223,28 @@ def test_an_empty_project_gets_a_participant_rather_than_a_dead_button(
     assert workspace is not None
     shutil.rmtree(workspace.participants_dir)
     workspace.participants_dir.mkdir()
+    session.select_participant("")
     viewmodel = CaptureViewModel(session)
     seen = []
     viewmodel.message.subscribe(seen.append)
     assert viewmodel.connect()
     try:
         choose_subject(viewmodel, monkeypatch)
-        assert viewmodel.start_recording() is True
-        participants = workspace.list_participants()
-        assert len(participants) == 1
-        code = participants[0].code
-        created = [m for m in seen if m.code == "participant_created"]
-        assert created, "the new participant has to be announced, not assumed"
-        # Named in the message, whatever the code allocator hands out - codes
-        # are never reused, so it is not necessarily P0001.
-        assert code in created[0].headline
-        # And the take really belongs to it.
-        assert viewmodel.target.value.participant_code == code
+        assert viewmodel.start_recording() is False
+        assert workspace.list_participants() == []
+        refused = [m for m in seen if m.code == "capture_refused"]
+        assert refused, "the refusal has to say what is missing"
+        assert "at\u0131l" in refused[-1].headline, refused[-1].headline
+        # And the screen has no target to show, because there is none.
+        assert not viewmodel.target.value.is_set
     finally:
-        viewmodel.stop_recording()
         viewmodel.disconnect()
 
 
-def test_an_unselected_participant_is_chosen_out_loud(
+def test_an_unselected_participant_is_asked_for_rather_than_guessed(
     session: SessionService, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With several to pick from, the one used is named so it can be corrected."""
+    """With several to pick from, the application picks none of them."""
     workspace = session.workspace
     assert workspace is not None
     workspace.create_participant()
@@ -259,13 +257,13 @@ def test_an_unselected_participant_is_chosen_out_loud(
     assert viewmodel.connect()
     try:
         choose_subject(viewmodel, monkeypatch)
-        assert viewmodel.start_recording() is True
-        defaulted = [m for m in seen if m.code == "capture_target_defaulted"]
-        assert defaulted, "a defaulted target must be visible, not silent"
-        assert defaulted[0].severity is Severity.WARNING
-        assert viewmodel.target.value.is_set
+        assert viewmodel.start_recording() is False
+        refused = [m for m in seen if m.code == "capture_refused"]
+        assert refused
+        assert session.selected_participant_id == ""
+        for participant in workspace.list_participants():
+            assert workspace.list_takes(participant.participant_id) == []
     finally:
-        viewmodel.stop_recording()
         viewmodel.disconnect()
 
 

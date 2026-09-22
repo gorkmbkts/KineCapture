@@ -231,13 +231,29 @@ def test_the_3d_view_paints_with_no_pose(qapp, tokens) -> None:
 
 
 def test_the_subject_panel_paints_with_no_candidates(qapp, tokens) -> None:
+    """Empty is explained, not blank - in both places it now lives.
+
+    The lists moved into their own window on 20 September, because the panel
+    is not allowed to scroll and those two lists are unbounded. So the panel
+    explains the empty state in its own words, and the window's list carries
+    the longer sentence once somebody opens it.
+    """
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
     panel = SubjectPanel(tokens)
     try:
         panel.show_candidates(())
         panel.show_questions(())
         render(panel, 320, 480)
-        # Empty is explained, not blank.
-        assert panel.candidate_box.count() > 1
+        assert panel.counts.text().strip()
+        assert not panel.open_people.isEnabled()
+
+        holders = [QWidget(), QWidget()]
+        boxes = [QVBoxLayout(holder) for holder in holders]
+        for box in boxes:
+            box.addStretch(1)
+        panel.attach_lists(*boxes)
+        assert boxes[0].count() > 1
     finally:
         panel.deleteLater()
 

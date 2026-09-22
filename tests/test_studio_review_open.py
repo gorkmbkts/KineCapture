@@ -212,14 +212,27 @@ def test_the_same_drag_after_loading_marks_the_dragged_range(page, version_a) ->
 
 # --------------------------------------------------------------- stale loads
 def test_a_slow_first_open_cannot_overwrite_the_second(page, version_a, version_b) -> None:
-    """A is asked for, then B before A answers. The screen must end up on B."""
+    """A is asked for, then B before A answers. The screen must end up on B.
+
+    Since 19 September A also *stops* rather than running to completion: the
+    open polls a cancellation flag between files, so asking for B does not
+    leave a second version being hashed in the background. Whether A ends by
+    being cancelled or by being discarded, the screen is on B either way, and
+    both endings are checked here.
+    """
+    from kinecapture.processing.review import Cancelled
+
     _open(page, version_a)
     _open(page, version_b)
     assert page.runner.outstanding == 2
     # A answers last, which is the ordering that used to win.
     work_a, done_a, _err_a = page.runner.pending.pop(0)
     page.runner.settle()
-    done_a(work_a())
+    try:
+        done_a(work_a())
+    except Cancelled:
+        # A noticed it had been superseded and stopped. Nothing to deliver.
+        pass
 
     assert page.viewmodel.directory == str(version_b)
     assert page.viewmodel.review is not None
@@ -242,7 +255,10 @@ def test_a_failed_open_offers_a_retry_and_disables_editing(page, tmp_path) -> No
     page.runner.settle()
     assert page.viewmodel.review is None
     assert page.viewmodel.open_error.value
-    assert page.retry_button.isVisible() or not page.isVisible()
-    assert page.retry_button.isVisibleTo(page)
+    # The way out lives on the preparation surface now, with the reason for
+    # the failure beside it, rather than on a transport row the editor is not
+    # showing.
+    assert page.surface.currentWidget() is page.loading
+    assert page.loading.retry_button.isVisibleTo(page.loading)
     assert page._editing_enabled is False
     assert page.timeline.tool is Tool.SCRUB

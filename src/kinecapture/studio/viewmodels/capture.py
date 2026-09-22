@@ -148,6 +148,9 @@ class CaptureViewModel:
             CaptureMetrics(), name="capture_metrics"
         )
         self.alerts: Observable[tuple[Alert, ...]] = Observable((), name="alerts")
+        #: The last refusal said out loud. Kept so the same sentence is not
+        #: raised on every attempt and every countdown tick.
+        self._last_refusal = ""
         self.anchor: Observable[Optional[SubjectAnchor]] = Observable(None, name="anchor")
         #: A sentence to draw *on the picture*. The window's message corner is
         #: the wrong place for somebody standing three metres away looking at
@@ -369,6 +372,21 @@ class CaptureViewModel:
         )
 
     # ---------------------------------------------------------------- target
+    def recording_target(self):  # noqa: ANN201 - RecordingTargetCheck | None
+        """Where this project's next raw recording would go, and whether it fits.
+
+        ``None`` when there is nothing to ask about yet: no project open, or no
+        camera service to ask which limit applies.
+        """
+        workspace = self._session.workspace
+        service = self.service.service
+        if workspace is None or service is None:
+            return None
+        try:
+            return service.check_recording_target(workspace)
+        except (KineCaptureError, OSError, ValueError):
+            return None
+
     def refresh_target(self) -> None:
         """Re-read who the next take belongs to, and who it could belong to."""
         self.target.set(self._session.target())
@@ -431,6 +449,22 @@ class CaptureViewModel:
                     f"Kamera {metrics.backend_dropped} kare bildirmedi.",
                 )
             )
+        target = self.recording_target()
+        if target is not None and not target.ok:
+            alerts.append(
+                Alert(
+                    "target_path",
+                    AlertLevel.ERROR,
+                    # Said before the button is pressed, not after the SDK
+                    # refuses. On 20 September the operator learned about it
+                    # from "Disk alanını ve hedef klasörün yazma iznini
+                    # kontrol edin" on a disk with 138 GB free.
+                    f"Bu projenin kayıt yolu kamera için fazla uzun "
+                    f"({target.length} karakter, sınır {target.limit}). "
+                    "Kayıt başlatılamaz.",
+                    "Veri klasörünü değiştir",
+                )
+            )
         if metrics.free_bytes and metrics.free_minutes < 10:
             alerts.append(
                 Alert(
@@ -479,6 +513,7 @@ class CaptureViewModel:
             self.message.emit(from_error(exc, headline="Kişi seçimi kaydedilemedi."))
             return False
         self.anchor.set(anchor)
+        self._clear_refusal()
         self.message.emit(
             Message(
                 headline="Kaydedilecek kişi seçildi.",
@@ -493,6 +528,7 @@ class CaptureViewModel:
 
     def clear_subject(self) -> None:
         self.service.clear_subject()
+        self._clear_refusal()
         self.anchor.set(None)
 
     # ----------------------------------------------------------- solo capture
@@ -517,6 +553,14 @@ class CaptureViewModel:
         Somebody standing in the frame cannot see which of two buttons is the
         right one, so start, cancel-the-countdown and stop are the same key.
         """
+        # A press is a fresh question, so it deserves a fresh answer. The
+        # de-duplication in :meth:`_refuse` exists to stop a refusal repeating
+        # once per countdown tick; it must not swallow the second deliberate
+        # press of "Kayda başla". Since the 21 September decision this warning
+        # is the *only* notification the Capture screen raises - everything
+        # else it used to say has gone to Araçlar - so it has to arrive every
+        # time somebody asks.
+        self._clear_refusal()
         if self.countdown.value:
             self.cancel_countdown()
             return False
@@ -588,7 +632,19 @@ class CaptureViewModel:
         broken on 16 September.
         """
         if self._session.workspace is None:
-            self._refuse("Önce bir proje açın.", "Projeler ekranından bir proje açın.")
+            self._refuse("Önce bir proje seçin.", "Projeler ekranından bir proje açın.")
+            return False
+        if not self._session.selected_participant_id:
+            # The same gate the navigation applies, applied again to the
+            # command itself. Space and F5 reach this without passing a
+            # button, and so does a countdown that was already running when
+            # the selection was cleared.
+            self._refuse(
+                "Kayıt için önce bir katılımcı seçin.",
+                "Projeler ekranından katılımcıyı seçin; kayıt o katılımcının "
+                "klasörüne yazılır.",
+                notice="Önce Projeler'den bir katılımcı seçin",
+            )
             return False
         if not self.service.is_connected:
             self._refuse("Önce kameraya bağlanın.", "Yakalama ekranında Bağlan'a basın.")
@@ -609,12 +665,21 @@ class CaptureViewModel:
         return True
 
     def _refuse(self, headline: str, detail: str = "", *, notice: str = "") -> None:
-        """Say no in two places: the message corner, and the picture itself.
+        """Say no once, in one place, and not again until something changes.
 
-        The second one matters because the person who has to act is standing in
-        front of the camera looking at themselves, not at the corner of the
-        screen.
+        It used to be said twice - as a message card *and* painted across the
+        picture - so an operator trying to click on themselves was told to do
+        so by a sentence sitting on top of the person they were meant to
+        click. The card is the one that stayed.
+
+        And once: a refusal raised on every attempt, or every frame of a
+        countdown, is the same sentence arriving over and over. The same
+        refusal is emitted again only after a different one has been, or after
+        something was recorded.
         """
+        if headline == self._last_refusal:
+            return
+        self._last_refusal = headline
         self.message.emit(
             Message(
                 headline=headline,
@@ -623,7 +688,13 @@ class CaptureViewModel:
                 code="capture_refused",
             )
         )
+        # Still emitted so anything listening knows a refusal happened; the
+        # screen no longer paints it over the picture.
         self.notice.emit((notice or headline, "warning"))
+
+    def _clear_refusal(self) -> None:
+        """The situation changed, so the next refusal is news again."""
+        self._last_refusal = ""
 
     # ------------------------------------------------------------- recording
     def start_recording(self) -> bool:
@@ -639,6 +710,7 @@ class CaptureViewModel:
         session = self._current_session(workspace)
         if session is None:
             return False
+        self._clear_refusal()
         try:
             self.service.start_recording(workspace, session)
         except (KineCaptureError, OSError, RuntimeError) as exc:
@@ -648,60 +720,41 @@ class CaptureViewModel:
         return True
 
     def _current_session(self, workspace):  # noqa: ANN001, ANN202
-        """The open session for the target participant, creating what is missing.
+        """The open session for the **chosen** participant.
 
-        The participant is never *silently* guessed: a selection made on
-        Projeler always wins, and when there is no selection the one that gets
-        used is announced. What this will not do is refuse to record, which is
-        what left a connected camera with a dead button.
+        There is no guessing left here. Creating a participant on the operator's
+        behalf, and falling back to the first one in the list, were both ways of
+        answering "whose recording is this?" without asking - and the answer is
+        written into a folder name that nothing later corrects. On 20 September
+        a participant was created by a failed record attempt, in a project the
+        operator had not meant to record into at all.
+
+        Choosing and creating a participant are explicit actions on Projeler
+        now. This refuses, and says where to go.
         """
         try:
-            participants = list(workspace.list_participants())
-            if not participants:
-                # An empty project has no ambiguity to protect: make the first
-                # participant rather than sending the operator away mid-shot.
-                participant = workspace.create_participant(
-                    created_by_user_id=(
-                        self._session.user.user_id if self._session.user else ""
-                    )
-                )
-                self._session.select_participant(participant.participant_id)
-                self.refresh_target()
-                self.message.emit(
-                    Message(
-                        headline=f"Katılımcı oluşturuldu: {participant.code}",
-                        severity=Severity.INFO,
-                        detail=(
-                            "Projede katılımcı yoktu; kayıt bu katılımcıya "
-                            "yazılacak. Kod proje içinde anonim ve değişmezdir."
-                        ),
-                        code="participant_created",
-                    )
-                )
-                participants = [participant]
             selected = self._session.selected_participant_id
-            participant = next(
-                (p for p in participants if p.participant_id == selected), None
-            )
+            participant = None
+            if selected:
+                participant = next(
+                    (
+                        p
+                        for p in workspace.list_participants()
+                        if p.participant_id == selected
+                    ),
+                    None,
+                )
             if participant is None:
-                participant = participants[0]
-                self._session.select_participant(participant.participant_id)
-                self.refresh_target()
-                if len(participants) > 1:
-                    # Several to choose from and none chosen: say which one is
-                    # being used, loudly enough to be corrected.
-                    self.message.emit(
-                        Message(
-                            headline=f"Kayıt hedefi: {participant.code}",
-                            severity=Severity.WARNING,
-                            detail=(
-                                "Katılımcı seçilmemişti; listedeki ilki kullanıldı. "
-                                "Başkasına kaydetmek için Projeler ekranından "
-                                "katılımcıyı seçip yeniden başlatın."
-                            ),
-                            code="capture_target_defaulted",
-                        )
-                    )
+                self._refuse(
+                    "Kayıt için önce bir katılımcı seçin.",
+                    detail=(
+                        "Projeler ekranından katılımcıyı seçin ya da yeni bir "
+                        "katılımcı oluşturun. Kayıt o katılımcının klasörüne "
+                        "yazılır ve sonradan taşınmaz."
+                    ),
+                    notice="Önce Projeler'den bir katılımcı seçin",
+                )
+                return None
             open_sessions = [
                 s
                 for s in workspace.list_sessions(participant.participant_id)

@@ -1,7 +1,7 @@
 ---
 type: hub
 status: current
-updated: 2026-09-18
+updated: 2026-09-21
 aliases:
   - KineCapture Wiki
 tags:
@@ -17,9 +17,19 @@ kaynağıdır; bu wiki kanıtı bulmayı ve bağlamı küçük tutmayı sağlar.
 
 ## Şimdi
 
+- **21 Eylül güncel kapsam:** [Kullanıcı GUI kararları](decisions/studio-gui-user-revision-2026-09-21.md) · [Claude görev promptu](../promts/CLAUDE_STUDIO_GUI_USER_REVISION_PROMPT_2026-09-21.md). Prompt hazır; uygulama ve görsel kabul açık. Eski açık işlere otomatik dönülmeyecek.
+
+- [Kayıt hatası, kişi kaybı ve yeni GUI kararları](audits/capture-tracking-gui-issues-2026-09-20.md)
+- [Önceki Claude kayıt/takip/GUI görevi](../promts/CLAUDE_CAPTURE_TRACKING_GUI_REPAIR_PROMPT_2026-09-20.md)
+- [GUI kabulü yeniden açık — denetim ve nedenler](audits/studio-gui-acceptance-audit-2026-09-20.md)
+- [GUI düzeltmesi — yeni karar ve fikir haritası](decisions/studio-gui-repair-2026-09-20.md)
+- [Önceki Claude düzeltme görevi](../promts/CLAUDE_STUDIO_GUI_ACCEPTANCE_REPAIR_PROMPT_2026-09-20.md)
 - [Güncel durum](../MEMORY_INDEX.md)
 - [Açık sorular](open-questions.md)
 - [18 Eylül canlı ZED doğrulaması](experiments/2026-09-18-live-zed.md)
+- [Studio GUI — onaylı tasarım](decisions/studio-gui-refinement-2026-09-19.md)
+- [Studio GUI — fikir haritası ve gerekçeler](decisions/studio-gui-design-map-2026-09-19.md)
+- [Claude GUI faz planı ve uygulama görevi](../promts/CLAUDE_STUDIO_GUI_FINAL_REFINEMENT_PROMPT_2026-09-19.md)
 
 ## Sistemi anla
 

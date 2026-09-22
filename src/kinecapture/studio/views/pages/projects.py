@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Optional
 
 from PySide6.QtCore import Qt
+from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -37,6 +38,7 @@ from kinecapture.studio.theme import ThemeTokens
 from kinecapture.studio.viewmodels.navigation import Destination
 from kinecapture.studio.viewmodels.projects import ProjectsViewModel
 
+from .. import iconset
 from ..models import ROW_ROLE, Column, RowTableModel, SearchProxy, configure_columns
 from ..widgets import ElidedLabel, label, separator
 from .base import StudioPage
@@ -252,9 +254,29 @@ class ProjectsPage(StudioPage):
         self.search = QLineEdit()
         self.search.setPlaceholderText("Proje, katılımcı veya oturum ara")
         self.search.setClearButtonEnabled(True)
-        # Capped: a search box stretched across 1900 pixels is not easier to
-        # type into, it is just the widest thing on the screen.
-        self.search.setMaximumWidth(420)
+        self.search.setAccessibleName("Proje, katılımcı ve oturum araması")
+        self.search.setToolTip(
+            "Aşağıdaki üç listeyi birlikte daraltır: proje adı, katılımcı kodu "
+            "ve oturum tarihi."
+        )
+        # A magnifier inside the field, so what the box is for is legible
+        # before anything is typed into it and without a second caption.
+        self.search.addAction(
+            iconset.icon("search", tokens, size=tokens.metric("KcIconSize")),
+            QLineEdit.ActionPosition.LeadingPosition,
+        )
+        # Wide enough for the placeholder to be read *whole* - measured from
+        # the placeholder itself rather than guessed, because an explanation
+        # that is elided at its end explains nothing - and for a typed query
+        # not to scroll inside a slot narrower than the words offering it.
+        # Still capped: a search box stretched across 1900 pixels is not
+        # easier to type into, it is just the widest thing on the screen.
+        hint = QFontMetrics(self.search.font()).horizontalAdvance(
+            self.search.placeholderText()
+        )
+        self.search.setMinimumWidth(min(560, hint + 96))
+        self.search.setMaximumWidth(560)
+        self.search.setMinimumHeight(tokens.metric("KcControlHeightLarge"))
         self.new_project_button = QPushButton("Yeni proje")
         self.new_project_button.setProperty("kcVariant", "primary")
         self.new_participant_button = QPushButton("Katılımcı ekle")
@@ -264,8 +286,26 @@ class ProjectsPage(StudioPage):
             "Seçili projeyi ve içindeki bütün kayıtları kalıcı olarak siler."
         )
         self.delete_project_button.setEnabled(False)
+        # Deliberately *not* the "quiet" variant. Quiet draws no surface and
+        # no border, so beside three real buttons it read as a word somebody
+        # had left in the row rather than as something to press. It keeps the
+        # neutral colour - it is not a primary action and not a dangerous one
+        # - but it now has the same height, surface and border as its
+        # neighbours.
         self.refresh_button = QPushButton("Yenile")
-        self.refresh_button.setProperty("kcVariant", "quiet")
+        self.refresh_button.setIcon(
+            iconset.icon("refresh", tokens, size=tokens.metric("KcIconSize"))
+        )
+        self.refresh_button.setToolTip("Listeleri diskten yeniden okur.")
+        # One button family: the same height for all four, so the row reads as
+        # a row rather than as four differently sized things.
+        for button in (
+            self.new_participant_button,
+            self.delete_project_button,
+            self.refresh_button,
+            self.new_project_button,
+        ):
+            button.setMinimumHeight(tokens.metric("KcControlHeightLarge"))
         actions.addWidget(self.search)
         actions.addStretch(1)
         actions.addWidget(self.new_participant_button)

@@ -62,50 +62,162 @@ class JobState(str, Enum):
         return self in (JobState.RUNNING, JobState.PAUSED, JobState.QUEUED)
 
 
-#: What each issue code means in a sentence, for the screen to show instead of
-#: the code. An unmapped code is shown verbatim rather than glossed over.
-ISSUE_TEXT = {
-    "source_frame_count_mismatch": (
-        "Dosya başlığındaki kare sayısı ile okunan kare sayısı farklı."
+class IssueAxis(str, Enum):
+    """Which question an issue is an answer to.
+
+    They were all one question until 20 September: a version that matched 1473
+    of 1475 source frames and an informational note about when the athlete was
+    chosen produced the same sentence - "Bu sürümün kaynak kapsamı
+    doğrulanamadı" - as a version with a real hole in it. Meanwhile the thing
+    that was actually wrong with that recording, the person being tracked in
+    622 frames out of 1473, was not mentioned at all.
+    """
+
+    #: Frames of the raw recording that could not be found again or matched.
+    SOURCE = "source"
+    #: Timestamp quality: gaps, duplicates, ordering.
+    TIMING = "timing"
+    #: Whether the chosen person was found and held.
+    SUBJECT = "subject"
+    #: The preview video. Never affects the data.
+    PROXY = "proxy"
+    #: Something worth recording that took nothing away.
+    NOTE = "note"
+    #: A code this build has never heard of. Its own axis so that no filter
+    #: can quietly drop it: an unrecognised problem is still a problem.
+    UNKNOWN = "unknown"
+
+
+class IssueWeight(str, Enum):
+    """How much an issue costs the person about to use the version."""
+
+    #: Recorded, nothing missing. Does not make a version "unverified".
+    NOTE = "note"
+    #: Something is genuinely incomplete; the version is still usable.
+    CAUTION = "caution"
+    #: The version could not be published at all.
+    BLOCKING = "blocking"
+
+
+@dataclass(frozen=True)
+class IssueMeaning:
+    """One issue code, in a sentence, on one axis, with a weight."""
+
+    text: str
+    axis: IssueAxis = IssueAxis.NOTE
+    weight: IssueWeight = IssueWeight.CAUTION
+
+
+#: The contract. An unmapped code is shown verbatim, on no axis, and weighed as
+#: a caution - an unknown problem is never rounded down to harmless.
+ISSUE_CATALOGUE: dict[str, IssueMeaning] = {
+    "source_frame_count_mismatch": IssueMeaning(
+        "Dosya başlığındaki kare sayısı ile okunan kare sayısı farklı.",
+        IssueAxis.SOURCE,
+        IssueWeight.CAUTION,
     ),
-    "capture_frames_unmatched": (
-        "Kayıt sırasındaki bazı kareler ham kaynakta eşleştirilemedi."
+    "capture_frames_unmatched": IssueMeaning(
+        "Kayıt sırasındaki bazı kareler ham kaynakta eşleştirilemedi.",
+        IssueAxis.SOURCE,
+        IssueWeight.CAUTION,
     ),
-    "source_capture_timestamp_unmatched_or_ambiguous": (
-        "Bazı karelerin zaman damgası kayıt indeksiyle birebir eşleşmedi."
+    "source_empty": IssueMeaning(
+        "Kaynaktan hiç kare okunamadı.", IssueAxis.SOURCE, IssueWeight.BLOCKING
     ),
-    "subject_anchor_unresolved": (
-        "Seçilen kişi o karede tek başına bulunamadı; kişi ataması yapılmadı."
+    "source_capture_timestamp_unmatched_or_ambiguous": IssueMeaning(
+        "Bazı karelerin zaman damgası kayıt indeksiyle birebir eşleşmedi.",
+        IssueAxis.TIMING,
+        IssueWeight.CAUTION,
     ),
-    "subject_anchor_outside_source": (
-        "Seçim, ham kaynakta bulunmayan bir zaman damgasına işaret ediyor."
+    "capture_timestamp_duplicated": IssueMeaning(
+        "Kamera iki kareye aynı mikrosaniyeyi verdi; kareler sırayla eşleştirildi.",
+        IssueAxis.TIMING,
+        # Resolved by acquisition order, and recorded so it can be checked.
+        # Nothing was dropped, so this never made a version incomplete.
+        IssueWeight.NOTE,
     ),
-    "capture_timestamp_duplicated": (
-        "Kamera iki kareye aynı mikrosaniyeyi verdi; kareler sırayla eşleştirildi."
+    "source_timestamp_gap": IssueMeaning(
+        "Kaynakta zaman damgası boşluğu var.", IssueAxis.TIMING, IssueWeight.CAUTION
     ),
-    "subject_anchor_before_recording": (
-        "Kişi seçimi kayıt başlamadan önce yapılmış; ilk kareye uygulandı."
+    "source_timestamp_non_monotonic": IssueMeaning(
+        "Kaynakta zaman damgası geriye gitti.", IssueAxis.TIMING, IssueWeight.CAUTION
     ),
-    "review_proxy_unavailable": (
-        "Önizleme videosu üretilemedi; iskelet ve veriler etkilenmedi."
+    "source_position_discontinuity": IssueMeaning(
+        "Kaynak kare sırası kesintili.", IssueAxis.TIMING, IssueWeight.CAUTION
     ),
-    "review_proxy_desynchronised": (
-        "Önizleme videosunun kare sayısı sürümle uyuşmuyor."
+    "subject_anchor_unresolved": IssueMeaning(
+        "Seçilen kişi o karede tek başına bulunamadı; kişi ataması yapılmadı.",
+        IssueAxis.SUBJECT,
+        IssueWeight.CAUTION,
+    ),
+    "subject_anchor_outside_source": IssueMeaning(
+        "Seçim, ham kaynakta bulunmayan bir zaman damgasına işaret ediyor.",
+        IssueAxis.SUBJECT,
+        IssueWeight.CAUTION,
+    ),
+    "subject_anchor_before_recording": IssueMeaning(
+        "Kişi seçimi kayıt başlamadan önce yapılmış; ilk kareye uygulandı.",
+        IssueAxis.SUBJECT,
+        # Applying the operator's own choice to the first frame is what was
+        # meant. Nothing is missing and nothing was guessed.
+        IssueWeight.NOTE,
+    ),
+    "review_proxy_unavailable": IssueMeaning(
+        "Önizleme videosu üretilemedi; iskelet ve veriler etkilenmedi.",
+        IssueAxis.PROXY,
+        IssueWeight.NOTE,
+    ),
+    "review_proxy_desynchronised": IssueMeaning(
+        "Önizleme videosunun kare sayısı sürümle uyuşmuyor.",
+        IssueAxis.PROXY,
+        IssueWeight.CAUTION,
     ),
     # Written by versions produced before the code was split in two. Kept so
     # an older job file still reads as a sentence instead of as a code.
-    "review_proxy_incomplete": "Önizleme videosu eksik üretildi.",
-    "source_empty": "Kaynaktan hiç kare okunamadı.",
-    "requested_depth_missing": "İstenen derinlik bazı karelerde üretilemedi.",
-    "calibration_invalid_or_missing": "Kamera kalibrasyonu okunamadı.",
-    "source_timestamp_gap": "Kaynakta zaman damgası boşluğu var.",
-    "source_timestamp_non_monotonic": "Kaynakta zaman damgası geriye gitti.",
-    "source_position_discontinuity": "Kaynak kare sırası kesintili.",
+    "review_proxy_incomplete": IssueMeaning(
+        "Önizleme videosu eksik üretildi.", IssueAxis.PROXY, IssueWeight.CAUTION
+    ),
+    "requested_depth_missing": IssueMeaning(
+        "İstenen derinlik bazı karelerde üretilemedi.",
+        IssueAxis.SOURCE,
+        IssueWeight.CAUTION,
+    ),
+    "calibration_invalid_or_missing": IssueMeaning(
+        "Kamera kalibrasyonu okunamadı.", IssueAxis.SOURCE, IssueWeight.CAUTION
+    ),
 }
+
+#: An unknown code. Named rather than inlined so every reader treats one the
+#: same way, and so the way is visible.
+UNKNOWN_ISSUE = IssueMeaning("", IssueAxis.UNKNOWN, IssueWeight.CAUTION)
+
+
+def issue_meaning(code: str) -> IssueMeaning:
+    known = ISSUE_CATALOGUE.get(code)
+    if known is not None:
+        return known
+    return IssueMeaning(code, UNKNOWN_ISSUE.axis, UNKNOWN_ISSUE.weight)
+
+
+def issues_on(codes, axis: IssueAxis) -> tuple[str, ...]:
+    """Which of ``codes`` speak to one axis."""
+    return tuple(code for code in codes if issue_meaning(code).axis is axis)
+
+
+def material_issues(codes) -> tuple[str, ...]:
+    """Those that actually took something away. Notes are not among them."""
+    return tuple(
+        code for code in codes if issue_meaning(code).weight is not IssueWeight.NOTE
+    )
+
+
+#: Backwards-compatible view of the catalogue, kept because several screens and
+#: tests read it directly.
+ISSUE_TEXT = {code: meaning.text for code, meaning in ISSUE_CATALOGUE.items()}
 
 
 def describe_issue(code: str) -> str:
-    return ISSUE_TEXT.get(code, code)
+    return issue_meaning(code).text or code
 
 
 @dataclass(frozen=True)

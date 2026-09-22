@@ -262,12 +262,20 @@ class ProjectsViewModel:
         except (KineCaptureError, OSError) as exc:
             self.message.emit(from_error(exc, headline="Katılımcı eklenemedi."))
             return False
+        # Creating one *is* choosing it: the operator asked for this person to
+        # exist, in this project, now. What was removed on 20 September is the
+        # opposite - a participant being created because a recording needed a
+        # folder and nobody had said which.
+        self._session.select_participant(participant.participant_id)
         self.refresh_index(force=True)
         self.message.emit(
             Message(
-                headline=f"Katılımcı eklendi: {participant.code}",
+                headline=f"Katılımcı eklendi ve seçildi: {participant.code}",
                 severity=Severity.INFO,
-                detail="Kod proje içinde anonim ve değişmezdir.",
+                detail=(
+                    "Kod proje içinde anonim ve değişmezdir. Kayıt bu "
+                    "katılımcının klasörüne yazılır."
+                ),
             )
         )
         return True

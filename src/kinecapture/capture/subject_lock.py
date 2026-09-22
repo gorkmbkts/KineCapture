@@ -126,6 +126,11 @@ class AssociationPolicy:
     #: the lock gives up on an id the tracker is still reporting. One frame is
     #: noise; on 16 September one frame cost 1638.
     contradiction_frames: int = 3
+    #: Consecutive frames of agreement before an ambiguous lock resumes on the
+    #: id it was already on. Longer than ``contradiction_frames`` on purpose:
+    #: giving up is cheap and reversible, resuming writes somebody's skeleton
+    #: into the ground truth. Half a second at 60 fps.
+    recovery_frames: int = 30
     #: Weights of the three evidence terms; they sum to 1.
     weight_position: float = 0.4
     weight_limb_ratio: float = 0.4
@@ -269,6 +274,37 @@ def _vertical_axis_index(spec: SkeletonSpec) -> int:
     return {"x": 0, "y": 1, "z": 2}.get((spec.vertical_axis or "y").lower(), 1)
 
 
+#: Below this, a similarity score is treated as "a different person".
+_CONTRADICTION_SCORE = 0.3
+
+
+def _proportions_contradict(limb: float, stature: float) -> bool:
+    """Do these two scores say the tracker is now reporting somebody else?
+
+    Only the limb term answers that. Limb lengths are bones: they do not
+    change when a person bends, and they are what tells one body from
+    another. ``stature`` here is the vertical extent of the joint cloud - a
+    *posture* measurement wearing an identity measurement's name. An athlete
+    leaning forward shortens it by far more than the 15% that takes the score
+    to zero.
+
+    Measured on the 20 September take: as the athlete bent over, the limb
+    score held at **0.992** for every frame while the stature score slid from
+    0.64 to 0.25. Three frames under the threshold and the lock declared an
+    evidence conflict at frame 630; the remaining 843 frames were recorded
+    with no subject at all. Nothing about the person had changed.
+
+    So stature can only speak when there is no proportion evidence at all -
+    fewer than three shared segments, which is what ``similarity`` reports as
+    NaN. Both terms still carry their weights in re-association *scoring*,
+    where ranking candidates is a different question from vetoing the one the
+    tracker is already reporting.
+    """
+    if math.isfinite(limb):
+        return limb < _CONTRADICTION_SCORE
+    return math.isfinite(stature) and stature < _CONTRADICTION_SCORE
+
+
 def _is_resolved(body: BodyPose) -> bool:
     """Whether the tracker says it has actually resolved this body.
 
@@ -380,6 +416,9 @@ class SubjectLock:
             "lost_frames": 0,
             "ambiguous_frames": 0,
             "reassociations": 0,
+            #: Times the lock resumed on the id it already held, after an
+            #: ambiguous stretch. Never a move to a different body.
+            "recoveries": 0,
             "manual_confirmations": 0,
             "multi_person_frames": 0,
             "unexpected_id_reuse": 0,
@@ -392,6 +431,8 @@ class SubjectLock:
         # available, and it is the one that keeps a similarly built trainer out
         # of the subject's data.
         self._covisible_ids: set[int] = set()
+        #: Consecutive agreeing frames while ambiguous. See :meth:`_try_recover`.
+        self._recovery_run = 0
 
     # ------------------------------------------------------------ selection
     @property
@@ -415,6 +456,7 @@ class SubjectLock:
         self.tracking_id = int(body.tracking_id)
         self.state = SubjectLockState.LOCKED
         self._contradiction_run = 0
+        self._recovery_run = 0
         if self.spec is not None:
             # Only a resolved measurement is adopted. Taking the tracker's
             # first, half-converged frame would define the subject as a
@@ -454,6 +496,8 @@ class SubjectLock:
         previous = self.tracking_id
         self.tracking_id = int(body.tracking_id)
         self.state = SubjectLockState.LOCKED
+        self._contradiction_run = 0
+        self._recovery_run = 0
         if self.spec is not None:
             self.signature = self.signature.blend(
                 SubjectSignature.measure(body, self.spec)
@@ -488,6 +532,8 @@ class SubjectLock:
         self.signature = SubjectSignature()
         self._last_seen_position = None
         self._last_seen_timestamp_ns = None
+        self._contradiction_run = 0
+        self._recovery_run = 0
         self._selection = {}
 
     # -------------------------------------------------------------- update
@@ -513,6 +559,11 @@ class SubjectLock:
         present = {int(body.tracking_id): body for body in bodies}
         self._seen_ids.update(present)
         if self.state is SubjectLockState.AMBIGUOUS:
+            recovered = self._try_recover(
+                present, frame_index=frame_index, timestamp_ns=timestamp_ns
+            )
+            if recovered is not None:
+                return recovered
             self._counters["ambiguous_frames"] += 1
             return FrameAssociation(SubjectLockState.AMBIGUOUS, None, float("nan"), "awaiting_confirmation")
 
@@ -541,9 +592,19 @@ class SubjectLock:
                 and _is_resolved(body)
             ):
                 limb, stature = self.signature.similarity(SubjectSignature.measure(body, self.spec))
-                contradiction |= any(math.isfinite(v) and v < 0.3 for v in (limb, stature))
+                contradiction |= _proportions_contradict(limb, stature)
             if contradiction:
                 self._contradiction_run += 1
+                # The subject's own id is on screen, so "when did we last see
+                # it" is now, whatever the evidence says about the pose. Not
+                # updating it here let ``gap`` grow past ``give_up_seconds``,
+                # at which point the first line of this block made every later
+                # frame a contradiction on its own - a disagreement that fed
+                # itself. Refresh only the sighting time. Neither the position
+                # nor the signature may learn from a rejected frame: remembering
+                # an impossible jump would accept it on the next frame and
+                # reject the real subject returning to the original position.
+                self._last_seen_timestamp_ns = int(timestamp_ns)
                 if self._contradiction_run < self.policy.contradiction_frames:
                     # One frame that disagrees is tracker noise, not a person
                     # swapping places with another. The frame is still recorded
@@ -781,6 +842,79 @@ class SubjectLock:
             )
         scored.sort(key=lambda item: item.score, reverse=True)
         return scored
+
+    # ------------------------------------------------------------ recovery
+    def _try_recover(
+        self, present: dict, *, frame_index: int, timestamp_ns: int
+    ) -> Optional[FrameAssociation]:
+        """Resume an ambiguous lock, but only on the id it was already on.
+
+        Ambiguity used to be terminal. Once set, :meth:`update` returned on its
+        first line and never looked at a body again, so the only way back was
+        :meth:`confirm` - an operator pressing a button. Offline processing has
+        no operator, and on 20 September that turned one bent-over moment into
+        843 frames of nothing, with the subject visible and carrying its own
+        tracker id in every single one of them.
+
+        Resuming is not the same as choosing. This will only ever return to
+        **the tracker id the lock already held**, never to another body, and
+        only when:
+
+        * that id is present and the tracker says it is resolved;
+        * it was never seen in the same frame as the subject (an id that was is
+          another person, by definition, and that rule is not relaxed here);
+        * its proportions agree with the subject's signature;
+        * and all of that holds for :attr:`AssociationPolicy.recovery_frames`
+          consecutive frames, so a single agreeable frame cannot do it.
+
+        Anything else leaves the state exactly as it was: ambiguous, waiting
+        for a person, with the frames recorded as subject-absent.
+        """
+        body = present.get(self.tracking_id) if self.tracking_id is not None else None
+        if (
+            body is None
+            or self.tracking_id in self._covisible_ids
+            or not _is_resolved(body)
+            or not body.valid_joint_mask.any()
+        ):
+            self._recovery_run = 0
+            return None
+        if self.spec is not None and self.signature.is_usable:
+            limb, stature = self.signature.similarity(
+                SubjectSignature.measure(body, self.spec)
+            )
+            if _proportions_contradict(limb, stature):
+                self._recovery_run = 0
+                return None
+
+        self._recovery_run += 1
+        if self._recovery_run < self.policy.recovery_frames:
+            self._counters["ambiguous_frames"] += 1
+            return FrameAssociation(
+                SubjectLockState.AMBIGUOUS, None, float("nan"), "recovery_pending"
+            )
+
+        self._recovery_run = 0
+        self._contradiction_run = 0
+        self.state = SubjectLockState.LOCKED
+        self._remember(body, timestamp_ns)
+        self._counters["recoveries"] += 1
+        self._counters["locked_frames"] += 1
+        self._log(
+            "subject_recovered_same_id",
+            frame_index=frame_index,
+            timestamp_ns=timestamp_ns,
+            new_tracker_id=self.tracking_id,
+            method="auto_same_id",
+            reason=(
+                f"Seçili kişinin tracker kimliği {self.policy.recovery_frames} "
+                "kare boyunca kesintisiz ve uyumlu göründü; kilit aynı kimlikte "
+                "sürdürüldü. Başka bir bedene geçilmedi."
+            ),
+        )
+        return FrameAssociation(
+            SubjectLockState.LOCKED, self.tracking_id, 1.0, "recovered_same_id"
+        )
 
     # ------------------------------------------------------------- helpers
     def _remember(self, body: BodyPose, timestamp_ns: int) -> None:

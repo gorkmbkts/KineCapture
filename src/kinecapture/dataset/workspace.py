@@ -44,7 +44,12 @@ from typing import Any, Iterable, Iterator, Optional
 
 from kinecapture import ANNOTATION_SCHEMA_VERSION
 from kinecapture.core.errors import StorageError, ValidationError
-from kinecapture.core.ids import is_safe_id, participant_code, utc_now_iso
+from kinecapture.core.ids import (
+    is_safe_id,
+    participant_code,
+    timestamped_id,
+    utc_now_iso,
+)
 from kinecapture.core.jsonio import read_json_mapping, write_json
 from kinecapture.core.paths import ensure_dir, long_path, path_exists
 from kinecapture.core.logging import get_logger
@@ -85,6 +90,11 @@ RAW_INDEX_FILE = "index.jsonl"
 RAW_MANIFEST_FILE = "raw_capture_manifest.json"
 PROXY_VIDEO_FILE = "proxy.mp4"
 NATIVE_RECORDING_FILE = "capture.svo2"
+
+#: Widths of the generated identifiers, so the deepest path in a project can be
+#: measured before anything is written there. Derived, never hard-coded.
+_SESSION_ID_LENGTH = len(timestamped_id("ses"))
+_TAKE_ID_LENGTH = len(timestamped_id("take"))
 
 
 @dataclass(frozen=True)
@@ -296,6 +306,24 @@ class ProjectWorkspace:
     def take_dir(self, participant_id: str, session_id: str, take_id: str) -> Path:
         self._guard_id(take_id, "take_id")
         return self.session_dir(participant_id, session_id) / "takes" / take_id
+
+    def longest_raw_path(self) -> Path:
+        """The deepest raw file this project can ever hold.
+
+        Every identifier in the layout has a fixed width - participant codes
+        are ``P0001``, session and take ids are timestamps plus four hex
+        characters - so the longest path a project can produce is known from
+        its root alone, before anything is recorded into it. The ZED SDK opens
+        this file from a plain path string, so the answer decides whether a
+        recording can start at all.
+        """
+        return TakePaths(
+            self.take_dir(
+                "P" + "0" * 4,
+                "s" * _SESSION_ID_LENGTH,
+                "t" * _TAKE_ID_LENGTH,
+            )
+        ).native_recording
 
     def take_paths(self, take: Take) -> TakePaths:
         return TakePaths(

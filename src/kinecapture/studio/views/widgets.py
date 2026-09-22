@@ -11,9 +11,10 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QRect, QSize, Qt, Signal
 from PySide6.QtGui import QFontMetrics
 from PySide6.QtWidgets import (
+    QLayout,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -33,8 +34,13 @@ from . import iconset
 #: Context/message state -> (stylesheet status value, icon key, spoken word).
 #: Colour is never the only carrier: every state also has an icon and a word,
 #: so the interface stays readable for someone who cannot separate the hues.
+#:
+#: ``OK`` carries no icon. A green tick beside the user, the project, the data
+#: folder and the disk said only "still fine", four times, on every screen -
+#: decoration that made the two states worth noticing harder to spot. The word
+#: is kept for the accessible name; what disappears is the drawn mark.
 _STATE_PRESENTATION = {
-    ContextState.OK: ("live", "ok", "tamam"),
+    ContextState.OK: ("live", "", "tamam"),
     ContextState.WARNING: ("warning", "warning", "uyarı"),
     ContextState.ERROR: ("error", "error", "hata"),
     ContextState.UNKNOWN: ("neutral", "info", "bilinmiyor"),
@@ -159,9 +165,21 @@ class ContextField(QWidget):
             "neutral": "KcTextMuted",
         }[status]
         size = self._tokens.metric("KcIconSize")
-        self._icon.setPixmap(
-            iconset.pixmap(icon_key, self._tokens.colour(colour_token), size, self.devicePixelRatioF())
-        )
+        if icon_key:
+            self._icon.setPixmap(
+                iconset.pixmap(
+                    icon_key,
+                    self._tokens.colour(colour_token),
+                    size,
+                    self.devicePixelRatioF(),
+                )
+            )
+            self._icon.show()
+        else:
+            # A state with nothing to report draws nothing and gives its width
+            # back, rather than reserving room for a mark that never appears.
+            self._icon.clear()
+            self._icon.hide()
         self._key.setText(item.label)
         self._value.setProperty("kcRole", "mono" if item.numeric else "contextValue")
         self._value.setText(item.value)
@@ -367,11 +385,95 @@ class RecordingStrip(QWidget):
         return bool(self._status is not None and self._status.is_open)
 
 
+class FlowLayout(QLayout):
+    """Left to right, wrapping to the next line. Qt has no such layout.
+
+    Written because the alternative for a row of class buttons is a fixed
+    grid - which wastes the width when names are short and clips it when they
+    are long - or a scroll area, which the acceptance brief rules out.
+    """
+
+    def __init__(self, parent: Optional[QWidget] = None, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self._spacing = int(spacing)
+        self.setContentsMargins(0, 0, 0, 0)
+
+    def addItem(self, item) -> None:  # noqa: ANN001, N802 - Qt naming
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):  # noqa: ANN201, N802 - Qt naming
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):  # noqa: ANN201, N802 - Qt naming
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self) -> Qt.Orientations:  # noqa: N802 - Qt naming
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self) -> bool:  # noqa: N802 - Qt naming
+        return True
+
+    def heightForWidth(self, width: int) -> int:  # noqa: N802 - Qt naming
+        return self._lay(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect: QRect) -> None:  # noqa: N802 - Qt naming
+        super().setGeometry(rect)
+        self._lay(rect, apply=True)
+
+    def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:  # noqa: N802 - Qt naming
+        """Wide enough for the widest item, tall enough for one row.
+
+        The height matters: a layout that claims less than it draws gets less
+        than it needs, and Qt then puts the next widget on top of it. That is
+        what happened - the name field ended up two pixels over the hint under
+        it, and the Ekle button ten.
+        """
+        size = QSize(0, 0)
+        for item in self._items:
+            hint = item.sizeHint()
+            size = QSize(
+                max(size.width(), hint.width()), max(size.height(), hint.height())
+            )
+        margins = self.contentsMargins()
+        return size + QSize(
+            margins.left() + margins.right(), margins.top() + margins.bottom()
+        )
+
+    def _lay(self, rect: QRect, *, apply: bool) -> int:
+        margins = self.contentsMargins()
+        x = rect.x() + margins.left()
+        y = rect.y() + margins.top()
+        right = rect.right() - margins.right()
+        line_height = 0
+        for item in self._items:
+            hint = item.sizeHint()
+            if x > rect.x() + margins.left() and x + hint.width() > right:
+                x = rect.x() + margins.left()
+                y += line_height + self._spacing
+                line_height = 0
+            if apply:
+                item.setGeometry(QRect(x, y, hint.width(), hint.height()))
+            x += hint.width() + self._spacing
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
+
 class MessageBar(QFrame):
     """The visible layer of a message, with "Ayrıntılar" holding the rest."""
 
     #: The key of an action the user pressed on this message.
     action_triggered = Signal(str)
+    #: Emitted when the card's content changed shape. Whoever positions it -
+    #: the toast layer - has to measure it again, or the part that grew is
+    #: drawn outside the rectangle it was given.
+    resized = Signal()
 
     def __init__(self, tokens: ThemeTokens, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -414,22 +516,16 @@ class MessageBar(QFrame):
         self._detail.setProperty("kcRole", "pageSubtitle")
         outer.addWidget(self._detail)
 
-        self._technical = QLabel()
-        self._technical.setProperty("kcRole", "mono")
-        self._technical.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse
-        )
-        self._technical.setWordWrap(True)
-        self._technical.hide()
-        outer.addWidget(self._technical)
-
         # What to do about it, next to the message that raised it. A message
         # saying "use the Verileri Hesapla screen" and leaving the user to find
         # the take again is a message that made them do the work twice.
-        self._actions = QHBoxLayout()
-        self._actions.setSpacing(tokens.metric("KcSpacingSm"))
+        #
+        # A wrapping row, not a fixed one. Four buttons in a 400-pixel card is
+        # about 380 pixels of text and padding, and a QHBoxLayout given less
+        # than that does not wrap or elide: it squeezes the buttons and each
+        # one clips its own label from both ends.
+        self._actions = FlowLayout(spacing=tokens.metric("KcSpacingSm"))
         self._actions.addWidget(self._details_button)
-        self._actions.addStretch(1)
         self._actions.addWidget(self._close_button)
         outer.addLayout(self._actions)
 
@@ -439,8 +535,14 @@ class MessageBar(QFrame):
     def _rebuild_actions(self, message: Message) -> None:
         for button in self._action_buttons:
             self._actions.removeWidget(button)
+            button.setParent(None)
             button.deleteLater()
         self._action_buttons.clear()
+        # Rebuilt in order: what to *do* first, then "Ayrıntılar", then
+        # "Kapat". The row wraps, so the order is the reading order rather
+        # than a fight over which edge each button keeps.
+        self._actions.removeWidget(self._details_button)
+        self._actions.removeWidget(self._close_button)
         for action in message.actions:
             button = QPushButton(action.label)
             button.setProperty("kcVariant", "primary" if action.primary else "quiet")
@@ -448,10 +550,16 @@ class MessageBar(QFrame):
             button.clicked.connect(
                 lambda _checked=False, key=action.key: self.action_triggered.emit(key)
             )
-            # Before the trailing stretch, so "Kapat" keeps the right edge and
-            # the things to *do* stay together on the left.
-            self._actions.insertWidget(self._actions.count() - 1, button)
+            _reserve_button_width(button)
+            self._actions.addWidget(button)
+            button.show()
             self._action_buttons.append(button)
+        for button in (self._details_button, self._close_button):
+            _reserve_button_width(button)
+            self._actions.addWidget(button)
+            button.setVisible(
+                button is not self._details_button or message.has_details
+            )
 
     def set_tokens(self, tokens: ThemeTokens) -> None:
         self._tokens = tokens
@@ -473,18 +581,18 @@ class MessageBar(QFrame):
         self._headline.setText(f"{word}: {message.headline}")
         self._detail.setText(message.detail)
         self._detail.setVisible(bool(message.detail))
-        self._technical.setText(message.technical_text())
-        self._details_button.setVisible(message.has_details)
-        self._technical.setVisible(self._details_open and message.has_details)
         self._rebuild_actions(message)
         self.setProperty("kcMessage", status)
         _restyle(self)
         self.show()
+        self.resized.emit()
 
     def clear(self) -> None:
         self._message = None
         self._details_open = False
-        self._technical.hide()
+        window = getattr(self, "_details_window", None)
+        if window is not None:
+            window.close()
         self.hide()
 
     @property
@@ -493,13 +601,67 @@ class MessageBar(QFrame):
 
     @property
     def details_visible(self) -> bool:
-        return self._technical.isVisible()
+        window = getattr(self, "_details_window", None)
+        return bool(window is not None and window.isVisible())
+
+    @property
+    def details_text(self) -> str:
+        window = getattr(self, "_details_window", None)
+        return window.text if window is not None else ""
 
     def _toggle_details(self) -> None:
-        self._details_open = not self._details_open
-        self._technical.setVisible(
-            self._details_open and self._message is not None and self._message.has_details
-        )
+        """Open the technical detail in a window of its own.
+
+        It used to unfold inside the card, and two things went wrong at once
+        on 20 September: the technical line is a list of issue codes with no
+        spaces, so a word-wrapping label could not break it and it ran off the
+        right edge; and the card's height had already been measured, so the
+        sentence above it was cut off at the bottom. A window has room for
+        both, and the card keeps the height it was measured at.
+        """
+        message = self._message
+        if message is None or not message.has_details:
+            return
+        window = getattr(self, "_details_window", None)
+        if window is None:
+            from .labelwindows import DetailWindow
+
+            # Parented to the window, not to the card. A card is transient -
+            # it fades out on a timer and deletes itself - and a dialog whose
+            # parent disappears underneath it is a crash waiting for the
+            # right timing.
+            window = DetailWindow(
+                "Bildirim ayrıntıları", self._tokens, self.window()
+            )
+            self._details_window = window
+        rows = [(word_for_severity(message.severity), message.headline)]
+        if message.detail:
+            rows.append(("AÇIKLAMA", message.detail))
+        if message.technical_text():
+            rows.append(("TEKNİK", message.technical_text()))
+        window.show_rows(rows)
+        self._details_open = True
+        window.show()
+        window.raise_()
+        window.activateWindow()
+
+
+def word_for_severity(severity: Severity) -> str:
+    """"Bilgi" / "Uyarı" / "Hata", the same word the card's headline carries."""
+    return _SEVERITY_PRESENTATION[severity][2].upper()
+
+
+def _reserve_button_width(button: QPushButton) -> None:
+    """Room for the label, in the font the button actually has.
+
+    ``QPushButton`` neither wraps nor elides: below the width its text needs
+    it draws the text centred and clips both ends, which is how
+    "Etiketlemeyi aç" reached a screenshot as "iketlemeyi a". The padding
+    allowance is deliberately generous - a button two pixels wider than its
+    text reads as a mistake, and one two pixels narrower loses a letter.
+    """
+    metrics = QFontMetrics(button.font())
+    button.setMinimumWidth(metrics.horizontalAdvance(button.text()) + 28)
 
 
 def _restyle(widget: QWidget) -> None:
@@ -516,6 +678,7 @@ def _restyle(widget: QWidget) -> None:
 
 __all__ = [
     "ContextField",
+    "FlowLayout",
     "ElidedLabel",
     "MessageBar",
     "RecordingStrip",

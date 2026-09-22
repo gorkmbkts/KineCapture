@@ -94,7 +94,12 @@ def test_a_clean_version_is_ready() -> None:
         ("ready", _version(subject_status="needs_subject_selection"), False),
         ("needs_subject", _version(subject_status="needs_subject_selection"), True),
         ("needs_subject", _version(), False),
+        # An unrecognised code counts as something missing: this build not
+        # knowing what it means is not evidence that it is harmless.
         ("unverified", _version(issues=("x",)), True),
+        # An informational note does not. It used to, which is how a note
+        # about when the athlete was chosen produced a coverage warning.
+        ("unverified", _version(issues=("subject_anchor_before_recording",)), False),
         ("unverified", _version(), False),
         ("annotated", _version(annotated=True), True),
         ("annotated", _version(), False),
@@ -300,8 +305,63 @@ def test_labelling_an_unverified_version_warns_first(project: Path) -> None:
     library.message.subscribe(seen.append)
     library.select(row)
     assert library.label()
-    assert seen and seen[0].code == "coverage_unverified"
-    assert "eksiksiz sayılmaz" in seen[0].detail
+    assert seen and seen[0].code == "coverage_incomplete"
+    # The headline names the axis and the detail carries the numbers, because
+    # one sentence used to cover a two-frame source gap and a recording whose
+    # athlete was tracked in 42% of its frames.
+    assert "kaynağın" in seen[0].headline
+    assert "Yeniden işleme" in seen[0].detail
+    assert seen[0].technical["eksik_bulgular"] == ["capture_frames_unmatched"]
+
+
+def test_a_purely_informational_note_is_not_a_coverage_warning(project: Path) -> None:
+    """The 20 September complaint, in one test.
+
+    ``subject_anchor_before_recording`` says the athlete was chosen a moment
+    before recording started and the choice was applied to the first frame -
+    exactly what was meant. Nothing is missing, and it used to raise the same
+    warning as a real hole.
+    """
+    job = project / "participants/P0001/sessions/ses_1/takes/take_1/derived/processing/run_a/job.json"
+    payload = json.loads(job.read_text(encoding="utf-8"))
+    payload["issues"] = ["subject_anchor_before_recording", "capture_timestamp_duplicated"]
+    job.write_text(json.dumps(payload), encoding="utf-8")
+
+    library = LibraryViewModel(_Session(project), runner=InlineRunner())
+    library.reload(force=True)
+    row = next(r for r in library.rows.value if r.run_id == "run_a")
+    seen = []
+    library.message.subscribe(seen.append)
+    library.select(row)
+
+    assert library.label()
+    assert seen == []
+    assert row.coverage_verified
+
+
+def test_a_version_that_lost_the_athlete_says_so_with_the_count(project: Path) -> None:
+    """The real 20 September numbers, through the real reader."""
+    job = project / "participants/P0001/sessions/ses_1/takes/take_1/derived/processing/run_a/job.json"
+    payload = json.loads(job.read_text(encoding="utf-8"))
+    payload["issues"] = []
+    payload["frames_processed"] = 1473
+    payload["coverage"] = {"capture_frames": 1473, "matched_frames": 1473}
+    payload["subject_coverage"] = {"frames": 1473, "tracked_frames": 622}
+    job.write_text(json.dumps(payload), encoding="utf-8")
+
+    library = LibraryViewModel(_Session(project), runner=InlineRunner())
+    library.reload(force=True)
+    row = next(r for r in library.rows.value if r.run_id == "run_a")
+    seen = []
+    library.message.subscribe(seen.append)
+    library.select(row)
+    assert library.label()
+
+    assert row.coverage_verified, "the source was complete; only the person was not"
+    assert row.subject_verified is False
+    assert seen and seen[0].code == "coverage_incomplete"
+    assert "kişi" in seen[0].headline
+    assert "622/1473" in seen[0].detail
 
 
 def test_labelling_nothing_selected_does_nothing(library: LibraryViewModel) -> None:

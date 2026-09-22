@@ -19,6 +19,7 @@ No Qt.
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
 
@@ -30,10 +31,15 @@ from kinecapture.processing.annotations import (
     JointStatus,
     MovementSample,
     Readiness,
+    RolesOrigin,
 )
 from kinecapture.studio.services.annotation_store import AnnotationStore
 from kinecapture.studio.services.messages import Message, Severity, from_error
-from kinecapture.studio.services.review import ReviewSession
+from kinecapture.studio.services.review import (
+    STAGE_TEXT,
+    LoadStage,
+    ReviewSession,
+)
 from kinecapture.studio.services.session import SessionService
 
 from .observable import Event, Observable
@@ -110,6 +116,12 @@ class ErrorRow:
     joint_status: JointStatus
     roles: tuple[str, ...]
     colour_index: int = -1
+    #: Whether these joints were inherited from the class or chosen for this
+    #: repetition. Carried onto the row because the screen has to be able to
+    #: say which it is - the record keeps them apart and the reader should
+    #: not have to open the file to find out.
+    roles_origin: RolesOrigin = RolesOrigin.UNKNOWN
+    note: str = ""
 
     @property
     def code(self) -> str:
@@ -122,6 +134,44 @@ class ErrorRow:
     @property
     def text(self) -> str:
         return self.error_label or "sınıf seçin"
+
+
+@dataclass(frozen=True)
+class LoadProgress:
+    """How far a version's open has got, and what it is doing.
+
+    ``fraction`` is ``None`` whenever nothing has measured one. That is not a
+    gap to be filled with a guess: the screen shows an indeterminate bar and
+    the stage's own sentence, which is the truth. The one stage with a real
+    denominator is the checksum walk, and it has one because the bytes on disk
+    were counted before it started.
+    """
+
+    stage: str = ""
+    text: str = ""
+    #: 0..1, or ``None`` when this stage cannot be measured.
+    fraction: Optional[float] = None
+    #: Seconds left, or ``None``. Quoted only once a rate has been observed
+    #: over enough work to mean something.
+    eta_s: Optional[float] = None
+    done: bool = False
+
+    @property
+    def percent_text(self) -> str:
+        return "" if self.fraction is None else f"%{int(self.fraction * 100)}"
+
+    @property
+    def eta_text(self) -> str:
+        if self.eta_s is None:
+            return ""
+        minutes, seconds = divmod(int(self.eta_s), 60)
+        return f"yaklaşık {minutes:02d}:{seconds:02d}"
+
+
+#: Below this fraction there is not enough evidence for an estimate. Quoting
+#: one from the first half second of a 7-second hash is how "100%'de uzun
+#: bekleme" happens.
+_ETA_AFTER = 0.08
 
 
 class ReviewViewModel:
@@ -147,6 +197,12 @@ class ReviewViewModel:
         self.selected_error: Observable[str] = Observable("", name="selected_error")
         self.playing: Observable[bool] = Observable(False, name="playing")
         self.busy: Observable[bool] = Observable(False, name="busy")
+        #: What the open is doing, refreshed from the worker. ``busy`` stays
+        #: true until the *screen* has finished preparing, not merely until
+        #: the data arrived - see :meth:`opened_and_ready`.
+        self.loading: Observable[LoadProgress] = Observable(
+            LoadProgress(), name="loading"
+        )
         self.title: Observable[str] = Observable("", name="title")
         self.progress: Observable[str] = Observable("", name="progress")
         self.can_undo: Observable[bool] = Observable(False, name="can_undo")
@@ -189,16 +245,49 @@ class ReviewViewModel:
 
     # ------------------------------------------------------------------ open
     def open_version(self, directory: str) -> None:
-        """Load a version and its labels. Anything already open is flushed first."""
+        """Load a version and its labels. Anything already open is flushed first.
+
+        ``busy`` is **not** cleared when the data lands. The screen still has
+        to build its timeline, its panels and its first frame after that, and
+        clearing it early is what produced an editor that appeared half-made
+        and then finished assembling itself while being looked at. The screen
+        calls :meth:`ready` when it really is ready.
+        """
         self.close()
         self._open_token += 1
         token = self._open_token
         self._directory = str(directory)
         self.open_error.set("")
         self.busy.set(True)
+        self._report(LoadStage.JOB.value, None, None)
+        started = time.perf_counter()
+
+        def cancelled() -> bool:
+            return token != self._open_token
+
+        def report(stage: str, done: int, total: int) -> None:
+            fraction = (done / total) if total else None
+            eta = None
+            if fraction is not None and fraction >= _ETA_AFTER:
+                elapsed = time.perf_counter() - started
+                # From the rate actually observed on this machine, on this
+                # version. Nothing is assumed about disk speed.
+                eta = max(0.0, elapsed / fraction - elapsed)
+            if token == self._open_token:
+                self._report(stage, fraction, eta)
 
         def work() -> ReviewSession:
-            return ReviewSession.open(directory)
+            review = ReviewSession.open(
+                directory, progress=report, cancelled=cancelled
+            )
+            # The two things the screen would otherwise do on its first paint.
+            # Both are reads; doing them here is what lets the editor appear
+            # complete instead of filling in while it is looked at.
+            report(LoadStage.VIDEO.value, 0, 0)
+            review.prepare_video()
+            report(LoadStage.SKELETON.value, 0, 0)
+            review.prime()
+            return review
 
         def done(review: ReviewSession) -> None:
             if token != self._open_token:
@@ -209,7 +298,6 @@ class ReviewViewModel:
                 except Exception:  # noqa: BLE001 - discarding, never reported
                     logger.debug("Geçersiz açılış sonucu kapatılamadı", exc_info=True)
                 return
-            self.busy.set(False)
             self._attach(review)
             self.opened.emit(self._directory)
 
@@ -217,11 +305,57 @@ class ReviewViewModel:
             if token != self._open_token:
                 return
             self.busy.set(False)
+            self.loading.force(LoadProgress(done=True))
             self.open_error.set(str(exc) or "Sürüm açılamadı.")
             self.message.emit(from_error(exc, headline="Sürüm açılamadı."))
             self.open_failed.emit(self._directory)
 
         self._runner.run(work, done, failed)
+
+    def _report(
+        self, stage: str, fraction: Optional[float], eta: Optional[float]
+    ) -> None:
+        try:
+            text = STAGE_TEXT[LoadStage(stage)]
+        except ValueError:  # pragma: no cover - stages come from one enum
+            text = stage
+        self.loading.force(
+            LoadProgress(stage=stage, text=text, fraction=fraction, eta_s=eta)
+        )
+
+    def ready(self) -> None:
+        """The screen has finished preparing. Called by the view, once.
+
+        This is the moment the editor becomes usable, and it is deliberately
+        later than "the data arrived": the timeline, the panels and the first
+        synchronised frame are all built between the two.
+        """
+        if not self.busy.value:
+            return
+        self._report(LoadStage.READY.value, 1.0, 0.0)
+        self.loading.force(
+            LoadProgress(
+                stage=LoadStage.READY.value,
+                text=STAGE_TEXT[LoadStage.READY],
+                fraction=1.0,
+                done=True,
+            )
+        )
+        self.busy.set(False)
+
+    def cancel_open(self) -> bool:
+        """Stop an open in flight. Nothing half-loaded is left behind.
+
+        The worker notices at the next file boundary; whatever it produces
+        afterwards carries a stale token and is closed rather than shown.
+        """
+        if not self.busy.value:
+            return False
+        self._open_token += 1
+        self.busy.set(False)
+        self.loading.force(LoadProgress(done=True))
+        self._directory = ""
+        return True
 
     def retry_open(self) -> bool:
         """Try the last requested version again. Used by the error state."""
@@ -250,6 +384,9 @@ class ReviewViewModel:
             frames=review.frames,
             known_exercises=self._schema.exercise_codes(),
             known_error_classes=self._schema.error_type_codes(),
+            # This version's own skeleton, so a role can be checked against
+            # the joints the recording actually has.
+            skeleton=review.skeleton,
         )
         self.store.subscribe(self._refresh)
         self.frames.set(review.frames)
@@ -424,7 +561,15 @@ class ReviewViewModel:
         roles: Sequence[str] = (),
         joint_status: JointStatus = JointStatus.UNREVIEWED,
         note: str = "",
+        roles_origin: RolesOrigin = RolesOrigin.REVIEWED,
     ) -> bool:
+        """Label one interval. Joints named here are a person's own choice.
+
+        ``roles_origin`` defaults to ``REVIEWED`` because this is the path the
+        panel uses: somebody ticked those joints for *this* repetition. The
+        inherited path is :meth:`apply_error_class`, which records that the
+        joints came from the class definition instead.
+        """
         sample_id = self._owner_of(interval_id)
         if not sample_id or self.store is None:
             return False
@@ -436,8 +581,37 @@ class ReviewViewModel:
                 affected_roles=roles,
                 joint_status=joint_status,
                 note=note,
+                roles_origin=roles_origin,
+                # A reviewed list is not a copy of any class revision.
+                roles_revision=0,
             ),
             "Hata aralığı etiketlenemedi.",
+        )
+
+    def apply_error_class(self, interval_id: str, error_class: str) -> bool:
+        """Put a known class on an interval, with the joints it declares.
+
+        JOINT-04's fast path: pressing an existing class applies both the
+        class and its default joints, so nobody is asked the same anatomical
+        question thirty times. What is stored records that the joints were
+        inherited, which keeps them distinguishable from joints somebody
+        actually looked at for this repetition.
+        """
+        sample_id = self._owner_of(interval_id)
+        if not sample_id or self.store is None or not error_class:
+            return False
+        option = self._schema.find_error_type(error_class)
+        roles = option.default_roles if option is not None else ()
+        revision = option.roles_revision if option is not None else 0
+        return self._guarded(
+            lambda: self.store.apply_class_defaults(
+                sample_id,
+                interval_id,
+                error_class=error_class,
+                default_roles=roles,
+                revision=revision,
+            ),
+            "Hata sınıfı uygulanamadı.",
         )
 
     def remove_error(self, interval_id: str) -> None:
@@ -527,6 +701,36 @@ class ReviewViewModel:
 
     def create_error_class(self, name: str) -> Optional[str]:
         return self._create_class(name, exercise=False)
+
+    def create_error_class_with_roles(
+        self, name: str, roles: Sequence[str]
+    ) -> Optional[str]:
+        """Create a fault class together with the joints it is about.
+
+        JOINT-01. The name and the joints are one decision, so they are one
+        write: a class that reached the schema without its joints would be a
+        class the next annotator is asked about again, and the record would
+        not say whether the omission was a judgement or an interruption.
+
+        Returns the new code, or ``None`` when nothing was stored - a
+        duplicate name, an empty joint set, or a schema that would not save.
+        The message carries the reason; the caller keeps the panel open.
+        """
+        workspace = self._session.workspace
+        if workspace is None:
+            return None
+        schema = workspace.label_schema
+        try:
+            option = schema.add_error_type_with_roles(name, tuple(roles))
+            workspace.save_label_schema(schema)
+        except (KineCaptureError, OSError) as exc:
+            self.message.emit(from_error(exc, headline="Hata sınıfı oluşturulamadı."))
+            return None
+        self._schema = schema
+        if self.store is not None:
+            self.store.known_error_classes = schema.error_type_codes()
+        self._refresh_options()
+        return option.code
 
     def _create_class(self, name: str, *, exercise: bool) -> Optional[str]:
         workspace = self._session.workspace
@@ -646,6 +850,8 @@ class ReviewViewModel:
                         ),
                         joint_status=interval.joint_status,
                         roles=interval.affected_roles,
+                        roles_origin=interval.roles_origin,
+                        note=interval.note,
                         colour_index=self.class_index(
                             interval.error_class, fault=True
                         ),
@@ -668,4 +874,11 @@ class ReviewViewModel:
         return next((r for r in self.errors.value if r.interval_id == interval_id), None)
 
 
-__all__ = ["ErrorRow", "MovementRow", "READINESS_STATUS", "READINESS_TEXT", "ReviewViewModel"]
+__all__ = [
+    "ErrorRow",
+    "LoadProgress",
+    "MovementRow",
+    "READINESS_STATUS",
+    "READINESS_TEXT",
+    "ReviewViewModel",
+]

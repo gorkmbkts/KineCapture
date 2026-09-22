@@ -29,6 +29,8 @@ from kinecapture.studio.theme import load_tokens, stylesheet_for  # noqa: E402
 from kinecapture.studio.views import iconset  # noqa: E402
 from kinecapture.studio.views.pages.base import PlaceholderPage  # noqa: E402
 
+from conftest import enter_the_workspace  # noqa: E402
+
 def has_real_fonts() -> bool:
     """Whether text measurements on this platform mean anything.
 
@@ -74,6 +76,10 @@ def window(app: QApplication, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         username="ada", password="kinecapture1", password_confirm="kinecapture1",
     )
     app.processEvents()
+    # And past the project/participant gate, because from 20 September every
+    # screen but Projeler needs a project open in this session. The gate
+    # itself is covered in tests/test_studio_shell.py.
+    enter_the_workspace(built, app)
     yield built
     built.close()
 
@@ -254,7 +260,7 @@ def test_technical_detail_is_hidden_until_asked_for(window, app: QApplication) -
     card._toggle_details()
     app.processEvents()
     assert card.details_visible is True
-    assert "a: 1" in card._technical.text()
+    assert "a: 1" in card.details_text
 
 
 def test_closing_a_message_takes_it_off_the_layer(window, app: QApplication) -> None:
@@ -290,14 +296,29 @@ def test_exception_hook_turns_a_crash_into_a_message(window) -> None:
 # --------------------------------------------------------------------- close
 
 
-def test_closing_saves_what_the_user_was_looking_at(window, app: QApplication) -> None:
-    window.viewmodel.navigate("dataset")
+def test_closing_records_where_the_user_was_but_does_not_reopen_there(
+    window, app: QApplication
+) -> None:
+    """Recorded, never restored.
+
+    A remembered tab let the application open on a screen belonging to a
+    project nobody had chosen in this session. The value is still written -
+    it says what the last session was doing - and a new shell still starts on
+    Projeler.
+    """
+    from kinecapture.studio.viewmodels.shell import ShellViewModel
+
+    assert window.viewmodel.navigate("dataset")
     window.viewmodel.inspector_open.set(True)
     app.processEvents()
     path = window.state_path_for_test
     window.close()
     saved = load_window_state(path)
     assert saved.active_page == "dataset"
+
+    reopened = ShellViewModel(window.viewmodel.session, saved)
+    assert reopened.active_page.value == "projects"
+    reopened.close()
     assert saved.inspector_open is True
 
 

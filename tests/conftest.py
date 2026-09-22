@@ -71,6 +71,57 @@ def isolated_user_state(tmp_path, monkeypatch, isolated_session_state):
     yield state_path
 
 
+def enter_the_workspace(window, app=None, *, participant: bool = True):
+    """Get a signed-in window past the project and participant gates.
+
+    From 20 September every screen but Projeler needs a project open in this
+    session, and Yakalama additionally needs the participant whose folder a
+    take would be written to. A test that is about a layout, a toast or a
+    loading state still has to pass through the same door the product puts
+    everybody through, so this opens it - explicitly, which is the point of
+    the gate.
+
+    The workspace is attached to the session directly rather than through the
+    Projeler screen: creating a project there also starts an index rescan, and
+    a rescan landing in the middle of a layout test replaces rows the test had
+    just put on screen. The tests that are *about* the gate use the real
+    screen; these only need the door open.
+
+    Returns the workspace.
+    """
+    import time
+
+    session = window.viewmodel.session
+    workspace = ProjectWorkspace.create(session.config.dataset_root, "Test Projesi")
+    session.workspace = workspace
+    if participant:
+        session.selected_participant_id = workspace.create_participant().participant_id
+    if app is not None:
+        # Let the screens finish reading the (empty) new project before the
+        # test puts anything of its own on them. A scan landing afterwards
+        # would replace the test's rows with the project's none.
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            app.processEvents()
+    return workspace
+
+
+def show_page_directly(window, key: str, app=None):
+    """Put a page on screen without a project, for tests about the page itself.
+
+    From 20 September ``navigate`` refuses every screen but Projeler until a
+    project is open. A test about how a list renders is not a test about that
+    rule, and giving it a real project makes the screen load the project's own
+    (empty) rows over the ones the test just put there. Setting the observable
+    the shell is bound to shows the page and skips the rule, which is exactly
+    what such a test wants and nothing more.
+    """
+    window.viewmodel.active_page.set(key)
+    if app is not None:
+        app.processEvents()
+    return window.page(key)
+
+
 def authenticate_state(state, workspace=None, *, open_workspace=True):
     """Create/login an isolated owner and optionally register a workspace."""
     password = "pytest-password"

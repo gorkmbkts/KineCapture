@@ -171,11 +171,22 @@ def test_answers_survive_save_and_reload(viewmodel, opened) -> None:
 
 
 def test_the_panel_renders_a_card_per_person(qapp, viewmodel, opened) -> None:
+    from PySide6.QtWidgets import QVBoxLayout, QWidget
+
     panel = SubjectPanel(load_tokens("dark"))
     panel.set_context(opened.frame, viewmodel.candidate_title, opened.fps)
     try:
+        # The cards are drawn into a layout the panel is lent, because the
+        # list moved to its own window on 20 September - the panel itself is
+        # not allowed to scroll and a candidate list is unbounded. The panel
+        # still owns how a card looks, which is what this checks.
+        holders = [QWidget(), QWidget()]
+        boxes = [QVBoxLayout(holder) for holder in holders]
+        for box in boxes:
+            box.addStretch(1)
+        panel.attach_lists(*boxes)
         panel.show_candidates(viewmodel.candidates.value)
-        cards = panel.findChildren(CandidateCard)
+        cards = holders[0].findChildren(CandidateCard)
         assert len(cards) == len(viewmodel.candidates.value)
         assert cards[0].button.isEnabled()  # nothing chosen yet
 

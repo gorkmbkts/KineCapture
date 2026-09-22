@@ -56,6 +56,13 @@ class ProcessingRunSummary:
     #: "521/524" instead of asking the reader to trust a yes/no.
     capture_frames: int = 0
     matched_frames: int = 0
+    #: Processed frames, and how many of them the chosen person was tracked
+    #: in. A different axis from source coverage: a version can find every
+    #: frame of the raw recording and still have nobody in most of them.
+    #: ``tracked_frames`` is ``None`` for a run produced before schema 1.3.0,
+    #: which means "not recorded", never "none".
+    subject_frames: int = 0
+    tracked_frames: Optional[int] = None
     #: When this attempt started, and when its job file was last written.
     #: Several versions of one take share the take's timestamp, so this is the
     #: only thing that can put them in the order they were produced.
@@ -194,6 +201,31 @@ def _scandir(path: str) -> list[os.DirEntry]:
         return []
 
 
+def _tracked_frames(job: dict, directory: Path) -> Optional[int]:
+    """How many frames held the chosen person, or ``None`` when unrecorded.
+
+    Schema 1.3.0 writes the number into the job file. An older run kept the
+    same counters only in its ``features.json``, so that is read as a fallback
+    - a small file beside the job, not the version itself. ``None`` means the
+    question was never answered, which is not the same as "nobody".
+    """
+    block = job.get("subject_coverage")
+    if isinstance(block, dict) and block.get("tracked_frames") is not None:
+        return int(block["tracked_frames"])
+    features = directory / "features.json"
+    if not features.is_file():
+        return None
+    try:
+        counters = (
+            dict(read_json(features)).get("subject_association", {}).get("counters", {})
+        )
+    except Exception as exc:  # noqa: BLE001 - a stale sidecar must not hide the run
+        logger.debug("Kişi kapsamı okunamadı (%s): %s", directory.name, exc)
+        return None
+    locked = counters.get("locked_frames")
+    return None if locked is None else int(locked)
+
+
 def _read_runs(take_dir: Path) -> tuple[ProcessingRunSummary, ...]:
     base = Path(long_path(take_dir / "derived" / "processing"))
     if not base.is_dir():
@@ -224,6 +256,13 @@ def _read_runs(take_dir: Path) -> tuple[ProcessingRunSummary, ...]:
                 blocking_issues=tuple(job.get("blocking_issues") or ()),
                 capture_frames=int((job.get("coverage") or {}).get("capture_frames", 0) or 0),
                 matched_frames=int((job.get("coverage") or {}).get("matched_frames", 0) or 0),
+                subject_frames=int(
+                    (job.get("subject_coverage") or {}).get(
+                        "frames", job.get("frames_processed", 0) or 0
+                    )
+                    or 0
+                ),
+                tracked_frames=_tracked_frames(job, child),
                 created_at=str(job.get("created_at") or ""),
                 job_mtime_ns=_mtime_ns(job_path),
                 subject_status=str(job.get("subject_status", "")),

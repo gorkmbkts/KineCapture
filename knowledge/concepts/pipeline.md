@@ -1,7 +1,7 @@
 ---
 type: concept
 status: verified
-updated: 2026-09-18
+updated: 2026-09-19
 tags:
   - capture
   - processing
@@ -30,6 +30,19 @@ Kişi seçimi → Kayıt → Değişmez take → Offline işleme
 
 İlgili: [Kişi seçimi](subject-selection.md),
 [Veri bütünlüğü](data-integrity.md), [Açık sorular](../open-questions.md).
+
+## Zemin düzlemi
+
+Zemin **offline** ölçülür: işleme sırasında, ilk 30 kare geçtikten sonra
+(`FLOOR_AFTER_FRAMES`), SDK konum takibi hazır olduğunda. Sonuç `job.json`
+içine additive `floor_plane` bloğu olarak yazılır; `PROCESSING_SCHEMA_VERSION`
+bu yüzden **1.2.0**'dır. Nokta bulutu veya mesh saklanmaz.
+
+Dört durum ayrıdır ve arayüz hangisi olduğunu her seferinde söyler:
+`detected` (ölçüm) · `visual_reference` (en alçak ayağa çizilen ızgara —
+görsel yardım, ölçüm değil) · `not_found` (denendi, nedeni saklandı) ·
+`not_attempted` (blok yok; 1.1.0 sürümleri). Ayakların anlık minimumu asla
+"algılanmış zemin" diye sunulmaz.
 
 ## Tarihsel kaynaklar
 

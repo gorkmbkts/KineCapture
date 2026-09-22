@@ -27,11 +27,13 @@ This module is Qt-free by design. The Qt adapter lives in
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import time
 from copy import deepcopy
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -69,6 +71,59 @@ _JOIN_TIMEOUT_S = 5.0
 
 #: Sentinel pushed onto the recording queue to end the writer thread.
 _SHUTDOWN = object()
+
+
+@dataclass(frozen=True)
+class RecordingTargetCheck:
+    """Whether the next take's raw file can be written where it would go.
+
+    Built from the *prospective* path, before a take directory exists, so a
+    refusal never leaves half a take behind and never interrupts the preview.
+    """
+
+    #: The longest raw-recording path this session can produce.
+    path: Path
+    length: int
+    #: The backend's own ceiling, or ``None`` when it has none.
+    limit: Optional[int]
+    #: False for a backend that writes through Python and is not affected.
+    needs_native: bool = True
+
+    @property
+    def ok(self) -> bool:
+        if not self.needs_native or self.limit is None:
+            return True
+        return self.length <= self.limit
+
+    @property
+    def reason(self) -> str:
+        if self.ok:
+            return ""
+        return (
+            f"Kayıt hedefi bu kamera için fazla uzun: {self.length} karakter, "
+            f"sınır {self.limit}."
+        )
+
+    def require(self) -> None:
+        """Raise when the target cannot work. Called before anything is made."""
+        if self.ok:
+            return
+        over = self.length - int(self.limit or 0)
+        raise StorageError(
+            self.reason,
+            code="recording_target_path_too_long",
+            remedy=(
+                f"Veri klasörünü en az {over} karakter daha kısa bir yola alın "
+                "(Ayarlar > Veri klasörü). Uygulamanın kendi dosyaları uzun "
+                "yolu kullanabiliyor; kameranın kayıt kütüphanesi kullanamıyor."
+            ),
+            details={
+                "path": str(self.path),
+                "length": self.length,
+                "limit": self.limit,
+                "over_by": over,
+            },
+        )
 
 
 class CaptureService:
@@ -118,6 +173,9 @@ class CaptureService:
 
         self._frame_listeners: list[FrameListener] = []
         self._error_listeners: list[ErrorListener] = []
+        #: Starts refused before any frame was written. A counter, not a state:
+        #: the camera is still previewing and the next attempt may succeed.
+        self._recording_start_failures = 0
         self._take_listeners: list[TakeListener] = []
 
         self._camera_info: Optional[CameraInfo] = None
@@ -355,6 +413,25 @@ class CaptureService:
                 },
             )
 
+    def check_recording_target(
+        self, workspace: ProjectWorkspace
+    ) -> RecordingTargetCheck:
+        """Can this project's raw recordings actually be written where they go?
+
+        Answered from the *prospective* deepest path, before the preview is
+        disturbed and before a take directory exists. Read-only: nothing is
+        created in the dataset to find out. The answer belongs to the project,
+        not to one take, so the Capture screen can show it before the operator
+        presses record rather than after.
+        """
+        absolute = os.path.abspath(str(workspace.longest_raw_path()))
+        return RecordingTargetCheck(
+            path=Path(absolute),
+            length=len(absolute),
+            limit=self._backend.native_recording_path_limit,
+            needs_native=self._backend.supports_native_recording(),
+        )
+
     def check_availability(self) -> AvailabilityResult:
         return self._backend.is_available()
 
@@ -568,6 +645,11 @@ class CaptureService:
 
         self._last_dataset_root = workspace.root
         self._guard_disk_space(workspace, session)
+        # Everything knowable about the destination is checked while the
+        # preview is still running and before a take directory exists. A
+        # refusal here costs the operator a sentence; the same refusal three
+        # steps later cost them a frozen picture and a take marked failed.
+        self.check_recording_target(workspace).require()
 
         spec = self._backend.skeleton_spec()
         extra: dict[str, Any] = {}
@@ -605,10 +687,17 @@ class CaptureService:
             except KineCaptureError as exc:
                 # Native recording is part of the immutable raw source; failing
                 # to start it is a real problem, so recording does not begin.
+                # But nothing has been recorded either: no frame, no writer, no
+                # state change. Ending in ERROR here froze the last preview
+                # frame and made the camera unusable until it was reconnected,
+                # which is what the operator saw on 20 September. The take is
+                # still marked failed - it is the audit trail of the attempt -
+                # and the preview carries on so the cause can be fixed and the
+                # recording tried again without touching the camera.
                 take.state = TakeState.FAILED
                 take.notes = f"{take.notes}\n[Native kayıt başlatılamadı: {exc}]".strip()
                 workspace.save_take(take)
-                self._fail(exc)
+                self._abort_start(exc)
                 raise
         elif self._backend.origin is not DataOrigin.SYNTHETIC:
             # A real capture with no immutable source at all cannot be a
@@ -923,6 +1012,28 @@ class CaptureService:
                 self._recording_queue.task_done()
 
     # ------------------------------------------------------------------ error
+    def _abort_start(self, error: KineCaptureError) -> None:
+        """A recording that never began. Report it; keep the preview alive.
+
+        Deliberately not :meth:`_fail`: that sets the stop event and moves to
+        ``ERROR``, from which the only way out is ``DISCONNECTED``. Nothing
+        about a refused ``enable_recording`` requires the camera to be torn
+        down, and tearing it down is what left a dead picture on screen.
+        """
+        logger.error("Kayıt başlatılamadı [%s]: %s", error.code, error.message)
+        self._last_error = error
+        self._recording_start_failures += 1
+        for listener in list(self._error_listeners):
+            try:
+                listener(error)
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("Hata dinleyicisi hata verdi")
+
+    @property
+    def recording_start_failures(self) -> int:
+        """How many starts were refused since the service was created."""
+        return self._recording_start_failures
+
     def _fail(self, error: KineCaptureError) -> None:
         """Move to ERROR and notify listeners with a structured error."""
         logger.error("Yakalama hatası [%s]: %s", error.code, error.message)

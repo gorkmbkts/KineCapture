@@ -13,7 +13,7 @@ from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QButtonGroup, QFrame, QHBoxLayout, QToolButton, QWidget
 
 from kinecapture.studio.theme import ThemeTokens
-from kinecapture.studio.viewmodels.navigation import Destination
+from kinecapture.studio.viewmodels.navigation import Destination, destination as destination_for
 
 from . import iconset
 
@@ -68,6 +68,8 @@ class NavBar(QFrame):
         layout.addStretch(1)
         self._layout = layout
         self._compact = False
+        #: key -> why it cannot be entered. Empty means everything is open.
+        self._gated: dict = {}
         self.setFixedHeight(tokens.metric("KcNavBarHeight"))
         self.apply_tokens(tokens)
 
@@ -107,6 +109,31 @@ class NavBar(QFrame):
     @property
     def is_compact(self) -> bool:
         return self._compact
+
+    def set_gated(self, reasons: dict) -> None:
+        """Show which steps are not enterable yet, and why.
+
+        The destinations stay visible in their real places - hiding them would
+        make the workflow look shorter than it is and leave somebody wondering
+        where the step they were told about went. They are dimmed, and their
+        tooltip says what is missing rather than repeating the subtitle.
+        """
+        self._gated = dict(reasons)
+        for key, button in self._buttons.items():
+            reason = self._gated.get(key, "")
+            button.setEnabled(not reason)
+            item = destination_for(key)
+            index = self.keys.index(key) + 1 if key in self.keys else 0
+            button.setToolTip(
+                f"{item.title} — {reason}"
+                if reason
+                else f"{item.title} — {item.subtitle}  (Ctrl+{index})"
+            )
+            button.setAccessibleDescription(reason or item.subtitle)
+
+    @property
+    def gated(self) -> dict:
+        return dict(self._gated)
 
     def set_active(self, key: str) -> None:
         button = self._buttons.get(key)

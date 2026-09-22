@@ -56,6 +56,23 @@ def shell(session: SessionService) -> ShellViewModel:
     viewmodel.close()
 
 
+@pytest.fixture
+def open_shell(shell: ShellViewModel, config: AppConfig) -> ShellViewModel:
+    """A shell with a project and a participant, so no gate is in the way.
+
+    Navigation is gated on both from 20 September: without a project there is
+    no dataset for a screen to be about, and Yakalama additionally needs the
+    person whose folder the take is written to.
+    """
+    from kinecapture.dataset.workspace import ProjectWorkspace
+
+    workspace = ProjectWorkspace.create(config.dataset_root, "Gezinti")
+    participant = workspace.create_participant()
+    shell.session.workspace = workspace
+    shell.session.selected_participant_id = participant.participant_id
+    return shell
+
+
 # --------------------------------------------------------------- observable
 
 
@@ -133,7 +150,8 @@ def test_navigate_to_unknown_key_is_ignored(shell: ShellViewModel) -> None:
     assert shell.active_page.value == before
 
 
-def test_step_clamps_at_both_ends(shell: ShellViewModel) -> None:
+def test_step_clamps_at_both_ends(open_shell: ShellViewModel) -> None:
+    shell = open_shell
     shell.navigate("projects")
     shell.step(-1)
     assert shell.active_page.value == "projects"
@@ -142,7 +160,8 @@ def test_step_clamps_at_both_ends(shell: ShellViewModel) -> None:
     assert shell.active_page.value == "settings"
 
 
-def test_step_moves_along_the_workflow(shell: ShellViewModel) -> None:
+def test_step_moves_along_the_workflow(open_shell: ShellViewModel) -> None:
+    shell = open_shell
     shell.navigate("capture")
     shell.step(1)
     assert shell.active_page.value == "processing"
@@ -150,18 +169,88 @@ def test_step_moves_along_the_workflow(shell: ShellViewModel) -> None:
     assert shell.active_page.value == "projects"
 
 
-def test_shell_starts_on_the_remembered_page(session: SessionService) -> None:
+def test_shell_always_starts_on_projects(session: SessionService) -> None:
+    """Whatever the last run was doing.
+
+    A remembered tab let the application open on a screen belonging to a
+    project nobody had chosen in this session. Every screen being there is
+    exactly what stops the choice from having to be made.
+    """
     viewmodel = ShellViewModel(session, WindowState(active_page="review"))
-    assert viewmodel.active_page.value == "review"
-    viewmodel.close()
-
-
-def test_shell_ignores_a_remembered_page_that_no_longer_exists(
-    session: SessionService,
-) -> None:
-    viewmodel = ShellViewModel(session, WindowState(active_page="activity"))
     assert viewmodel.active_page.value == "projects"
     viewmodel.close()
+
+
+# ----------------------------------------------------------------- the gates
+
+
+def test_without_a_project_only_projects_can_be_entered(shell: ShellViewModel) -> None:
+    seen = []
+    shell.message.subscribe(seen.append)
+
+    assert shell.navigate("review") is False
+    assert shell.active_page.value == "projects"
+    assert seen and seen[0].code == "needs_project"
+    assert shell.gate_reason("settings") == "Önce bir proje seçin."
+    assert shell.gate_reason("projects") == ""
+
+
+def test_with_a_project_everything_but_capture_opens(open_shell: ShellViewModel) -> None:
+    shell = open_shell
+    shell.session.selected_participant_id = ""
+    for key in ("processing", "library", "review", "dataset", "export", "settings"):
+        assert shell.can_enter(key), key
+        assert shell.navigate(key) is True
+    assert shell.can_enter("capture") is False
+
+
+def test_capture_without_a_participant_warns_once_and_goes_to_projects(
+    open_shell: ShellViewModel,
+) -> None:
+    shell = open_shell
+    shell.session.selected_participant_id = ""
+    shell.navigate("library")
+    seen = []
+    shell.message.subscribe(seen.append)
+
+    assert shell.navigate("capture") is False
+
+    assert shell.active_page.value == "projects"
+    assert len(seen) == 1
+    assert seen[0].headline == "Kayıt için önce bir katılımcı seçin."
+    # One code, so a second attempt folds into the same card rather than
+    # stacking a second one.
+    assert seen[0].code == "capture_needs_participant"
+
+
+def test_capture_opens_once_a_participant_is_chosen(open_shell: ShellViewModel) -> None:
+    assert open_shell.navigate("capture") is True
+    assert open_shell.active_page.value == "capture"
+
+
+def test_stepping_stops_rather_than_bouncing_off_a_gate(
+    open_shell: ShellViewModel,
+) -> None:
+    shell = open_shell
+    shell.session.selected_participant_id = ""
+    shell.navigate("projects")
+    shell.step(1)  # would be Yakalama
+    assert shell.active_page.value == "projects"
+
+
+def test_changing_project_does_not_carry_the_old_participant(
+    open_shell: ShellViewModel, config: AppConfig
+) -> None:
+    """A participant belongs to a project, and codes repeat between them."""
+    from kinecapture.dataset.workspace import ProjectWorkspace
+
+    shell = open_shell
+    assert shell.session.selected_participant_id
+    second = ProjectWorkspace.create(config.dataset_root, "İkinci")
+    shell.session.workspace = second
+    shell.session.selected_participant_id = ""
+
+    assert shell.can_enter("capture") is False
 
 
 # ------------------------------------------------------------------ context

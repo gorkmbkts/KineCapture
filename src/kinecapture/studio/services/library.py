@@ -27,6 +27,11 @@ from kinecapture.dataset.summary_index import (
     build_index,
 )
 from kinecapture.processing.thumbnails import ThumbnailIndex
+from kinecapture.studio.services.processing import (
+    IssueAxis,
+    issue_meaning,
+    material_issues,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +56,10 @@ class VersionRow:
     #: Recorded frames, and how many were found again in the replayed source.
     capture_frames: int = 0
     matched_frames: int = 0
+    #: Processed frames, and how many of them the chosen person was tracked in.
+    #: ``None`` means the run never recorded the answer.
+    subject_frames: int = 0
+    tracked_frames: Optional[int] = None
     #: When this version was produced. Versions of one take all carry the
     #: take's start time, so sorting on that alone left them in the order of
     #: the random hex in their folder names.
@@ -62,13 +71,67 @@ class VersionRow:
     #: How many finished versions this take has. >1 means there is something
     #: to compare.
     sibling_versions: int = 1
+    #: Which of them this one is, newest last. 1-based, for "sürüm 2 / 3".
+    version_ordinal: int = 1
     #: Whether a canonical annotation sidecar already exists for this version.
     annotated: bool = False
 
     @property
+    def source_issues(self) -> tuple[str, ...]:
+        """Issues about the raw frames themselves, notes excluded.
+
+        An unrecognised code counts. This build not knowing what a code means
+        is not evidence that it is harmless.
+        """
+        return tuple(
+            code
+            for code in material_issues(self.issues)
+            if issue_meaning(code).axis
+            in (IssueAxis.SOURCE, IssueAxis.TIMING, IssueAxis.UNKNOWN)
+        )
+
+    @property
+    def informational_issues(self) -> tuple[str, ...]:
+        """Recorded, but nothing was taken away by them."""
+        return tuple(code for code in self.issues if code not in material_issues(self.issues))
+
+    @property
     def coverage_verified(self) -> bool:
-        """False when a check did not pass. Never rounded up to "complete"."""
-        return not self.issues
+        """Whether the **raw source** was fully found again and matched.
+
+        Deliberately narrow. This used to be ``not self.issues``, which meant a
+        purely informational note - the athlete having been chosen a moment
+        before recording started, applied to the first frame exactly as
+        intended - produced the same warning as a real hole. Meanwhile the
+        thing actually missing from the 20 September version, the person being
+        tracked in 622 of 1473 frames, had no axis of its own to be reported
+        on. It has one now: :attr:`subject_verified`.
+        """
+        if self.capture_frames and self.matched_frames < self.capture_frames:
+            return False
+        return not self.source_issues
+
+    @property
+    def subject_verified(self) -> Optional[bool]:
+        """Whether the chosen person was held for the whole version.
+
+        ``None`` when the run never recorded the answer, which is not the same
+        as "no".
+        """
+        if not self.subject_chosen:
+            return False
+        if self.tracked_frames is None or not self.subject_frames:
+            return None
+        return self.tracked_frames >= self.subject_frames
+
+    @property
+    def subject_text(self) -> str:
+        """The person axis, as a count. Empty when nothing was recorded."""
+        if self.tracked_frames is None or not self.subject_frames:
+            return ""
+        return (
+            f"kişi {self.tracked_frames}/{self.subject_frames} karede izlendi"
+        )
 
     @property
     def subject_chosen(self) -> bool:
@@ -93,6 +156,11 @@ class VersionRow:
     def quality_text(self) -> str:
         if not self.subject_chosen:
             return "kişi seçilmedi"
+        # The person axis first: a version that found every source frame and
+        # lost the athlete halfway through is not "hazır", and saying so is
+        # the whole point of keeping the two apart.
+        if self.subject_verified is False and self.subject_text:
+            return self.subject_text
         if not self.coverage_verified:
             return self.coverage_text or "kapsam notları var"
         return "hazır"
@@ -101,7 +169,7 @@ class VersionRow:
     def quality_status(self) -> str:
         if not self.coverage_verified:
             return "warning"
-        if not self.subject_chosen:
+        if not self.subject_chosen or self.subject_verified is False:
             return "warning"
         return "live"
 
@@ -128,7 +196,7 @@ class LibraryService:
         ("all", "Tümü"),
         ("ready", "Etiketlemeye hazır"),
         ("needs_subject", "Kişi seçilmemiş"),
-        ("unverified", "Kapsam notu olan"),
+        ("unverified", "Kapsamı eksik"),
         ("annotated", "Etiketlenmiş"),
         ("multi", "Birden fazla sürüm"),
     )
@@ -139,8 +207,8 @@ class LibraryService:
         rows: list[VersionRow] = []
         for take in index:
             finished = take.published_runs
-            for run in finished:
-                rows.append(self._row(take, run, len(finished)))
+            for ordinal, run in enumerate(finished, start=1):
+                rows.append(self._row(take, run, len(finished), ordinal))
         rows.sort(
             key=lambda row: (
                 row.started_at,
@@ -152,8 +220,73 @@ class LibraryService:
         )
         return rows
 
+    @staticmethod
+    def grouped(rows: list[VersionRow]) -> list[VersionRow]:
+        """The same rows, with every take's versions kept together.
+
+        Takes stay in the list's own order - newest first - and inside a take
+        the versions run newest to oldest. Grouping is a *reordering*, not a
+        tree: every version is still one selectable, labellable row, which is
+        what LIB-01 asks for.
+        """
+        order: list[str] = []
+        by_take: dict[str, list[VersionRow]] = {}
+        for row in rows:
+            if row.take_id not in by_take:
+                order.append(row.take_id)
+                by_take[row.take_id] = []
+            by_take[row.take_id].append(row)
+        grouped: list[VersionRow] = []
+        for take_id in order:
+            grouped.extend(
+                sorted(
+                    by_take[take_id],
+                    key=lambda r: (r.created_at, r.job_mtime_ns, r.run_id),
+                    reverse=True,
+                )
+            )
+        return grouped
+
+    @staticmethod
+    def directory_size(directory: str | Path) -> Optional[int]:
+        """Bytes under ``directory``, or ``None`` when it cannot be read.
+
+        ``None`` rather than ``0``: a folder that could not be walked has an
+        unknown size, and reporting nothing as zero would understate what a
+        release is about to cost.
+        """
+        root = Path(directory)
+        if not path_exists(root):
+            return None
+        total = 0
+        try:
+            for entry in root.rglob("*"):
+                if entry.is_file():
+                    total += entry.stat().st_size
+        except OSError as exc:
+            logger.debug("Klasör boyutu okunamadı (%s): %s", root, exc)
+            return None
+        return total
+
+    @classmethod
+    def sizes_for(cls, row: VersionRow) -> tuple[Optional[int], Optional[int]]:
+        """``(derived, raw)`` bytes for one version.
+
+        The two are kept apart on purpose. The raw recording belongs to the
+        *take*, not to any one version of it, so adding it to each version
+        would count a 2 GB SVO three times over for a take processed three
+        ways. The detail panel shows both and says which is which.
+        """
+        derived = cls.directory_size(row.directory)
+        raw = cls.directory_size(Path(row.take_directory) / "raw")
+        return derived, raw
+
     def _row(
-        self, take: TakeSummary, run: ProcessingRunSummary, siblings: int
+        self,
+        take: TakeSummary,
+        run: ProcessingRunSummary,
+        siblings: int,
+        ordinal: int = 1,
     ) -> VersionRow:
         # The folder the run really sits in, not one rebuilt from its id.
         directory = (
@@ -178,12 +311,15 @@ class LibraryService:
             issues=run.issues,
             capture_frames=run.capture_frames,
             matched_frames=run.matched_frames,
+            subject_frames=run.subject_frames,
+            tracked_frames=run.tracked_frames,
             created_at=run.created_at,
             job_mtime_ns=run.job_mtime_ns,
             has_thumbnails=run.has_thumbnails,
             has_summary=run.has_summary,
             has_depth=run.has_depth,
             sibling_versions=siblings,
+            version_ordinal=ordinal,
             annotated=path_exists(sidecar),
         )
 
@@ -198,7 +334,9 @@ class LibraryService:
         if key == "needs_subject":
             return not row.subject_chosen
         if key == "unverified":
-            return not row.coverage_verified
+            # Either axis. A version whose source matched perfectly and whose
+            # athlete vanished halfway through belongs in this list too.
+            return not row.coverage_verified or row.subject_verified is False
         if key == "annotated":
             return row.annotated
         if key == "multi":

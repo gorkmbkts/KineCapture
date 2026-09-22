@@ -1,0 +1,20 @@
+{
+  "user_state": {
+    "path": "C:\\Users\\gorke\\.kinecapture\\user_state.yaml",
+    "exists": true,
+    "sha256": "247f706f86560c22354d00883112c6288b1a22daf265f7d903a18a6e3512cdec",
+    "mtime_ns": 1789936897884505600
+  },
+  "window_state": {
+    "path": "C:\\Users\\gorke\\.kinecapture\\window_state.json",
+    "exists": true,
+    "sha256": "9af8bc2771ffc49a27fbba2ebb1a05be9d9d34929e859af8b2a90bfee215a2ba",
+    "mtime_ns": 1789936103159627700
+  },
+  "identity_db": {
+    "path": "C:\\Users\\gorke\\AppData\\Local\\KineCapture\\identity.sqlite3",
+    "exists": true,
+    "sha256": "9baf7bf7d315a34b9df21998669b9faae6e032a6a6bbf5d6f907b72c01df023a",
+    "mtime_ns": 1789935461385724700
+  }
+}

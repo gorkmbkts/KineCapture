@@ -32,8 +32,6 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import (
     QColor,
-    QFont,
-    QFontMetrics,
     QImage,
     QMouseEvent,
     QPainter,
@@ -74,8 +72,13 @@ class PreviewView(QWidget):
         self._guides = False
         self._countdown = 0
         #: The live framing verdict, and the worst of the last few seconds.
-        #: Painted over the picture because the person who needs to read it is
-        #: standing in front of the camera, not sitting at the keyboard.
+        #: **Kept, never painted.** Until 21 September this was a badge across
+        #: the top of the picture - "Ayaklar kadraj dışında", with a summary
+        #: of the last fifteen seconds under it - drawn over the person the
+        #: operator was trying to look at and click on. The user's decision is
+        #: that the picture carries no notifications at all. The value is
+        #: still stored because the Capture screen hands it to
+        #: Araçlar > Yakalama Durumu, where the measurement is still readable.
         self._framing = ("", "", "")
         #: A message drawn on the picture for the same reason, which holds for
         #: a few seconds and then fades out by itself.
@@ -284,11 +287,10 @@ class PreviewView(QWidget):
         self._paint_people(painter)
         if self._guides:
             self._paint_guides(painter, rect)
-        # The badge goes down first and records where it landed, so the
-        # subject tag can step out of its way instead of printing over it.
+        # Nothing is written on the picture any more: no framing badge, no
+        # history line, no tag inside the selection box. The rectangle is kept
+        # empty so the subject box's own placement code has one meaning.
         self._framing_rect = QRectF()
-        if self._framing[0]:
-            self._paint_framing(painter, rect)
         if self._subject_box is not None:
             self._paint_subject_box(painter, rect)
         if self._notice[0] and self._notice_opacity > 0.0:
@@ -330,91 +332,20 @@ class PreviewView(QWidget):
             y = rect.top() + rect.height() * fraction
             painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
 
-    #: Verdict state -> the token its badge is painted in.
-    _FRAMING_COLOURS = {
-        "ok": "KcStatusLive",
-        "tight": "KcStatusWarning",
-        "cut": "KcStatusRecording",
-        "crowded": "KcStatusWarning",
-        "no_person": "KcTextMuted",
-        "no_overlay": "KcTextMuted",
-        "no_camera": "KcTextMuted",
-    }
-
-    def _paint_framing(self, painter: QPainter, rect: QRectF) -> None:
-        """A badge across the top of the picture, sized to be read from 3 m.
-
-        Never mirrored with the image: it is text, and a flipped word is
-        unreadable exactly when it matters most.
-        """
-        text, state, history = self._framing
-        tokens = self._tokens
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        font = painter.font()
-        font.setPointSize(max(13, int(rect.height() / 22)))
-        font.setBold(True)
-        painter.setFont(font)
-        metrics = painter.fontMetrics()
-
-        pad = tokens.metric("KcSpacingLg")
-        line_height = metrics.height()
-        height = line_height + pad * 2
-        small_font = QFont(font)
-        small_font.setPointSize(max(10, int(font.pointSize() * 0.7)))
-        small_font.setBold(False)
-        if history:
-            height += QFontMetrics(small_font).height()
-        width = max(
-            metrics.horizontalAdvance(text),
-            QFontMetrics(small_font).horizontalAdvance(history) if history else 0,
-        ) + pad * 2
-        width = min(width, rect.width() - pad * 2)
-        badge = QRectF(
-            rect.center().x() - width / 2.0, rect.top() + pad, width, height
-        )
-        self._framing_rect = badge
-
-        background = QColor(tokens.colour("KcSurfaceViewport"))
-        background.setAlpha(205)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(background)
-        painter.drawRoundedRect(
-            badge, tokens.metric("KcRadiusRound"), tokens.metric("KcRadiusRound")
-        )
-        accent = QColor(
-            tokens.colour(self._FRAMING_COLOURS.get(state, "KcTextMuted"))
-        )
-        pen = QPen(accent)
-        pen.setWidth(tokens.metric("KcBorderWidthStrong"))
-        painter.setPen(pen)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawRoundedRect(
-            badge, tokens.metric("KcRadiusRound"), tokens.metric("KcRadiusRound")
-        )
-
-        painter.setPen(accent)
-        painter.setFont(font)
-        top = QRectF(badge.left(), badge.top() + pad, badge.width(), line_height)
-        painter.drawText(top, int(Qt.AlignmentFlag.AlignCenter), text)
-        if history:
-            painter.setPen(QColor(tokens.colour("KcTextSecondary")))
-            painter.setFont(small_font)
-            below = QRectF(
-                badge.left(),
-                top.bottom(),
-                badge.width(),
-                QFontMetrics(small_font).height(),
-            )
-            painter.drawText(below, int(Qt.AlignmentFlag.AlignCenter), history)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
-
     def _paint_subject_box(self, painter: QPainter, rect: QRectF) -> None:
         """Outline whoever the operator picked, so the choice is visible.
 
         "I clicked something" and "the application understood who" are two
-        different facts, and until now the screen only ever showed the first.
+        different facts, and the box is how the screen shows the second.
+
+        The frame stays; the "seçilen kişi" caption inside it does not. The
+        21 September decision keeps the selection visible and takes the
+        writing off the picture - a coloured rectangle drawn around one body
+        among several already says which one, and the word sat on the
+        athlete's chest.
         """
         assert self._subject_box is not None
+        del rect  # The box is in the picture's coordinates, not the widget's.
         tokens = self._tokens
         x0, y0, x1, y1 = self._subject_box
         box = QRectF(self._to_widget(x0, y0), self._to_widget(x1, y1)).normalized()
@@ -425,31 +356,6 @@ class PreviewView(QWidget):
         painter.setBrush(Qt.BrushStyle.NoBrush)
         radius = tokens.metric("KcRadiusSmall")
         painter.drawRoundedRect(box, radius, radius)
-
-        font = painter.font()
-        font.setPointSize(max(9, int(rect.height() / 40)))
-        font.setBold(True)
-        painter.setFont(font)
-        text = "seçilen kişi"
-        metrics = painter.fontMetrics()
-        pad = tokens.metric("KcSpacingSm")
-        # Inside the box, not above it: above put the tag on the same row as
-        # the framing badge. And if the badge is there anyway - it is centred,
-        # and people stand in the middle of frames - the tag drops below it.
-        tag = QRectF(
-            box.left() + pad,
-            box.top() + pad,
-            metrics.horizontalAdvance(text) + pad * 2,
-            metrics.height() + pad,
-        )
-        if tag.intersects(self._framing_rect):
-            tag.moveTop(self._framing_rect.bottom() + pad)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(tokens.colour("KcAccentPrimary")))
-        painter.drawRoundedRect(tag, radius, radius)
-        painter.setPen(QColor(tokens.colour("KcTextOnAccent")))
-        painter.drawText(tag, int(Qt.AlignmentFlag.AlignCenter), text)
-        painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
 
     #: Notice severity -> the token its edge is painted in. The same three the

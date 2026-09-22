@@ -6,7 +6,7 @@ history is reconstructed; partial results are never appended to or overwritten.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict, field, replace
 from pathlib import Path
 from typing import Any, Callable, Optional, Sequence
 import os
@@ -28,6 +28,7 @@ from kinecapture.features.compute import FeatureContext, compute_features, FEATU
 from kinecapture.recording.take_writer import ProxyVideoWriter
 from kinecapture.recording.rgbd_archive import encode_depth_chunk, write_chunk, DEPTH_MAGIC, DepthCodec
 from .arrays import write_arrays
+from .floor import FloorPlane, detect_floor
 from .sources import open_source
 from .summary import (
     FLAG_CAPTURE_UNMATCHED,
@@ -42,7 +43,26 @@ from .thumbnails import DEFAULT_THUMBNAIL_COUNT, build_thumbnails
 #: compressed ``arrays.npz``, and a version also carries a timeline summary and
 #: preview images. ``ReviewDataset`` reads both layouts, so every run produced
 #: by 1.0.0 stays openable; nothing is migrated and nothing is rewritten.
-PROCESSING_SCHEMA_VERSION = "1.1.0"
+#: 1.2.0 adds the ``floor_plane`` block: the plane the SDK measured, the
+#: reference space it is expressed in, and - when it could not be measured -
+#: the reason. Additive. A 1.1.0 run has no block, which reads as "nothing was
+#: measured" rather than as a missing floor, and every existing reader is
+#: unaffected.
+#: 1.3.0 adds the ``subject_coverage`` block: how many of the processed frames
+#: the chosen person was actually tracked in, beside the existing source-frame
+#: coverage. Additive. The two were being reported under one sentence, so a
+#: version that matched 1473 of 1475 source frames and held the subject in 622
+#: of them said only "kaynak kapsamı doğrulanamadı". A 1.2.0 run has no block;
+#: readers fall back to the run's own ``features.json``, which has always
+#: carried the counters.
+PROCESSING_SCHEMA_VERSION = "1.3.0"
+
+#: How many frames the floor step may keep asking over. The SDK will not
+#: answer until positional tracking reports OK, which is never true before the
+#: first grab; measured on a real ZED recording it answers on the first frame
+#: that is, in 0.3 s. The window is for a camera that needs longer to settle,
+#: and it is small because a viewing aid must not slow down processing.
+FLOOR_AFTER_FRAMES = 30
 
 #: Issues that make a version unusable, as opposed to imperfect.
 #:
@@ -393,6 +413,11 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
         job["source_frames_declared"] = expected_count
         spec = reader.spec
         job["skeleton_format"] = spec.name if spec else None
+        # The floor is asked for a little later - see FLOOR_AFTER_FRAMES. The
+        # SDK answers only once positional tracking reports OK, which it does
+        # not before any frame has been grabbed: asking here returned
+        # "not_found" on a recording whose floor is found on frame 0.
+        floor = FloorPlane()
         if take.origin.value == "real":
             calibration = processing_info.extra.get("left_camera_calibration") or {}
             if not all(np.isfinite(calibration.get(k, np.nan)) and calibration.get(k, 0) > 0 for k in ("fx", "fy")):
@@ -411,6 +436,11 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
         for packet in reader:
             check_cancel()
             wait_while_paused()
+            if not floor.is_measured and len(positions) < FLOOR_AFTER_FRAMES:
+                # Once tracking has settled, and only until it answers. On a
+                # real recording this succeeds on the first attempt and costs
+                # 0.3 s; the window exists for a camera that needs a moment.
+                floor = detect_floor(getattr(reader, "backend", None))
             pos = packet.source_position
             if pos is None or pos != len(positions):
                 issues.add("source_position_discontinuity")
@@ -556,6 +586,28 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
             "matched_ratio": (matched / len(capture_rows)) if capture_rows else None,
         }
         job["subject_anchors"] = [anchors_applied[i] for i in sorted(anchors_applied)]
+        # How much of the recording actually has the chosen person in it. A
+        # different question from how much of the raw source was found again,
+        # and the one an annotator is about to spend an hour on.
+        counters = lock.provenance().get("counters", {})
+        tracked = sum(1 for body in selected if body is not None)
+        job["subject_coverage"] = {
+            "frames": len(selected),
+            "tracked_frames": tracked,
+            "locked_frames": int(counters.get("locked_frames", 0)),
+            "ambiguous_frames": int(counters.get("ambiguous_frames", 0)),
+            "lost_frames": int(counters.get("lost_frames", 0)),
+            "recoveries": int(counters.get("recoveries", 0)),
+            "reassociations": int(counters.get("reassociations", 0)),
+            "multi_person_frames": int(counters.get("multi_person_frames", 0)),
+            "tracked_ratio": (tracked / len(selected)) if selected else None,
+        }
+        # Whatever the floor step concluded, including that it could not. A
+        # plane found in camera space is a world floor only while the camera
+        # is still, so what the recording did is recorded beside it.
+        job["floor_plane"] = replace(
+            floor, camera_moved=None if not positions else False
+        ).to_dict()
         blocking = sorted(issues & BLOCKING_ISSUES)
         job.update(state="partial" if issues else "complete", issues=sorted(issues),
                    blocking_issues=blocking, published=not blocking,

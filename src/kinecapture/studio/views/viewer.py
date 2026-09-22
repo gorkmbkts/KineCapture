@@ -34,6 +34,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
+from kinecapture.studio.services.skeleton_palette import bone_tokens, joint_tokens
 from kinecapture.studio.theme import ThemeTokens
 
 #: Below this the joint is drawn hollow. Not a validity threshold - nothing is
@@ -55,6 +56,12 @@ class ReviewViewer(QWidget):
         self._points: Optional[np.ndarray] = None
         self._confidence: Optional[np.ndarray] = None
         self._bones: tuple[tuple[int, int], ...] = ()
+        self._spec = None
+        #: Anatomical colour token per joint and per bone. Empty until the
+        #: version's own skeleton spec arrives; until then everything is drawn
+        #: in the neutral colour rather than in a guessed side.
+        self._joint_tokens: tuple[str, ...] = ()
+        self._bone_tokens: tuple[str, ...] = ()
         self._highlight: frozenset[int] = frozenset()
         self._placeholder = "Görüntü yok"
         self._badge = ""
@@ -109,6 +116,19 @@ class ReviewViewer(QWidget):
         self._source_size = source_size or (width, height)
         self.update()
 
+    def set_skeleton_spec(self, spec) -> None:  # noqa: ANN001 - SkeletonSpec
+        """The role table, so the overlay uses the *same* anatomy as the 3-D view.
+
+        SKEL-02 asks for one semantics across both pictures. A coach comparing
+        the tracked skeleton against the camera image is matching limbs; if the
+        left arm were turquoise in one view and blue in the other, the two
+        pictures would have to be reconciled before they could be compared.
+        """
+        self._spec = spec
+        self._joint_tokens = joint_tokens(spec)
+        self._bone_tokens = bone_tokens(spec, self._bones)
+        self.update()
+
     def set_skeleton(
         self,
         points: Optional[np.ndarray],
@@ -120,7 +140,9 @@ class ReviewViewer(QWidget):
         self._confidence = (
             None if confidence is None else np.asarray(confidence, dtype=np.float32)
         )
-        self._bones = tuple(bones)
+        if tuple(bones) != self._bones:
+            self._bones = tuple(bones)
+            self._bone_tokens = bone_tokens(self._spec, self._bones)
         self.update()
 
     def set_highlight(self, joints: Sequence[int]) -> None:
@@ -205,24 +227,36 @@ class ReviewViewer(QWidget):
             return
 
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        bone = QPen(QColor(tokens.colour("KcAccentPrimary")))
+        neutral = tokens.colour("KcAnatomyUnknown")
+        bone = QPen()
         bone.setWidth(2)
         bone.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(bone)
-        for start, end in self._bones:
+        for position, (start, end) in enumerate(self._bones):
             if start >= len(points) or end >= len(points):
                 continue
             if not (finite[start] and finite[end]):
                 continue
+            token = (
+                self._bone_tokens[position]
+                if position < len(self._bone_tokens)
+                else None
+            )
+            bone.setColor(QColor(tokens.colour(token) if token else neutral))
+            painter.setPen(bone)
             painter.drawLine(self._to_widget(*points[start]), self._to_widget(*points[end]))
 
-        accent = QColor(tokens.colour("KcAccentPrimary"))
         marked = QColor(tokens.colour("KcStatusRecording"))
         viewport = QColor(tokens.colour("KcSurfaceViewport"))
         confidence = self._confidence
         for index in np.nonzero(finite)[0]:
             highlighted = int(index) in self._highlight
-            colour = marked if highlighted else accent
+            token = (
+                self._joint_tokens[index]
+                if index < len(self._joint_tokens)
+                else None
+            )
+            anatomical = QColor(tokens.colour(token) if token else neutral)
+            colour = marked if highlighted else anatomical
             weak = (
                 confidence is not None
                 and index < len(confidence)

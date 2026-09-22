@@ -48,18 +48,62 @@ def _match_key(text: str) -> str:
 
 @dataclass(frozen=True)
 class LabelOption:
-    """One selectable value: a stable ``code`` plus a display ``label``."""
+    """One selectable value: a stable ``code`` plus a display ``label``.
+
+    An error class also carries the anatomical joints it is *about*. That
+    relationship is defined once, when the class is created, and applied to
+    every interval afterwards so nobody is asked the same question thirty
+    times - but see :attr:`default_roles` for what it is and is not.
+    """
 
     code: str
     label: str
     description: str = ""
+    #: Anatomical roles this class is about, by role name - never by joint
+    #: index, which means different joints in different skeleton formats.
+    #: Empty for a movement class and for an error class defined before this
+    #: existed; empty means *unknown*, not *none*.
+    default_roles: tuple[str, ...] = ()
+    #: Bumped whenever ``default_roles`` changes. An interval records the
+    #: revision it copied, so a class edited later cannot silently rewrite
+    #: what somebody already reviewed.
+    roles_revision: int = 0
 
     @property
     def match_key(self) -> str:
         return _match_key(self.label)
 
+    @property
+    def has_roles(self) -> bool:
+        return bool(self.default_roles)
+
+    def with_roles(self, roles: Sequence[str]) -> "LabelOption":
+        """A copy with new default joints and the next revision.
+
+        The revision moves even when the set is unchanged in content but was
+        re-stated by a person: what an interval records is *which* definition
+        it copied, and two definitions that happen to agree are still two.
+        """
+        return LabelOption(
+            code=self.code,
+            label=self.label,
+            description=self.description,
+            default_roles=tuple(dict.fromkeys(str(role) for role in roles)),
+            roles_revision=self.roles_revision + 1,
+        )
+
     def to_dict(self) -> dict[str, Any]:
-        return {"code": self.code, "label": self.label, "description": self.description}
+        payload: dict[str, Any] = {
+            "code": self.code,
+            "label": self.label,
+            "description": self.description,
+        }
+        if self.default_roles or self.roles_revision:
+            # Written only when there is something to say, so a schema with no
+            # joint relationships is byte-identical to the one before this.
+            payload["default_roles"] = list(self.default_roles)
+            payload["roles_revision"] = int(self.roles_revision)
+        return payload
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> "LabelOption":
@@ -74,20 +118,33 @@ class LabelOption:
             code=code,
             label=str(payload.get("label") or code),
             description=str(payload.get("description", "")),
+            default_roles=tuple(
+                str(role) for role in payload.get("default_roles") or ()
+            ),
+            roles_revision=int(payload.get("roles_revision") or 0),
         )
 
     @classmethod
-    def from_name(cls, name: str, description: str = "") -> "LabelOption":
+    def from_name(
+        cls,
+        name: str,
+        description: str = "",
+        roles: Sequence[str] = (),
+    ) -> "LabelOption":
         """Build an option from a human name, deriving a stable code from it."""
         cleaned = " ".join((name or "").split())
         if not cleaned:
             raise ValidationError(
                 "Ad boş olamaz.", field="label", code="label_name_empty"
             )
+        chosen = tuple(dict.fromkeys(str(role) for role in roles))
         return cls(
             code=slugify(cleaned, fallback="label"),
             label=cleaned,
             description=description,
+            default_roles=chosen,
+            # A class created *with* joints has already had them decided once.
+            roles_revision=1 if chosen else 0,
         )
 
 
@@ -263,6 +320,64 @@ class LabelSchema:
             return existing
         return self.add_error_type(name, description)
 
+    def add_error_type_with_roles(
+        self, name: str, roles: Sequence[str], description: str = ""
+    ) -> LabelOption:
+        """Add an error class together with the joints it is about.
+
+        One operation, because the two halves are one decision: a class stored
+        without its joints is a class somebody has to be asked about again,
+        and a half-made class is exactly what JOINT-01 rules out.
+        """
+        cleaned = " ".join((name or "").split())
+        chosen = tuple(dict.fromkeys(str(role) for role in roles if role))
+        if not chosen:
+            raise ValidationError(
+                "Yeni hata sınıfı için en az bir eklem seçilmelidir.",
+                field="error_type",
+                code="error_type_without_roles",
+                remedy="3B görünümde ilgili eklemlere çift tıklayın.",
+            )
+        existing = self.match_error_type(cleaned)
+        if existing is not None:
+            raise ValidationError(
+                f"'{existing.label}' hata türü zaten tanımlı.",
+                field="error_type",
+                code="error_type_duplicate",
+                details={"code": existing.code, "label": existing.label},
+            )
+        option = LabelOption.from_name(cleaned, description, roles=chosen)
+        self.error_types.append(option)
+        return option
+
+    def set_error_type_roles(
+        self, code: str, roles: Sequence[str]
+    ) -> LabelOption:
+        """Change which joints a class is about, and move its revision.
+
+        What this does **not** do is reach into the intervals already labelled
+        with the class. Each of those recorded the revision it copied, so an
+        edit here changes what the *next* interval inherits and leaves every
+        earlier decision exactly as the person left it.
+        """
+        option = self.find_error_type(code)
+        if option is None:
+            raise ValidationError(
+                f"'{code}' hata türü bulunamadı.",
+                field="error_type",
+                code="error_type_missing",
+            )
+        updated = option.with_roles(roles)
+        self.error_types = [
+            updated if o.code == option.code else o for o in self.error_types
+        ]
+        return updated
+
+    def roles_for_error_type(self, code: str) -> tuple[str, ...]:
+        """A class's default joints, or empty when it declares none."""
+        option = self.find_error_type(code)
+        return option.default_roles if option is not None else ()
+
     def rename_error_type(self, code: str, new_name: str) -> LabelOption:
         """Change an error class's display name, keeping its code stable.
 
@@ -392,9 +507,26 @@ class LabelSchema:
                 "classes": errors,
                 "code_to_index": {code: i for i, code in enumerate(errors)},
                 "labels": {o.code: o.label for o in self.error_types},
+                # The joints a class is *defined* as being about, and which
+                # revision of that definition this release was built from.
+                # An interval's own roles are exported separately: a default
+                # carried over is a different claim from a joint somebody
+                # looked at for that repetition, and a release has to keep
+                # the two apart to be usable as node-level supervision.
+                "default_roles": {
+                    o.code: list(o.default_roles)
+                    for o in self.error_types
+                    if o.default_roles
+                },
+                "roles_revision": {
+                    o.code: int(o.roles_revision)
+                    for o in self.error_types
+                    if o.roles_revision
+                },
                 "note": (
                     "error_multi_hot dizisinin sütun sırası bu code_to_index "
-                    "eşlemesiyle aynıdır."
+                    "eşlemesiyle aynıdır. default_roles sınıf tanımıdır; "
+                    "bir aralığın kendi eklemleri örnek kaydındadır."
                 ),
             },
         }

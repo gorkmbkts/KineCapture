@@ -6,6 +6,10 @@ from kinecapture.core.jsonio import read_jsonl
 from kinecapture.domain.models import FramePacket
 from kinecapture.domain.enums import DataOrigin
 from kinecapture.recording.rgbd_archive import RgbdArchiveReader
+from kinecapture.visualization.skeleton_spec import (
+    MOCK_SKELETON,
+    spec_for_zed_body_format,
+)
 
 
 class SvoSource:
@@ -30,6 +34,20 @@ class SvoSource:
         self.backend.disconnect()
 
 
+def _synthetic_skeleton(profile, extra):  # noqa: ANN001, ANN201
+    """Which skeleton a synthetic replay should generate.
+
+    The run's own ``body_format`` decides, so reprocessing a take as BODY_34
+    really produces BODY_34. A format this build does not know is refused
+    rather than quietly replaced: a version whose joint order is not what it
+    says is worse than a run that stops.
+    """
+    wanted = getattr(profile, "body_format", None) or extra.get("body_format")
+    if not wanted:
+        return MOCK_SKELETON
+    return spec_for_zed_body_format(str(wanted))
+
+
 class SyntheticSource:
     """Replay stored colour and regenerate explicitly synthetic algorithm-v1 poses."""
     def __init__(self, paths, take, profile):
@@ -37,10 +55,15 @@ class SyntheticSource:
             raise ValueError("Synthetic replay requires camera provenance")
         info = take.camera_info
         extra = info.extra
+        # The skeleton the run asked for, exactly as `SvoSource` re-runs the
+        # SDK with `profile.body_format`. Without this the generator fell back
+        # to its 16-joint default and the version declared `mock_16` however
+        # it was processed.
         self.backend = MockCameraBackend(width=info.resolution[0], height=info.resolution[1],
             fps=info.target_fps, seed=extra["seed"], num_bodies=extra.get("num_bodies", 1),
             tracking_loss_every=extra.get("tracking_loss_every", 0),
-            low_confidence_every=extra.get("low_confidence_every", 0), profile=profile)
+            low_confidence_every=extra.get("low_confidence_every", 0), profile=profile,
+            skeleton=_synthetic_skeleton(profile, extra))
         self.info = self.backend.connect()
         self.info.extra["processing_source"] = "synthetic_generator_v1; stored RGB used verbatim"
         self.spec = self.backend.skeleton

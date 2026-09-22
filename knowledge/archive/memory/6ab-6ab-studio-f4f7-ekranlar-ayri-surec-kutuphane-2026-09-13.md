@@ -74,15 +74,15 @@ kararlar ve ölçümle bulunan gerçekler.
 
 ### Ölçülen bütçeler
 
-| Ölçüm | Sonuç | Bütçe |
-|---|---|---|
-| Soğuk açılış (gerçek süreç) | 1,29–1,34 s | ≤3 s ✓ |
-| GUI kare süresi, canlı kayıt sırasında | medyan 0,09 ms · p95 3,7 ms | ≤8 ms ✓ |
-| GUI kare süresi, offline işleme sürerken | medyan 2,88 ms · p95 7,7 ms | ≤8 ms ✓ |
-| Kayıt kaybı (mock, GUI açık/kapalı, 60 ve 200 FPS) | **0** | kayıp yok ✓ |
-| Liste doldurma, 1000 / 5000 satır | 43 / 48 ms | takılma yok ✓ |
-| Kütüphane kaydırma, 500 sürüm | medyan 20,6 ms | — |
-| Kaydırırken thumbnail üretimi | **0 çağrı** | üretim yok ✓ |
+| Ölçüm                                              | Sonuç                       | Bütçe         |
+| -------------------------------------------------- | --------------------------- | ------------- |
+| Soğuk açılış (gerçek süreç)                        | 1,29–1,34 s                 | ≤3 s ✓        |
+| GUI kare süresi, canlı kayıt sırasında             | medyan 0,09 ms · p95 3,7 ms | ≤8 ms ✓       |
+| GUI kare süresi, offline işleme sürerken           | medyan 2,88 ms · p95 7,7 ms | ≤8 ms ✓       |
+| Kayıt kaybı (mock, GUI açık/kapalı, 60 ve 200 FPS) | **0**                       | kayıp yok ✓   |
+| Liste doldurma, 1000 / 5000 satır                  | 43 / 48 ms                  | takılma yok ✓ |
+| Kütüphane kaydırma, 500 sürüm                      | medyan 20,6 ms              | —             |
+| Kaydırırken thumbnail üretimi                      | **0 çağrı**                 | üretim yok ✓  |
 
 Zaman çizelgesi bütçesi (≤16 ms) **F8'e aittir ve henüz ölçülmemiştir.**
 

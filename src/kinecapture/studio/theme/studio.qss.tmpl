@@ -79,6 +79,18 @@ QFrame[kcSurface="viewport"] {
     border-radius: @KcRadiusSmall@px;
 }
 
+/* The labelling screen's working surface: video, 3-D and the editing panel
+ * inside one outer frame, divided by rules rather than separated by gaps.
+ * Without this they read as three unrelated cards, which is exactly what the
+ * 19 September design review objected to. The padding is deliberately zero -
+ * the three regions meet their own frame edge. */
+QFrame[kcSurface="stage"] {
+    background-color: @KcSurfaceStage@;
+    border: @KcBorderWidth@px solid @KcBorderSubtle@;
+    border-radius: @KcRadiusSurface@px;
+    padding: 0;
+}
+
 /* A toolbar-like strip: the same family as the panel it sits on, one step up. */
 QWidget[kcSurface="header"], QFrame[kcSurface="header"] {
     background-color: @KcSurfaceHeader@;
@@ -175,6 +187,37 @@ QLabel[kcRole="section"] {
     font-weight: @KcFontWeightMedium@;
 }
 
+/* The product's own name, on the sign-in screen and nowhere else. The brand
+ * face is used here alone: turning body text into a display face costs
+ * legibility and buys nothing. */
+QLabel[kcRole="brandMark"] {
+    color: @KcTextPrimary@;
+    font-family: @KcFontBrand@;
+    font-size: @KcFontSizeDisplay@px;
+    font-weight: @KcFontWeightMedium@;
+    letter-spacing: 0px;
+}
+
+/* A short line naming which editor the panel is showing. Colour is an
+ * accompaniment to the word, never a replacement for it. */
+QLabel[kcContext="summary"] {
+    color: @KcContextSummary@;
+    font-size: @KcFontSizeSm@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QLabel[kcContext="movement"] {
+    color: @KcContextMovement@;
+    font-size: @KcFontSizeSm@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QLabel[kcContext="fault"] {
+    color: @KcContextFault@;
+    font-size: @KcFontSizeSm@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
 /* ------------------------------------------------------------- status pill */
 
 QLabel[kcStatus="neutral"] {
@@ -229,6 +272,45 @@ QLabel[kcStatus="info"] {
     border-radius: @KcRadiusSmall@px;
     padding: @KcSpacingSm@px @KcSpacingLg@px;
     font-size: @KcFontSizeXs@px;
+}
+
+/* A number in a readout row is coloured, never boxed.
+ *
+ * The pill above is right for a word - "hazır", "kapsam doğrulanamadı" - and
+ * wrong for a figure: a border and padding around a two-character value reads
+ * as a clipped control, and the padding moves every readout after it the
+ * moment the state changes. The mono face already says "this is a number", so
+ * here the state is carried by colour and weight alone. */
+QLabel[kcRole="mono"][kcStatus="live"],
+QLabel[kcRole="mono"][kcStatus="ready"],
+QLabel[kcRole="mono"][kcStatus="warning"],
+QLabel[kcRole="mono"][kcStatus="error"],
+QLabel[kcRole="mono"][kcStatus="neutral"],
+QLabel[kcRole="mono"][kcStatus="info"] {
+    background: transparent;
+    border: none;
+    padding: 0;
+    font-family: @KcFontMono@;
+    font-size: @KcFontSizeSm@px;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QLabel[kcRole="mono"][kcStatus="error"] {
+    color: @KcStatusRecording@;
+}
+
+QLabel[kcRole="mono"][kcStatus="warning"] {
+    color: @KcStatusWarning@;
+}
+
+QLabel[kcRole="mono"][kcStatus="live"],
+QLabel[kcRole="mono"][kcStatus="ready"] {
+    color: @KcStatusLive@;
+}
+
+QLabel[kcRole="mono"][kcStatus="neutral"],
+QLabel[kcRole="mono"][kcStatus="info"] {
+    color: @KcTextSecondary@;
 }
 
 /* ------------------------------------------------------ switches and radios */
@@ -399,6 +481,102 @@ QToolButton::menu-indicator {
     image: none;
 }
 
+/* A square icon button: the transport, the tool row, the panel's icon strip.
+ * One size everywhere, so a row of them has one optical rhythm and the
+ * baseline of the text beside them does not move. Width and height are equal
+ * and fixed here rather than in each caller. */
+QToolButton[kcRole="iconButton"], QPushButton[kcRole="iconButton"] {
+    min-width: @KcIconButtonSize@px;
+    max-width: @KcIconButtonSize@px;
+    min-height: @KcIconButtonSize@px;
+    max-height: @KcIconButtonSize@px;
+    padding: 0;
+    border-radius: @KcRadiusControl@px;
+}
+
+/* The same button in the vertical strip down the panel's right edge. It is
+ * checkable and its checked state has to read at a glance, because it is what
+ * says which of the three views the panel is showing. */
+QToolButton[kcRole="stripButton"] {
+    min-width: @KcIconButtonSize@px;
+    max-width: @KcIconButtonSize@px;
+    min-height: @KcIconButtonSize@px;
+    max-height: @KcIconButtonSize@px;
+    padding: 0;
+    border-radius: @KcRadiusControl@px;
+}
+
+QToolButton[kcRole="stripButton"]:checked {
+    background-color: @KcSurfaceControlActive@;
+    border-color: @KcBorderStrong@;
+}
+
+/* A class on the editor band's quick-select row. It has a surface and a
+ * border even when it is not the chosen one, because a bare QToolButton
+ * beside a text field reads as a word rather than as something to press -
+ * which is what the 21 September review said about several of these rows.
+ * The chosen one is unmistakable: accent fill, accent border, primary text. */
+QToolButton[kcRole="classChip"] {
+    background-color: @KcSurfaceControl@;
+    border: @KcBorderWidth@px solid @KcBorderStrong@;
+    color: @KcTextPrimary@;
+    padding: @KcSpacingSm@px @KcSpacingLg@px;
+}
+
+QToolButton[kcRole="classChip"]:hover {
+    background-color: @KcSurfaceControlHover@;
+}
+
+QToolButton[kcRole="classChip"]:checked {
+    background-color: @KcAccentMuted@;
+    border: @KcBorderWidthStrong@px solid @KcAccentPrimary@;
+    color: @KcTextPrimary@;
+    font-weight: @KcFontWeightMedium@;
+}
+
+/* A control that starts or stops a recording. Red, and only here: the shape
+ * (dot / square) carries the same meaning for anyone who cannot see the hue. */
+QPushButton[kcVariant="record"] {
+    background-color: @KcStatusRecording@;
+    border-color: @KcStatusRecording@;
+    color: @KcTextOnAccent@;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QPushButton[kcVariant="record"]:hover {
+    background-color: @KcStatusRecordingMuted@;
+    color: @KcStatusRecording@;
+}
+
+QPushButton[kcVariant="record"]:disabled {
+    background-color: @KcSurfaceBase@;
+    border-color: @KcBorderSubtle@;
+    color: @KcTextDisabled@;
+}
+
+/* The camera connection, in the transport row beside the record button. Green
+ * while the camera is open - the *only* place the Capture screen states the
+ * connection, since the status block and the "etkin" pill were removed on
+ * 21 September. The wording changes with the colour ("Bağlan" becomes
+ * "Bağlantıyı kes"), so the state is never hue alone. */
+QPushButton[kcConnected="connected"] {
+    background-color: @KcStatusLive@;
+    border-color: @KcStatusLive@;
+    color: @KcTextOnAccent@;
+    font-weight: @KcFontWeightMedium@;
+}
+
+QPushButton[kcConnected="connected"]:hover {
+    background-color: @KcStatusLiveMuted@;
+    color: @KcStatusLive@;
+}
+
+QPushButton[kcConnected="connecting"] {
+    background-color: @KcSurfaceControl@;
+    border-color: @KcStatusWarning@;
+    color: @KcStatusWarning@;
+}
+
 /* -------------------------------------------------------------- navigation */
 
 QFrame#kcNavBar {
@@ -471,6 +649,13 @@ QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled {
 
 QLineEdit[kcState="error"], QSpinBox[kcState="error"], QComboBox[kcState="error"] {
     border-color: @KcStatusRecording@;
+}
+
+/* A caption living inside its own box has to read as a prompt, not as a value
+ * somebody already typed. Muted rather than secondary: one step quieter than
+ * real text at the same size. */
+QLineEdit {
+    placeholder-text-color: @KcTextMuted@;
 }
 
 QComboBox::drop-down {
@@ -630,6 +815,14 @@ QScrollArea, QScrollArea > QWidget > QWidget {
 QScrollArea[kcSurface="base"],
 QScrollArea[kcSurface="base"] > QWidget > QWidget {
     background-color: @KcSurfaceBase@;
+}
+
+/* A scroll area that is a mechanism, not a panel: it stands inside a surface
+ * that has already been painted and must not draw a second lighter rectangle
+ * over it. Used by the label summary, which scrolls without a bar. */
+QScrollArea[kcSurface="none"],
+QScrollArea[kcSurface="none"] > QWidget > QWidget {
+    background-color: transparent;
 }
 
 QStackedWidget, QSplitter, QTabWidget {

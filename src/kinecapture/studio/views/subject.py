@@ -226,44 +226,94 @@ class SubjectPanel(QWidget):
         self._fps = 30.0
 
         outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
+        # Inset on all four sides. Without it the three buttons below ran the
+        # full width of the panel and touched its edges, which is what made
+        # them read as slabs rather than as controls.
+        pad = tokens.metric("KcSpacingLg")
+        outer.setContentsMargins(pad, pad, pad, pad)
         outer.setSpacing(tokens.metric("KcSpacingMd"))
 
         self.status = QLabel("")
         self.status.setWordWrap(True)
         outer.addWidget(self.status)
 
-        outer.addWidget(label("Kayıttaki kişiler", role="section"))
-        self.candidate_area, self.candidate_box = self._scroller()
-        outer.addWidget(self.candidate_area, 1)
+        outer.addWidget(separator())
+        outer.addWidget(label("SEÇİLİ SPORCU", role="sectionTitle"))
+        self.chosen_name = ElidedLabel("Sporcu seçilmedi")
+        self.chosen_name.setProperty("kcRole", "contextValue")
+        outer.addWidget(self.chosen_name)
+        self.chosen_detail = ElidedLabel("")
+        self.chosen_detail.setProperty("kcRole", "pageSubtitle")
+        outer.addWidget(self.chosen_detail)
 
         outer.addWidget(separator())
-        head = QHBoxLayout()
-        head.addWidget(label("Belirsiz aralıklar", role="section"))
-        head.addStretch(1)
+        self.counts = ElidedLabel("")
+        self.counts.setProperty("kcRole", "pageSubtitle")
+        outer.addWidget(self.counts)
+
+        # The lists themselves are unbounded - a recording can hold many
+        # tracked people and many ambiguous intervals - so they do not live
+        # here. R-02 bans scrolling in this panel, and a list folded under a
+        # fold is exactly the failure that ban is about.
+        self.open_people = QPushButton("Kişileri seç…")
+        self.open_people.setToolTip(
+            "Kayıttaki kişileri önizlemeleriyle ayrı pencerede aç"
+        )
+        self.open_people.setProperty("kcVariant", "primary")
+        self.open_questions = QPushButton("Belirsiz aralıkları yanıtla…")
+        self.open_questions.setToolTip(
+            "Tracker'ın kararsız kaldığı aralıkları ayrı pencerede yanıtla"
+        )
         self.all_same = QPushButton("Kalanlar: aynı sporcu")
         self.all_same.setToolTip(
             "Açık kalan bütün aralıkları seçili sporcu olarak yanıtlar. "
             "Zaten yanıtlanmış aralıklar değişmez."
         )
         self.all_same.clicked.connect(lambda: self.answer_all.emit(Verdict.SAME_ATHLETE))
-        head.addWidget(self.all_same)
-        outer.addLayout(head)
+        # Choosing the athlete is the primary act here, and the two below it
+        # answer what is left over. A hierarchy rather than three identical
+        # slabs, and left-aligned at their natural width rather than stretched
+        # to the panel's edges.
+        for button, stretch in (
+            (self.open_people, True),
+            (self.open_questions, False),
+            (self.all_same, False),
+        ):
+            button.setMinimumHeight(tokens.metric("KcControlHeightLarge"))
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
+            row.addWidget(button, 1 if stretch else 0)
+            if not stretch:
+                row.addStretch(1)
+            outer.addLayout(row)
+        outer.addStretch(1)
 
-        self.question_area, self.question_box = self._scroller()
-        outer.addWidget(self.question_area, 2)
+        #: The lists the buttons above open. Built by whoever owns the panel,
+        #: because the window is a sibling of the panel rather than a part of
+        #: it - the panel has to stay scroll-free whatever the window holds.
+        self.candidate_box: Optional[QVBoxLayout] = None
+        self.question_box: Optional[QVBoxLayout] = None
+        self._candidates: tuple[CandidateRow, ...] = ()
+        self._questions: tuple[QuestionRow, ...] = ()
 
-    def _scroller(self) -> tuple[QScrollArea, QVBoxLayout]:
-        area = QScrollArea()
-        area.setWidgetResizable(True)
-        area.setFrameShape(QScrollArea.Shape.NoFrame)
-        holder = QWidget()
-        box = QVBoxLayout(holder)
-        box.setContentsMargins(0, 0, 0, 0)
-        box.setSpacing(self._tokens.metric("KcSpacingSm"))
-        box.addStretch(1)
-        area.setWidget(holder)
-        return area, box
+    def attach_lists(
+        self, candidate_box: QVBoxLayout, question_box: QVBoxLayout
+    ) -> None:
+        """Where the two lists are drawn, once somebody has somewhere to put
+        them. Re-filled at once so a window opened later is not empty."""
+        self.candidate_box = candidate_box
+        self.question_box = question_box
+        self.show_candidates(self._candidates)
+        self.show_questions(self._questions)
+
+    def show_chosen(self, name: str, detail: str = "") -> None:
+        self.chosen_name.setText(name or "Sporcu seçilmedi")
+        self.chosen_name.setProperty("kcStatus", "ready" if name else "warning")
+        style = self.chosen_name.style()
+        if style is not None:
+            style.unpolish(self.chosen_name)
+            style.polish(self.chosen_name)
+        self.chosen_detail.setText(detail)
 
     # ---------------------------------------------------------------- wiring
     def set_context(
@@ -287,6 +337,10 @@ class SubjectPanel(QWidget):
 
     # ----------------------------------------------------------------- fill
     def show_candidates(self, rows: tuple[CandidateRow, ...]) -> None:
+        self._candidates = tuple(rows)
+        self._show_counts()
+        if self.candidate_box is None:
+            return
         self._clear(self.candidate_box)
         for row in rows:
             card = CandidateCard(row, self._tokens, self._frame_at)
@@ -298,8 +352,12 @@ class SubjectPanel(QWidget):
             )
 
     def show_questions(self, rows: tuple[QuestionRow, ...]) -> None:
-        self._clear(self.question_box)
+        self._questions = tuple(rows)
         self.all_same.setEnabled(any(not r.is_answered for r in rows))
+        self._show_counts()
+        if self.question_box is None:
+            return
+        self._clear(self.question_box)
         for row in rows:
             widget = QuestionRowWidget(
                 row, self._tokens, self._fps, self._candidate_title
@@ -316,6 +374,26 @@ class SubjectPanel(QWidget):
                 ),
             )
 
+    def _show_counts(self) -> None:
+        """Numbers, not a list. The unanswered count is the one that gates
+        the export, so it is the one that reads as a warning."""
+        open_questions = sum(1 for row in self._questions if not row.is_answered)
+        parts = [f"{len(self._candidates)} kişi izlendi"]
+        if self._questions:
+            parts.append(
+                f"{open_questions} belirsiz aralık yanıtsız"
+                if open_questions
+                else "belirsiz aralık kalmadı"
+            )
+        self.counts.setText(" · ".join(parts))
+        self.counts.setProperty("kcStatus", "warning" if open_questions else None)
+        style = self.counts.style()
+        if style is not None:
+            style.unpolish(self.counts)
+            style.polish(self.counts)
+        self.open_questions.setEnabled(bool(self._questions))
+        self.open_people.setEnabled(bool(self._candidates))
+
     def _empty(self, text: str) -> QLabel:
         widget = QLabel(text)
         widget.setWordWrap(True)
@@ -331,12 +409,12 @@ class SubjectPanel(QWidget):
                 widget.deleteLater()
 
     def sizeHint(self) -> QSize:  # noqa: N802 - Qt naming
-        return QSize(320, 520)
+        return QSize(320, 260)
 
     def minimumSizeHint(self) -> QSize:  # noqa: N802 - Qt naming
         # Must stay small: this panel lives in a column whose width the user
         # chooses, and a large minimum here would push the whole window wider.
-        return QSize(220, 240)
+        return QSize(220, 200)
 
 
 __all__ = ["CandidateCard", "QuestionRowWidget", "SubjectPanel"]

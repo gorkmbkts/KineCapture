@@ -43,8 +43,9 @@ from typing import Any, Iterable, Optional, Sequence
 import numpy as np
 
 from kinecapture import APP_VERSION
+from kinecapture.core.errors import KineCaptureError
 from kinecapture.core.fingerprint import hash_payload
-from kinecapture.core.jsonio import write_json
+from kinecapture.core.jsonio import read_json, write_json
 from kinecapture.core.paths import ensure_dir, long_path, path_exists
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.processing.annotations import (
@@ -53,6 +54,7 @@ from kinecapture.processing.annotations import (
     JointStatus,
     MovementSample,
     Readiness,
+    annotation_path,
     load_annotations,
     validate_document,
 )
@@ -60,11 +62,18 @@ from kinecapture.processing.review import ReviewDataset
 from kinecapture.processing.subject_review import (
     SUBJECT_REVIEW_SCHEMA_VERSION,
     load_subject_review,
+    subject_review_path,
 )
 
 logger = logging.getLogger(__name__)
 
-CANONICAL_RELEASE_SCHEMA_VERSION = "1.0.0"
+#: 1.1.0 adds ``roles_origin``, ``roles_revision`` and ``roles_reviewed`` to
+#: every exported error interval. Additive: a 1.0.0 reader ignores the three
+#: new keys and every existing field keeps its meaning. An interval written
+#: before the distinction existed carries ``unknown``, which is neither
+#: "inherited" nor "reviewed" - nothing recorded how those joints were chosen,
+#: and a release must not resolve that by guessing.
+CANONICAL_RELEASE_SCHEMA_VERSION = "1.1.0"
 
 #: Arrays copied per sample when the version has them. Anything absent stays
 #: absent: a missing signal is reported in the manifest, never zero-filled.
@@ -195,6 +204,47 @@ class ExportReport:
 
 
 # --------------------------------------------------------------------- gate
+def current_revisions(directory: Path | str) -> tuple[int, int]:
+    """This version's annotation and subject revisions, read straight off disk.
+
+    Deliberately narrow. It opens neither the dataset nor the arrays: it reads
+    ``job.json`` for the take directory and then the two sidecars' own
+    ``revision`` counters. Three small JSON reads, so a screen can ask "does
+    my last result still describe this data?" without paying for another full
+    verification.
+
+    It answers only that question. Whether a version may be exported has one
+    answer and it is :func:`inspect_version`; this is never a substitute for
+    it. A version that cannot be read at all returns ``(-1, -1)``, which
+    compares unequal to any real pair and so counts as changed - the safe
+    direction, because it sends the user back to the real check.
+    """
+    directory = Path(directory)
+    try:
+        job = read_json(directory / "job.json")
+        take_dir = Path(job["take_dir"])
+    except (KineCaptureError, KeyError, ValueError, OSError):
+        return (-1, -1)
+    run_id = directory.name
+
+    def revision_of(path: Path) -> int:
+        if not path_exists(path):
+            # No sidecar is a real state, not a failure. It has to report the
+            # same number the empty document does - both `AnnotationDocument`
+            # and `SubjectReview` start at revision 1 - or a version nobody
+            # has labelled would look changed the moment it was checked.
+            return 1
+        try:
+            return int(dict(read_json(path)).get("revision", 1) or 1)
+        except (KineCaptureError, ValueError, TypeError, OSError):
+            return -1
+
+    return (
+        revision_of(annotation_path(take_dir, run_id)),
+        revision_of(subject_review_path(take_dir, run_id)),
+    )
+
+
 def inspect_version(
     directory: Path,
     schema: LabelSchema,
@@ -515,6 +565,15 @@ def _intervals_of(
             "relative_end": last - start,
             "joint_status": interval.joint_status.value,
             "affected_roles": list(interval.affected_roles),
+            # Where those joints came from, and which revision of the class
+            # definition was copied when they were inherited. A model trained
+            # on node-level supervision needs to know whether a joint list is
+            # a per-repetition judgement or a default applied to it; without
+            # this the two are the same array and the distinction is lost at
+            # the moment it starts to matter.
+            "roles_origin": interval.roles_origin.value,
+            "roles_revision": int(interval.roles_revision),
+            "roles_reviewed": bool(interval.roles_were_reviewed),
             "note": interval.note,
         })
     return out

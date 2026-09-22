@@ -22,6 +22,8 @@ than looking like a hang.
 
 from __future__ import annotations
 
+import os
+import shutil
 import threading
 import time
 from copy import deepcopy
@@ -37,7 +39,7 @@ from kinecapture.camera.base import (
 )
 from kinecapture.core.errors import CameraError, CameraNotConnectedError
 from kinecapture.core.logging import get_logger
-from kinecapture.core.paths import ensure_dir, path_exists
+from kinecapture.core.paths import MAX_PATH, ensure_dir, path_exists
 from kinecapture.domain.arrays import owned_snapshot
 from kinecapture.domain.enums import (
     BodyActionState,
@@ -128,6 +130,51 @@ _TRACKING_STATE_NAMES = {
     "OFF": TrackingState.OFF,
     "TERMINATE": TrackingState.TERMINATE,
 }
+
+
+
+def _target_diagnostics(path: Path) -> dict[str, Any]:
+    """What is actually true about a recording target, for an error to carry.
+
+    Cheap and read-only: no file is created here. Anything that cannot be
+    measured is reported as unknown rather than guessed at.
+    """
+    parent = path.parent
+    facts: dict[str, Any] = {
+        "parent_exists": path_exists(parent),
+        "parent": str(parent),
+    }
+    try:
+        usage = shutil.disk_usage(str(parent if path_exists(parent) else parent.anchor))
+        facts["free_bytes"] = int(usage.free)
+        facts["free_gb"] = round(usage.free / 1e9, 1)
+    except OSError:  # pragma: no cover - unreadable volume
+        facts["free_bytes"] = None
+    facts["parent_writable"] = bool(
+        facts["parent_exists"] and os.access(str(parent), os.W_OK)
+    )
+    return facts
+
+
+def _recording_failure_remedy(absolute: str) -> str:
+    """The advice that fits the evidence, not one sentence for every failure."""
+    if len(absolute) > MAX_PATH:
+        return (
+            "Hedef yol SDK'nın açabileceğinden uzun. Veri klasörünü daha kısa "
+            "bir yola alın."
+        )
+    facts = _target_diagnostics(Path(absolute))
+    if not facts.get("parent_exists"):
+        return "Hedef klasör yok. Veri klasörü ayarını kontrol edin."
+    if not facts.get("parent_writable"):
+        return "Hedef klasöre yazma izni yok. Klasör izinlerini kontrol edin."
+    free = facts.get("free_bytes")
+    if free is not None and free < 2_000_000_000:
+        return f"Diskte yalnız {facts['free_gb']} GB boş alan var. Yer açın."
+    return (
+        "Disk, izin ve yol uzunluğu bu hedefte sorunsuz görünüyor; kamera "
+        "bağlantısını yenileyip tekrar deneyin. Ayrıntılar bu iletide."
+    )
 
 
 class ZedCameraBackend(CameraBackend):
@@ -744,6 +791,19 @@ class ZedCameraBackend(CameraBackend):
         return _TRACKING_STATE_NAMES.get(name, TrackingState.OFF)
 
     # ------------------------------------------------------ native recording
+    @property
+    def native_recording_path_limit(self) -> int:
+        """The SDK opens the file itself, from the plain string we hand it.
+
+        ``sl.RecordingParameters.video_filename`` is a C++ string that reaches
+        the OS without the extended-length prefix, so the legacy ``MAX_PATH``
+        applies however long-path-aware this Python process is. Measured on
+        20 September at the exact length that failed: a plain ``CreateFileW``
+        and a plain ``CreateFileA`` both returned ``ERROR_PATH_NOT_FOUND`` at
+        281 characters while the prefixed call succeeded.
+        """
+        return MAX_PATH
+
     def start_native_recording(self, path: Path) -> bool:
         """Start immutable SVO2 using the requested, explicitly named codec."""
         if self._svo_path is not None:
@@ -761,6 +821,21 @@ class ZedCameraBackend(CameraBackend):
         path = Path(path)
         if path_exists(path):
             raise CameraError("Ham kayıt hedefi zaten var.", code="raw_source_exists")
+        # Last line of defence. The service checks this before it disturbs the
+        # preview; this one catches any caller that did not.
+        absolute = os.path.abspath(str(path))
+        if len(absolute) > MAX_PATH:
+            raise CameraError(
+                f"Ham kayıt hedefi ZED SDK için fazla uzun: {len(absolute)} "
+                f"karakter (sınır {MAX_PATH}).",
+                code="zed_recording_path_too_long",
+                remedy=(
+                    "Veri klasörünü daha kısa bir yola alın (örn. C:\KineCapture). "
+                    "Uygulamanın kendi dosyaları uzun yolu kullanabiliyor, SDK "
+                    "kullanamıyor."
+                ),
+                details={"path": absolute, "length": len(absolute), "limit": MAX_PATH},
+            )
         ensure_dir(path.parent)
         params = sl.RecordingParameters()
         params.video_filename = str(path)
@@ -773,11 +848,22 @@ class ZedCameraBackend(CameraBackend):
             ) from exc
         status = camera.enable_recording(params)
         if status != sl.ERROR_CODE.SUCCESS:
+            # Say what was actually tried and what the machine actually
+            # reports. "Check disk space and permissions" was the whole
+            # message on 20 September, when the disk had 138 GB free, the
+            # folder was writable, and the real reason was the path length.
             raise CameraError(
                 f"ZED native kaydı başlatılamadı: {status}",
                 code="zed_recording_failed",
-                remedy="Disk alanını ve hedef klasörün yazma iznini kontrol edin.",
-                details={"error_code": str(status), "path": str(path)},
+                remedy=_recording_failure_remedy(absolute),
+                details={
+                    "error_code": str(status),
+                    "path": absolute,
+                    "path_length": len(absolute),
+                    "path_limit": MAX_PATH,
+                    "codec": codec,
+                    **_target_diagnostics(Path(absolute)),
+                },
             )
         self._recording = True
         self._recording_path = path

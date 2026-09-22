@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Optional
+from typing import Any, Callable, Iterable, Mapping, Optional
 
 from kinecapture.core.errors import StorageError
 from kinecapture.core.jsonio import dumps
@@ -80,19 +80,52 @@ def checksum_manifest(
 
 
 def verify_checksum_manifest(
-    manifest: Mapping[str, Any], base_dir: Path
+    manifest: Mapping[str, Any],
+    base_dir: Path,
+    *,
+    progress: Optional[Callable[[int, int], None]] = None,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> list[dict[str, Any]]:
     """Re-hash every file in ``manifest`` and return the mismatches.
 
     An empty list means everything matched. Each problem entry carries a
     machine-readable ``issue`` so the dataset QA screen can group them.
+
+    ``progress`` is called with ``(bytes_done, bytes_total)`` after each file.
+    Both numbers are real - the total is the sum of the sizes actually on
+    disk - so a caller can show a percentage without inventing a denominator.
+    Verifying one 2.7 GB version measured 6.8 seconds here; that is the whole
+    of what "opening a version" costs, and it is worth showing honestly.
+
+    ``cancelled`` is polled between files. A caller that has moved on gets the
+    work stopped at the next file boundary rather than paying for the rest of
+    it, and the partial result is discarded by that caller.
     """
     algorithm = str(manifest.get("algorithm", "sha256"))
     problems: list[dict[str, Any]] = []
     files = manifest.get("files") or {}
     if not isinstance(files, Mapping):
         return [{"file": "-", "issue": "manifest_shape_invalid"}]
-    for name, entry in sorted(files.items()):
+
+    names = sorted(files)
+    total = 0
+    if progress is not None:
+        # Measured before hashing starts, from the files that are really
+        # there. A stat per file is nothing beside reading them all.
+        for name in names:
+            entry = files.get(name)
+            if not isinstance(entry, Mapping) or not entry.get("present", True):
+                continue
+            path = Path(base_dir) / name
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        progress(0, total)
+
+    done = 0
+    for name in names:
+        entry = files[name]
         if not isinstance(entry, Mapping):
             problems.append({"file": name, "issue": "entry_shape_invalid"})
             continue
@@ -105,6 +138,8 @@ def verify_checksum_manifest(
             continue
         if expected is None:
             continue
+        if cancelled is not None and cancelled():
+            break
         actual = hash_file(path, algorithm=algorithm)
         if actual != expected:
             problems.append(
@@ -115,6 +150,12 @@ def verify_checksum_manifest(
                     "actual": actual,
                 }
             )
+        if progress is not None:
+            try:
+                done += path.stat().st_size
+            except OSError:
+                pass
+            progress(done, total)
     return problems
 
 

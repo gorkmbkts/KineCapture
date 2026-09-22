@@ -16,6 +16,7 @@ Runtime directories (data, logs) never live inside the source tree.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping, Optional
@@ -36,6 +37,34 @@ USER_STATE_PATH = USER_STATE_DIR / "user_state.yaml"
 
 _VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR")
 _VALID_THEMES = ("dark", "light")
+
+#: Directory names that mean "this tree belongs to a test or a measurement run".
+#: A configuration pointing its data at one of these is a sandbox, whatever it
+#: calls itself, and a sandbox is never allowed to rewrite the real preferences.
+_SANDBOX_MARKERS = ("pytest-of-", ".pytest_cache", "scratchpad")
+
+
+def _is_sandbox_location(path: Optional[Path]) -> bool:
+    """True when ``path`` lives in a temporary or obviously disposable tree."""
+    if path is None:
+        return False
+    try:
+        resolved = Path(os.path.abspath(str(path)))
+    except (OSError, ValueError):  # pragma: no cover - malformed path
+        return False
+    parts = [part.lower() for part in resolved.parts]
+    if any(
+        marker in part for part in parts for marker in _SANDBOX_MARKERS
+    ):
+        return True
+    try:
+        temp_root = Path(os.path.abspath(tempfile.gettempdir()))
+    except (OSError, ValueError):  # pragma: no cover - no temp dir
+        return False
+    try:
+        return resolved.is_relative_to(temp_root)
+    except (AttributeError, ValueError):  # pragma: no cover - Python < 3.9
+        return False
 
 
 def _project_root() -> Path:
@@ -110,6 +139,14 @@ class AppConfig:
     #: Injected in tests; defaults to the OS-local application data folder.
     #: This path is not written to the user preference file.
     identity_db_path: Optional[Path] = None
+    #: Where :func:`save_user_state` writes. Part of the configuration rather
+    #: than a module constant, because *every* other location this object
+    #: carries - datasets, identity, logs - can be pointed at a sandbox, and a
+    #: preference file that stayed global while they moved is exactly how a
+    #: measurement run's temporary dataset root became the user's real one on
+    #: 20 September. Code sets it; a settings file never can (see
+    #: :meth:`from_mapping`), so a stale or hostile YAML cannot redirect it.
+    user_state_path: Optional[Path] = None
     #: The only login value preferences may remember. Passwords are never saved.
     last_username: str = ""
     #: Feature ids the export screen was last configured with. A preference,
@@ -142,6 +179,9 @@ class AppConfig:
         self.identity_db_path = _resolve_user_path(
             self.identity_db_path or default_identity_database_path()
         )
+        self.user_state_path = _resolve_user_path(
+            self.user_state_path or USER_STATE_PATH
+        )
 
         if self.preview_fps <= 0:
             raise ConfigError("preview_fps 0'dan büyük olmalıdır.")
@@ -159,13 +199,48 @@ class AppConfig:
             raise ConfigError("autosave_delay_ms negatif olamaz.")
 
     @property
+    def is_sandboxed(self) -> bool:
+        """True when this configuration's data lives in a disposable tree.
+
+        Read by :func:`save_user_state`, which refuses to write such a
+        configuration into the real per-user preference file.
+        """
+        return any(
+            _is_sandbox_location(path)
+            for path in (self.dataset_root, self.identity_db_path, self.log_dir)
+        )
+
+    @classmethod
+    def sandboxed(cls, root: Path | str, **overrides: Any) -> "AppConfig":
+        """A configuration whose *every* location is under ``root``.
+
+        The one supported way for a test or a measurement script to build a
+        window: datasets, identity, logs and the preference file move
+        together. Moving three of the four is what leaked a temporary dataset
+        root into the user's settings.
+        """
+        base = Path(root).expanduser()
+        return cls(
+            dataset_root=base / "datasets",
+            identity_db_path=base / "identity.sqlite3",
+            log_dir=base / "logs",
+            user_state_path=base / "user_state.yaml",
+            **overrides,
+        )
+
+    @property
     def preview_interval_ms(self) -> int:
         """GUI timer interval derived from the preview throttle (>= 1 ms)."""
         return max(1, int(round(1000.0 / self.preview_fps)))
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "AppConfig":
-        known = {f.name for f in fields(cls) if f.name != "extra"}
+        # ``user_state_path`` is deliberately not loadable: a preferences file
+        # that could name the preferences file is a file that can redirect
+        # every later save away from itself.
+        known = {
+            f.name for f in fields(cls) if f.name not in ("extra", "user_state_path")
+        }
         kwargs = {k: v for k, v in payload.items() if k in known}
         extra = {k: v for k, v in payload.items() if k not in known}
         config = cls(**kwargs)
@@ -227,7 +302,10 @@ def _deep_merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, A
 
 
 def load_config(
-    path: Optional[Path] = None, *, include_user_state: bool = True
+    path: Optional[Path] = None,
+    *,
+    include_user_state: bool = True,
+    user_state_path: Optional[Path] = None,
 ) -> AppConfig:
     """Load shipped defaults, then the per-user overlay on top.
 
@@ -236,16 +314,20 @@ def load_config(
     can find it.
     """
     candidate = Path(path) if path is not None else default_config_path()
+    state_path = Path(user_state_path) if user_state_path is not None else USER_STATE_PATH
     payload: dict[str, Any] = {}
     if candidate.is_file():
         payload = _read_yaml(candidate)
-    if include_user_state and USER_STATE_PATH.is_file():
-        overlay = _read_yaml(USER_STATE_PATH)
+    if include_user_state and state_path.is_file():
+        overlay = _read_yaml(state_path)
         if isinstance(overlay.get("capture"), Mapping):
             overlay["capture"] = CaptureProfile.for_new_capture(overlay["capture"]).to_dict()
         payload = _deep_merge(payload, overlay)
     try:
-        return AppConfig.from_mapping(payload)
+        config = AppConfig.from_mapping(payload)
+        # The file it was read from is the file it will be written back to.
+        config.user_state_path = _resolve_user_path(state_path)
+        return config
     except ConfigError:
         raise
     except (TypeError, ValueError) as exc:
@@ -260,7 +342,33 @@ def save_user_state(config: AppConfig) -> Path:
 
     Only preferences are written. Capture provenance is intentionally excluded:
     it belongs to takes already on disk, not to a global preference file.
+
+    The destination is ``config.user_state_path``, so a configuration built for
+    a sandbox saves inside that sandbox. Writing a sandboxed configuration to
+    the *real* preference file is refused outright.
     """
+    target = Path(config.user_state_path or USER_STATE_PATH)
+    if config.is_sandboxed and not _is_sandbox_location(target):
+        # A configuration whose datasets, identity or logs sit in a temporary
+        # tree is a test or a measurement run. Letting one write a preference
+        # file *outside* that tree is how ``dataset_root`` became a scratchpad
+        # path on 20 September, and how the next recording was aimed at a
+        # 281-character target the SDK could not open. The rule is one
+        # sentence: sandboxed data saves to a sandboxed preference file, or it
+        # does not save. A redirected preference file inside the sandbox -
+        # what the test suite sets up - is fine, and stays fine.
+        raise ConfigError(
+            "Geçici veri köklü ayar gerçek kullanıcı tercihine yazılamaz.",
+            remedy=(
+                "Sanal çalışma için AppConfig.sandboxed(root) kullanın; "
+                "tercih dosyası da o kökün altına yazılır."
+            ),
+            details={
+                "user_state_path": str(target),
+                "dataset_root": str(config.dataset_root),
+                "identity_db_path": str(config.identity_db_path),
+            },
+        )
     state = {
         "backend": config.backend.value,
         "theme": config.theme,
@@ -278,20 +386,20 @@ def save_user_state(config: AppConfig) -> Path:
         "capture": config.capture.to_dict(),
         "mock": asdict(config.mock),
     }
-    USER_STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = USER_STATE_PATH.with_suffix(".yaml.tmp")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_suffix(".yaml.tmp")
     try:
         tmp.write_text(
             yaml.safe_dump(state, allow_unicode=True, sort_keys=True), encoding="utf-8"
         )
-        tmp.replace(USER_STATE_PATH)
+        tmp.replace(target)
     except OSError as exc:
         tmp.unlink(missing_ok=True)
         raise ConfigError(
             "Kullanıcı ayarları kaydedilemedi.",
-            details={"path": str(USER_STATE_PATH), "error": str(exc)},
+            details={"path": str(target), "error": str(exc)},
         ) from exc
-    return USER_STATE_PATH
+    return target
 
 
 __all__ = [

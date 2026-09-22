@@ -14,7 +14,7 @@ from kinecapture.domain.enums import TakeState
 from kinecapture.recording.take_writer import TakeWriter
 from kinecapture.processing import ProcessingConfig, process_take, restart_job
 from kinecapture.processing.annotations import MovementSample
-from kinecapture.processing.jobs import source_identity
+from kinecapture.processing.jobs import PROCESSING_SCHEMA_VERSION, source_identity
 from kinecapture.processing.sources import SyntheticSource
 from kinecapture.processing.review import ReviewDataset
 
@@ -33,6 +33,16 @@ def raw_take(workspace, session):
     writer.finalize()
     backend.disconnect()
     return take, paths
+
+
+def _joint_count(version_dir) -> int:
+    """How many joints this version says it has.
+
+    Read from the version's own `skeleton_spec.json` so the assertion follows
+    whichever body format the run was asked for, rather than the sixteen the
+    synthetic replay used to produce whatever it was told.
+    """
+    return int(read_json(Path(version_dir) / "skeleton_spec.json")["num_joints"])
 
 
 def test_minimal_source_has_no_derived_work(raw_take):
@@ -62,7 +72,10 @@ def test_offline_all_frames_immutable_versioned_review(raw_take):
     review = ReviewDataset(second)
     assert len(review.mapping) == 12
     arrays = review.arrays()
-    assert arrays["joints"].shape == (12, 16, 3)
+    # The version's own declared joint count, not a literal: sixteen was
+    # the shape the synthetic replay produced while it ignored the
+    # requested body format.
+    assert arrays["joints"].shape == (12, _joint_count(second), 3)
     assert not arrays["subject_present"].any()  # no implicit best-body identity
     anchor = review.anchor_at(4)
     assert review.position_of_anchor(anchor) == 4
@@ -273,7 +286,16 @@ def test_a_version_carries_arrays_summary_and_previews(raw_take):
     take, paths = raw_take
     run = process_take(paths.root, ProcessingConfig(store_depth=True, store_proxy=True))
     job = read_json(run / "job.json")
-    assert job["schema_version"] == "1.1.0"
+    # Against the constant, not a literal. A version that records the wrong
+    # schema number is a real defect; a test that has to be edited every time
+    # the schema grows is just a second place to forget.
+    assert job["schema_version"] == PROCESSING_SCHEMA_VERSION
+    # 1.2.0 is what the floor block added, so this is the same assertion from
+    # the other side: the version that is written carries what it claims.
+    assert "floor_plane" in job
+    assert job["floor_plane"]["status"] in {
+        "detected", "not_found", "not_attempted"
+    }
     if job["issues"] == ["review_proxy_unavailable"]:
         # OpenCV cannot open an extended-length path, so on a long temp path
         # there is no proxy and therefore no previews. That is the known
@@ -473,7 +495,15 @@ def test_a_1_0_0_version_still_opens(raw_take):
     try:
         assert old.processing_schema_version == "1.0.0"
         assert old.array_store.is_memmapped is False
-        assert old.window("joints", 1, 4).shape == (3, 16, 3)
+        # Against the version's own skeleton, not a literal. Sixteen was the
+        # shape the synthetic replay produced while it ignored the requested
+        # body format and always built its 16-joint default; the run's
+        # declared joint count is the thing that has to agree.
+        # The legacy copy carries four files and no skeleton spec, so the
+        # count comes from the run it was copied from. What this checks is
+        # that a 1.0.0 version still opens and its window is the shape the
+        # run produced - not a particular body format.
+        assert old.window("joints", 1, 4).shape == (3, _joint_count(run), 3)
         assert old.has_summary is False
         assert old.thumbnails.cover() is None
         assert old.position_of_anchor(old.anchor_at(5)) == 5

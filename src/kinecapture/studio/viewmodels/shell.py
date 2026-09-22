@@ -28,9 +28,15 @@ class ShellViewModel:
         self._session = session
         state = (window_state or WindowState()).normalised()
 
-        start = state.active_page if is_known(state.active_page) else DEFAULT_DESTINATION
+        # Every launch starts on Projeler, whatever the last session was
+        # doing. A remembered tab let the application open on a screen that
+        # belongs to a project nobody had chosen yet in this session, which is
+        # how a recording was aimed at the wrong place: the screens were all
+        # there, so the choice never had to be made.
         self.destinations: tuple[Destination, ...] = DESTINATIONS
-        self.active_page: Observable[str] = Observable(start, name="active_page")
+        self.active_page: Observable[str] = Observable(
+            DEFAULT_DESTINATION, name="active_page"
+        )
         self.inspector_open: Observable[bool] = Observable(
             state.inspector_open, name="inspector_open"
         )
@@ -50,9 +56,72 @@ class ShellViewModel:
         self._unsubscribe_session = session.subscribe(self.refresh_context)
 
     # ------------------------------------------------------------ navigation
+    #: The one screen that is always open. It is how a project gets chosen, so
+    #: gating it would leave nowhere to recover from. Signing out lives in the
+    #: context bar, which no gate touches.
+    UNGATED: tuple[str, ...] = ("projects",)
+
+    def gate_reason(self, key: str) -> str:
+        """Why ``key`` cannot be entered right now, or an empty string.
+
+        Two conditions, and they are not the same one:
+
+        * **a project**, for every screen but Projeler. Without one there is
+          no dataset for a screen to be about;
+        * **a participant**, for Yakalama alone. A recording is written to a
+          person's folder the moment it starts, so "which person" has to be a
+          decision somebody made, not a default the application picked.
+
+        The person chosen here is the *project participant* - the folder the
+        take is written to. Which body in the camera image is being recorded
+        is a separate question, answered on the Yakalama screen by clicking on
+        them, and neither answer implies the other.
+        """
+        if key in self.UNGATED or not is_known(key):
+            return ""
+        if self._session.workspace is None:
+            return "Önce bir proje seçin."
+        if key == "capture" and not self._session.selected_participant_id:
+            return "Kayıt için önce bir katılımcı seçin."
+        return ""
+
+    def can_enter(self, key: str) -> bool:
+        return not self.gate_reason(key)
+
     def navigate(self, key: str) -> bool:
-        """Switch page. An unknown key is ignored rather than crashing the shell."""
+        """Switch page, if this session is allowed to.
+
+        The refusal lives here rather than on the buttons because a button is
+        only one of the ways in: there are ``Ctrl+1..8`` shortcuts, page-step
+        shortcuts, actions on notification cards, and code that navigates
+        directly after finishing a job. Disabling the bar would have left
+        every one of those open.
+        """
         if not is_known(key):
+            return False
+        reason = self.gate_reason(key)
+        if reason:
+            self.report(
+                Message(
+                    headline=reason,
+                    severity=Severity.WARNING,
+                    # One card, not one per attempt: the toast layer folds
+                    # repeats of the same code into a single counted card.
+                    code=(
+                        "capture_needs_participant"
+                        if key == "capture"
+                        else "needs_project"
+                    ),
+                    detail=(
+                        "Projeler ekranından katılımcıyı seçin; kayıt o "
+                        "katılımcının klasörüne yazılır."
+                        if key == "capture"
+                        else "Projeler ekranından bir proje açın."
+                    ),
+                )
+            )
+            # Somewhere to act on it, rather than a refusal and a dead end.
+            self.active_page.set(DEFAULT_DESTINATION)
             return False
         return self.active_page.set(key)
 
@@ -64,7 +133,12 @@ class ShellViewModel:
         """
         keys = [item.key for item in self.destinations]
         index = keys.index(self.active_page.value)
-        self.navigate(keys[max(0, min(len(keys) - 1, index + offset))])
+        target = keys[max(0, min(len(keys) - 1, index + offset))]
+        # Stepping past a gated screen would otherwise bounce the user back to
+        # Projeler and look like the shortcut jumping two places.
+        if not self.can_enter(target):
+            return
+        self.navigate(target)
 
     @property
     def session(self) -> SessionService:

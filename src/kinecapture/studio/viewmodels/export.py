@@ -25,11 +25,14 @@ from kinecapture.export.canonical import (
     ExportReport,
     VersionReport,
     build_release,
+    current_revisions,
     inspect_version,
 )
 from kinecapture.studio.services.library import VersionRow
 from kinecapture.studio.services.messages import Message, Severity, from_error
 from kinecapture.studio.services.session import SessionService
+
+from enum import Enum
 
 from .observable import Event, Observable
 from .tasks import InlineRunner, TaskRunner
@@ -60,6 +63,41 @@ class PreflightRow:
         return " · ".join(self.reasons) or "nedeni belirtilmedi"
 
 
+class CheckState(str, Enum):
+    """What the screen actually knows about the versions in front of it.
+
+    Six states rather than a boolean, because "not checked yet" and "checked
+    and refused" are different answers to the same question and a screen that
+    shows one for the other is lying. STALE is the one worth spelling out: the
+    check passed, and then the labels underneath it changed. The package
+    itself is never in danger - ``build_release`` re-inspects every version on
+    the way in - but a green row that no longer describes the data on disk is
+    an invitation to press a button believing something that is not true.
+    """
+
+    NOT_CHECKED = "not_checked"
+    CHECKING = "checking"
+    EMPTY = "empty"
+    READY = "ready"
+    WARNING = "warning"
+    BLOCKED = "blocked"
+    STALE = "stale"
+
+
+#: One line per state, in the words the screen uses.
+CHECK_STATE_TEXT = {
+    CheckState.NOT_CHECKED: "Henüz kontrol edilmedi.",
+    CheckState.CHECKING: "Sürümler kontrol ediliyor…",
+    CheckState.EMPTY: "Kontrol edilecek sürüm yok.",
+    CheckState.READY: "Bütün sürümler hazır.",
+    CheckState.WARNING: "Bazı sürümler dışarıda kalacak.",
+    CheckState.BLOCKED: "Hiçbir sürüm dışa aktarılamıyor.",
+    CheckState.STALE: (
+        "Kontrolden sonra etiketler değişti. Yazmadan önce tekrar kontrol edin."
+    ),
+}
+
+
 class ExportViewModel:
     """Preflight and build for the canonical dataset package."""
 
@@ -75,6 +113,13 @@ class ExportViewModel:
         self.busy: Observable[bool] = Observable(False, name="busy")
         self.can_build: Observable[bool] = Observable(False, name="can_build")
         self.last_release: Observable[str] = Observable("", name="last_release")
+        self.state: Observable[CheckState] = Observable(
+            CheckState.NOT_CHECKED, name="state"
+        )
+        #: The annotation and subject revisions each version had when it was
+        #: checked. Read back from disk to decide whether the result still
+        #: describes the data, rather than trusting a flag nobody updated.
+        self._checked: dict[str, tuple[int, int]] = {}
         self.options: Observable[CanonicalExportOptions] = Observable(
             CanonicalExportOptions(), name="options"
         )
@@ -103,10 +148,13 @@ class ExportViewModel:
         self._rows = tuple(versions)
         if not versions:
             self.rows.force(())
-            self.summary.set("Kontrol edilecek sürüm seçilmedi.")
+            self.state.set(CheckState.EMPTY)
+            self.summary.set(CHECK_STATE_TEXT[CheckState.EMPTY])
             self.can_build.set(False)
             return
         self.busy.set(True)
+        self.state.set(CheckState.CHECKING)
+        self.summary.set(CHECK_STATE_TEXT[CheckState.CHECKING])
         schema = self.schema
 
         def work() -> list[VersionReport]:
@@ -125,6 +173,12 @@ class ExportViewModel:
 
         def failed(exc: BaseException) -> None:
             self.busy.set(False)
+            # A failed check is not a refusal: nothing was learned about the
+            # versions, so the screen goes back to saying so rather than
+            # leaving the spinner's wording behind.
+            self.state.set(CheckState.NOT_CHECKED)
+            self.summary.set(CHECK_STATE_TEXT[CheckState.NOT_CHECKED])
+            self.can_build.set(False)
             self.message.emit(from_error(exc, headline="Kontrol tamamlanamadı."))
 
         self._runner.run(work, done, failed)
@@ -151,6 +205,43 @@ class ExportViewModel:
             parts.append(f"{blocked} sürüm dışarıda")
         self.summary.set(" · ".join(parts))
         self.can_build.set(bool(ready))
+        self._checked = {
+            report.directory: (
+                int(report.annotation_revision),
+                int(report.subject_revision),
+            )
+            for report in reports
+        }
+        if not rows:
+            self.state.set(CheckState.EMPTY)
+        elif not ready:
+            self.state.set(CheckState.BLOCKED)
+        elif blocked:
+            self.state.set(CheckState.WARNING)
+        else:
+            self.state.set(CheckState.READY)
+
+    # ---------------------------------------------------------- staleness
+    def recheck_freshness(self) -> bool:
+        """Does the last result still describe what is on disk?
+
+        EXPORT-02. The read is deliberately narrow - the revision counters
+        from each version's own annotation and subject files - so it costs a
+        few small JSON reads rather than another full verification. It answers
+        "is this result still about the current data", never "is this data
+        exportable"; that second question has one answer, and it is the check.
+
+        Returns True when the result still stands.
+        """
+        if not self._checked or self.busy.value:
+            return True
+        for directory, (annotations, subject) in self._checked.items():
+            if current_revisions(Path(directory)) != (annotations, subject):
+                self.state.set(CheckState.STALE)
+                self.summary.set(CHECK_STATE_TEXT[CheckState.STALE])
+                self.can_build.set(False)
+                return False
+        return True
 
     # -------------------------------------------------------------- build
     def build(self) -> None:
@@ -159,6 +250,19 @@ class ExportViewModel:
         if releases is None:
             self.message.emit(
                 Message(headline="Önce bir proje açın.", severity=Severity.WARNING)
+            )
+            return
+        if not self.recheck_freshness():
+            self.message.emit(
+                Message(
+                    headline="Kontrolden sonra etiketler değişti.",
+                    severity=Severity.WARNING,
+                    detail=(
+                        "Paket her sürümü yeniden denetleyerek yazılır, ama "
+                        "ekrandaki sonuç artık diskteki veriyi anlatmıyor. "
+                        "Tekrar kontrol edin."
+                    ),
+                )
             )
             return
         accepted = [r for r in self.rows.value if r.accepted]
@@ -223,4 +327,10 @@ class ExportViewModel:
         self.options.set(replace(self.options.value, **changes))
 
 
-__all__ = ["ExportViewModel", "PreflightRow"]
+__all__ = [
+    "CHECK_STATE_TEXT",
+    "CheckState",
+    "ExportViewModel",
+    "PreflightRow",
+    "current_revisions",
+]

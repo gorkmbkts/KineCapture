@@ -40,6 +40,11 @@ class WindowState:
     width: int = _MIN_WIDTH
     height: int = _MIN_HEIGHT
     maximised: bool = True
+    #: Where the window was when it closed. **Recorded, never restored**: from
+    #: 20 September every launch starts on Projeler, so that the project this
+    #: session works in is a choice somebody makes rather than one the last
+    #: session made for them. Kept because it says what the last session was
+    #: doing, which is worth having in a support conversation.
     active_page: str = "projects"
     inspector_open: bool = False
     inspector_width: int = 320

@@ -33,6 +33,8 @@ from kinecapture.studio.views.toasts import (  # noqa: E402
 )
 from kinecapture.studio.theme import load_tokens  # noqa: E402
 
+from conftest import enter_the_workspace  # noqa: E402
+
 
 @pytest.fixture(scope="module")
 def app() -> QApplication:
@@ -60,6 +62,9 @@ def window(app, tmp_path, monkeypatch):
         username="ada", password="kinecapture1", password_confirm="kinecapture1",
     )
     app.processEvents()
+    # Past the project/participant gate: from 20 September every screen
+    # but Projeler needs a project open in this session.
+    enter_the_workspace(widget, app)
     yield widget
     widget.close()
 
@@ -108,19 +113,23 @@ def test_the_layer_is_above_the_page_and_out_of_its_layout(window, app) -> None:
     app.processEvents()
     layer = window.toasts
     assert isinstance(layer, ToastLayer)
+    # A sibling of the *stack*, not of the pages inside it. QStackedLayout
+    # raises the incoming page above its own siblings on every switch, so a
+    # layer parented to the stack ends up underneath the content - which is
+    # exactly what the 19 September measurement found.
+    assert layer.parent() is window.page_area
+    assert layer.parent() is not window.stack
     # No layout owns it: that is what keeps it from taking space.
-    assert layer.parent() is window.stack
-    assert window.stack.layout() is None or layer not in [
-        window.stack.layout().itemAt(i).widget()
-        for i in range(window.stack.layout().count())
-    ]
+    area = window.page_area.layout()
+    assert area is not None
+    assert layer not in [area.itemAt(i).widget() for i in range(area.count())]
     window.viewmodel.notify("Bir şey oldu")
     app.processEvents()
     # Sized to the cards, not to the page: that is what lets a click on empty
     # space reach the page underneath while the card's own buttons still work.
     assert layer.width() == window._tokens.metric("KcToastWidth")
-    assert layer.height() < window.stack.height()
-    assert window.stack.rect().contains(layer.geometry())
+    assert layer.height() < window.page_area.height()
+    assert window.page_area.rect().contains(layer.geometry())
 
 
 # ------------------------------------------------------------- the grouping
@@ -205,7 +214,7 @@ def test_the_buttons_on_a_message_actually_work(window, app) -> None:
     card._details_button.click()
     app.processEvents()
     assert card.details_visible is True
-    assert "yol: D:/yok" in card._technical.text()
+    assert "yol: D:/yok" in card.details_text
 
     card._close_button.click()
     app.processEvents()
@@ -221,9 +230,10 @@ def test_empty_space_still_belongs_to_the_page(window, app) -> None:
     layer = window.toasts
     assert layer.isVisible()
     # A point well away from the card is not the layer's.
-    outside = window.stack.mapTo(window, window.stack.rect().topLeft())
+    host = window.page_area
+    outside = host.mapTo(window, host.rect().topLeft())
     assert layer.geometry().contains(
-        layer.mapFromParent(window.stack.mapFrom(window, outside))
+        layer.mapFromParent(host.mapFrom(window, outside))
     ) is False
 
 
@@ -336,6 +346,103 @@ def test_a_card_is_only_as_tall_as_what_it_shows(window, app) -> None:
     )
     app.processEvents()
     card = window.toasts._toasts[0]  # noqa: SLF001 - measuring the card is the point
-    assert card.height() == card.sizeHint().height(), (
-        f"card is {card.height()}px for a {card.sizeHint().height()}px hint"
+    # The layout's hint, not the widget's. A widget caches its own size hint,
+    # and a card measured once while its buttons wrapped onto three rows went
+    # on reporting that height afterwards - which is the defect this file
+    # gained a measurement for on 20 September, not the property being
+    # defended here.
+    wanted = card.layout().sizeHint().height()
+    assert card.height() == wanted, f"card is {card.height()}px for a {wanted}px hint"
+
+
+# ------------------------------------------------ the layer survives the page
+#
+# The 19 September measurement: after one page change the widget under the
+# toast's own centre was the page, not the card. QStackedLayout raises the
+# page it switches to above its siblings, and the layer used to be one of
+# them, so "Kapat" and "Ayrıntılar" were painted but not clickable. These
+# tests fail on that arrangement and pass on the current one.
+
+
+def _widget_under_the_card(window):  # noqa: ANN001, ANN202
+    """What a click at the newest card's centre would actually reach."""
+    layer = window.toasts
+    centre = layer.geometry().center()
+    return window.page_area.childAt(centre)
+
+
+@pytest.mark.parametrize("destination", ["library", "processing", "dataset", "export"])
+def test_the_card_stays_clickable_after_a_page_change(window, app, destination) -> None:
+    window.viewmodel.navigate("review")
+    app.processEvents()
+    window.viewmodel.report(
+        Message(headline="Bir şey oldu.", severity=Severity.ERROR, code="stays")
     )
+    app.processEvents()
+    assert _widget_under_the_card(window) is not None
+
+    window.viewmodel.navigate(destination)
+    app.processEvents()
+    found = _widget_under_the_card(window)
+    assert found is not None
+    # The card, or something inside it - never the page behind it.
+    assert found is window.toasts or window.toasts.isAncestorOf(found), (
+        f"{destination}: the page is on top of the message ({type(found).__name__})"
+    )
+
+
+def test_the_card_survives_repeated_page_changes(window, app) -> None:
+    window.viewmodel.report(
+        Message(headline="Kalıcı sorun.", severity=Severity.ERROR, code="persists")
+    )
+    app.processEvents()
+    for _ in range(3):
+        for key in ("review", "library", "capture", "projects"):
+            window.viewmodel.navigate(key)
+            app.processEvents()
+    found = _widget_under_the_card(window)
+    assert found is window.toasts or window.toasts.isAncestorOf(found)
+
+
+def test_the_close_button_really_closes_after_a_page_change(window, app) -> None:
+    """Painted is not the same as reachable, which is what the bug was."""
+    window.viewmodel.navigate("review")
+    app.processEvents()
+    window.viewmodel.report(
+        Message(headline="Kapatılabilir mi?", severity=Severity.ERROR, code="closable")
+    )
+    app.processEvents()
+    window.viewmodel.navigate("library")
+    app.processEvents()
+    card = window.toasts._toasts[0]  # noqa: SLF001 - reaching the button is the point
+    assert card.isVisible()
+    card._close_button.click()  # noqa: SLF001
+    app.processEvents()
+    assert window.toasts.toasts == ()
+
+
+def test_a_message_does_not_move_the_labelling_bands(window, app) -> None:
+    """NOTICE-02: showing a message must not re-lay-out video or timeline."""
+    window.viewmodel.navigate("review")
+    app.processEvents()
+    page = window.page("review")
+    before = (
+        QRect(page.viewer.geometry()),
+        QRect(page.skeleton.geometry()),
+        QRect(page.timeline.geometry()),
+    )
+    window.viewmodel.report(
+        Message(
+            headline="Uzun bir başlık ve ayrıntısı olan bir bildirim.",
+            severity=Severity.WARNING,
+            detail="İki satıra yayılacak kadar uzun bir açıklama metni.",
+            code="layout_probe",
+        )
+    )
+    app.processEvents()
+    after = (
+        QRect(page.viewer.geometry()),
+        QRect(page.skeleton.geometry()),
+        QRect(page.timeline.geometry()),
+    )
+    assert before == after

@@ -26,7 +26,7 @@ from kinecapture.export.canonical import (
     inspect_version,
 )
 from kinecapture.processing import ProcessingConfig, process_take
-from kinecapture.processing.annotations import JointStatus
+from kinecapture.processing.annotations import JointStatus, RolesOrigin
 from kinecapture.processing.sources import SyntheticSource
 from kinecapture.processing.subject_review import Verdict
 from kinecapture.recording.take_writer import TakeWriter
@@ -104,6 +104,9 @@ def label(version: Path, schema: LabelSchema, *, with_error: bool = True) -> dic
             error_class=error_code,
             affected_roles=("left_knee",),
             joint_status=JointStatus.SELECTED,
+            # A joint list has to say where it came from: an inherited class
+            # default and a per-repetition judgement are different claims.
+            roles_origin=RolesOrigin.REVIEWED,
         )
     store.flush()
 

@@ -81,6 +81,11 @@ def capture(session: SessionService):
     viewmodel.disconnect()
 
 
+def _fold(text: str) -> str:
+    """Turkish letters folded, so a test does not depend on casing rules."""
+    return text.lower().replace("\u0131", "i").replace("\u0130", "i")
+
+
 def _codes(projects: ProjectsViewModel) -> dict[str, str]:
     return {row.code: row.participant_id for row in projects.participants.value}
 
@@ -131,16 +136,18 @@ def test_the_take_is_written_to_the_selected_participant(
     assert workspace.list_takes(codes["P0001"]) == []
 
 
-def test_without_a_selection_the_default_is_used_but_announced(
+def test_without_a_selection_recording_is_refused(
     projects: ProjectsViewModel, capture: CaptureViewModel, session: SessionService
 , monkeypatch: pytest.MonkeyPatch) -> None:
-    """No selection is filled in, never silently.
+    """Nobody's folder is chosen for them.
 
-    Refusing outright was the first fix, and it was too strong: on a real
-    camera it produced a live preview with a record button that did nothing.
-    The guarantee that matters is the one below - an *explicit* choice is never
-    overridden - so an unmade choice is made here and said out loud instead.
+    Defaulting to the first participant and announcing it was the previous
+    answer, and on 20 September it was not enough: a warning card is read
+    afterwards, while the folder name is written the instant recording starts
+    and nothing later moves it. Which person a take belongs to is a decision
+    somebody makes before the camera rolls.
     """
+    session.select_participant("")
     assert session.selected_participant_id == ""
     seen = []
     capture.message.subscribe(seen.append)
@@ -152,21 +159,14 @@ def test_without_a_selection_the_default_is_used_but_announced(
 
     choose_subject(capture, monkeypatch)
 
-    assert capture.start_recording() is True
-    try:
-        defaulted = [m for m in seen if m.code == "capture_target_defaulted"]
-        assert defaulted, "a target nobody chose has to be named"
-        assert defaulted[0].severity is Severity.WARNING
-        assert "Projeler" in defaulted[0].detail
-        # Exactly one participant received it, and the screen agrees which.
-        codes = _codes(projects)
-        used = capture.target.value.participant_code
-        assert used in codes
-        assert session.workspace.list_takes(codes[used])
-        other = next(code for code in codes if code != used)
-        assert session.workspace.list_takes(codes[other]) == []
-    finally:
-        capture.stop_recording()
+    assert capture.start_recording() is False
+    refused = [m for m in seen if m.code == "capture_refused"]
+    assert refused, "a refusal has to be said, not just returned"
+    assert "katilimci" in _fold(refused[-1].headline)
+    assert "Projeler" in refused[-1].detail
+    # And nothing was created anywhere to make it possible.
+    for code in _codes(projects).values():
+        assert session.workspace.list_takes(code) == []
 
 
 def test_the_target_cannot_be_changed_while_a_take_is_open(

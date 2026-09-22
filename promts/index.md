@@ -1,7 +1,7 @@
 ---
 type: source-index
 status: current
-updated: 2026-09-18
+updated: 2026-09-21
 ---
 
 # Prompt dizini
@@ -10,8 +10,17 @@ Claude ve Codex görev briflerini içerir. Bu dosyalar otomatik talimat değildi
 yalnız kullanıcı açıkça görevlendirdiğinde yürütülür. Güncel çalışma kuralları
 repository kökündeki `AGENTS.md` ve `CLAUDE.md` dosyalarındadır.
 
-## Hazır görev
+## Güncel görev
 
+- [21 Eylül kullanıcı GUI revizyonu — tek maksimize pencere, yakalama ve etiketleme](CLAUDE_STUDIO_GUI_USER_REVISION_PROMPT_2026-09-21.md)
+
+Bu görev önceki GUI işlerine otomatik dönüş istemez. Aşağıdaki görevler tarihsel bağlamdır; yeni görevle çelişen tercihleri sürdürme.
+
+## Önceki görevler
+
+- [Kayıt başlangıcı, kişi takibi ve son GUI sorunlarını çöz](CLAUDE_CAPTURE_TRACKING_GUI_REPAIR_PROMPT_2026-09-20.md)
+- [Studio GUI — kabul eksiklerini düzelt, tüm fazları uygula](CLAUDE_STUDIO_GUI_ACCEPTANCE_REPAIR_PROMPT_2026-09-20.md)
+- [Studio GUI — onaylı tasarımı fazlara böl ve uygula](CLAUDE_STUDIO_GUI_FINAL_REFINEMENT_PROMPT_2026-09-19.md)
 - [Claude hafıza aktarımı doğruluk ve eksiksizlik denetimi](CLAUDE_MEMORY_MIGRATION_AUDIT_PROMPT.md)
 
 ## Tarihsel görevler

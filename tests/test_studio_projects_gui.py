@@ -315,9 +315,15 @@ def test_editing_marks_the_page_dirty_with_a_count(
 def test_an_invalid_value_blocks_save_and_names_the_field(
     open_window, app: QApplication
 ) -> None:
-    # Navigated to first: a widget on a stack page that is not current reports
-    # isVisible() False, so the assertion below would pass for the wrong reason.
-    open_window.viewmodel.navigate("settings")
+    # A project first: from 20 September every screen but Projeler is gated on
+    # one, and a gated navigation goes back to Projeler. Then navigated to,
+    # because a widget on a stack page that is not current reports
+    # isVisible() False and the assertion below would fail for that reason.
+    projects = open_window.viewmodel_for["projects"]
+    projects.reload_projects()
+    assert projects.create_project("Gezinti")
+    app.processEvents()
+    assert open_window.viewmodel.navigate("settings")
     app.processEvents()
     page = open_window.page("settings")
     viewmodel = open_window.viewmodel_for["settings"]
