@@ -610,6 +610,18 @@ QToolButton[kcRole="navItem"]:focus {
     border-bottom: @KcBorderWidthStrong@px solid @KcFocusRing@;
 }
 
+/* A step this session cannot enter yet. Dimmed like a disabled control, but
+ * still a control: pressing it has to say what is missing, and Qt sends no
+ * click from something that is genuinely disabled. */
+QToolButton[kcRole="navItem"][kcGated="true"] {
+    color: @KcTextDisabled@;
+}
+
+QToolButton[kcRole="navItem"][kcGated="true"]:hover {
+    color: @KcTextDisabled@;
+    background-color: @KcSurfaceControlHover@;
+}
+
 /* --------------------------------------------------------------- inspector */
 
 QFrame#kcInspector {

@@ -253,10 +253,23 @@ def test_the_actions_follow_the_selected_job(page) -> None:
     assert not view.cancel_button.isEnabled()
 
 
-def test_the_long_profile_detail_stays_folded_away(page) -> None:
+def test_the_profile_is_one_line_with_no_fold(page) -> None:
+    """The 22 September user decision, which supersedes the fold.
+
+    "Ayrıntılar" opened a technical list *inside* a band whose height is
+    matched to the other column's, so the two buttons under it were pushed off
+    the bottom of the page. It is gone; the one-line summary stays, with the
+    full profile in its tooltip and stated in full on Ayarlar, which is where
+    it is changed.
+    """
     view, _window, app = page
     app.processEvents()
-    assert not view.profile_detail.isVisibleTo(view)
-    view.profile_button.setChecked(True)
-    app.processEvents()
-    assert view.profile_detail.isVisibleTo(view)
+    assert not hasattr(view, "profile_button")
+    assert not hasattr(view, "profile_detail")
+    assert view.profile_label.isVisibleTo(view)
+    assert view.profile_label.text()
+    # Nothing in the left foot may be pushed out of the page by it.
+    foot = view.sources_foot
+    for button in (view.start_button, view.start_all_button):
+        bottom = button.mapTo(view, button.rect().bottomLeft()).y()
+        assert bottom <= foot.mapTo(view, foot.rect().bottomLeft()).y() + 1

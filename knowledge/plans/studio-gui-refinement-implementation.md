@@ -467,7 +467,7 @@ Durum sözlüğü: `planlandı` · `uygulandı` · `doğrulandı` · `kısmi` ·
 | CAM-02 | F11 | doğrulandı | inspect() testleri | — |
 | CAM-03 | F11 | uygulandı | zoom/pan/merkezle | — |
 | CAM-04 | F11 | doğrulandı | pivot/hedef testleri | — |
-| FLOOR-01 | F11 | doğrulandı | grid ayak altında + merkezli, görsel | — |
+| FLOOR-01 | F11 | doğrulandı | grid ayak altında + merkezli, görsel | `superseded` (kısmen): ölçülmüş zeminde merkez kamerada kalıyordu (3,03 m); 22 Eylül'de onarıldı, [rapor](../reports/studio-gui-user-revision-validation-2026-09-21.md) |
 | FLOOR-02 | F12 | doğrulandı | gerçek SVO'da 0.02 s'de detected | — |
 | FLOOR-03 | F12 | doğrulandı | şema + referans uzayı testleri | hareketli kamera doğrulanmadı |
 | FLOOR-04 | F12 | doğrulandı | dört durum ayrımı testleri | — |
@@ -854,7 +854,9 @@ timer duruyor.
 
 `FLOOR-01` grid sporcunun ayaklarının altında ve yatayda merkezinde; referans
 penceresinden bir kez kuruluyor, her karede yeniden hesaplanmıyor, zıplamada
-yükselmiyor.
+yükselmiyor. (`superseded`, kısmen: yalnız zemin ölçülmemiş yolda doğruydu;
+F12'nin ölçülmüş zemin yolu merkezi kamerada bırakıyordu. 22 Eylül onarımı ve
+ölçümü [doğrulama raporunda](../reports/studio-gui-user-revision-validation-2026-09-21.md).)
 
 **Ölçülen (gerçek pencere).** Preset yolculuğu **1.51 s**; varışta
 `timer running: False`.

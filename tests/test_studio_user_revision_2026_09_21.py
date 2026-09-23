@@ -268,28 +268,23 @@ def test_the_selection_survives_the_queue_being_re_read(queue, app) -> None:
     assert view._selected_job() is not None
 
 
-def test_pause_resume_and_cancel_really_act_on_the_job(queue, app) -> None:
+def test_cancel_and_retry_really_act_on_the_job(queue, app) -> None:
+    """Two actions, and both of them do something.
+
+    Duraklat and Devam et were removed on 22 September: holding a job and
+    letting it go again was a thing this screen could do and nobody wanted.
+    Pausing itself is not gone - a live recording still hands the GPU back by
+    pausing every running job - it is simply not a button.
+    """
     view, job, take = queue
     service = view.viewmodel.service
     raw = Path(str(take.directory)) / "raw"
     before = sorted(p.name for p in raw.rglob("*")) if raw.exists() else None
 
-    assert view.pause_button.isEnabled()
+    assert not hasattr(view, "pause_button")
+    assert not hasattr(view, "resume_button")
     assert view.cancel_button.isEnabled()
-    assert not view.resume_button.isEnabled()
     assert not view.retry_button.isEnabled()
-
-    view.pause_button.click()
-    app.processEvents()
-    assert service.job_for(take.take_id).progress.state is JobState.PAUSED
-    # Held, not killed: the work done so far is still there.
-    assert job.process.poll() is None
-    assert view.resume_button.isEnabled()
-
-    view.resume_button.click()
-    app.processEvents()
-    assert service.job_for(take.take_id).progress.state is JobState.RUNNING
-    assert view.pause_button.isEnabled()
 
     view.cancel_button.click()
     for _ in range(80):
@@ -317,13 +312,49 @@ def test_an_action_that_is_off_says_what_would_turn_it_on(queue, app) -> None:
     assert "Bir iş seçin" in view.action_note.text()
     assert not any(
         button.isEnabled()
-        for button in (
-            view.pause_button,
-            view.resume_button,
-            view.cancel_button,
-            view.retry_button,
-        )
+        for button in (view.cancel_button, view.retry_button)
     )
+
+
+def test_the_queue_table_never_scrolls_sideways(window, app) -> None:
+    """The last column takes what is left and elides.
+
+    It used to be sized to its contents, and its contents are sentences: the
+    column grew to the longest issue list, the table grew past its container
+    and a horizontal scrollbar appeared under it. Now the section is stretched
+    to the leftover, the bar is switched off in that direction, and cells
+    elide with an ellipsis.
+
+    The policy is what is checked here, not the arithmetic: this window is
+    driven at the offscreen platform's 796 px, where six columns of real
+    content do not fit whatever the policy says. On the target display it
+    fits exactly - measured on 22 September, 1920x1080 maximised: the six
+    sections total 1114 px in a 1114 px viewport.
+    """
+    window.viewmodel.navigate("processing")
+    app.processEvents()
+    view = window.page("processing")
+    header = view.job_view.horizontalHeader()
+    assert header.stretchLastSection()
+    assert (
+        view.job_view.horizontalScrollBarPolicy()
+        is Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    assert not view.job_view.horizontalScrollBar().isVisible()
+    assert view.job_view.textElideMode() is Qt.TextElideMode.ElideRight
+
+
+def test_a_running_job_does_not_draw_over_its_own_buttons(queue, app) -> None:
+    """The progress bar appears when a job runs; the band has to have kept
+    room for it, or it is painted straight through İptal and Yeniden dene."""
+    view, _job, _take = queue
+    view._align_bands()
+    app.processEvents()
+    assert view.progress.isVisible()
+    bar_bottom = view.progress.mapTo(view, view.progress.rect().bottomLeft()).y()
+    for button in (view.cancel_button, view.retry_button):
+        top = button.mapTo(view, button.rect().topLeft()).y()
+        assert top >= bar_bottom
 
 
 def test_the_two_processing_containers_share_their_top_and_bottom(window, app) -> None:

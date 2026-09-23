@@ -5,6 +5,13 @@ ilgili bağlantıyı aç. Tarihsel arşivi topluca yükleme.
 
 ## Güncel durum
 
+- **23 Eylül: yayın kapısı ve temiz Windows kurucusu planlandı, uygulanmadı.**
+  Önce export doğruluğu + ölçek testleri (≥30k segment, ≥30k run, ≥100 sınıf),
+  sonra conda-pack + preflight (ZED SDK birebir 5.4.1, NVIDIA sürücü ≥ min)
+  kurucu; sıfır veri, sistem sahibi `gorkembektas` yalnız scrypt özetiyle.
+  [Karar](knowledge/decisions/windows-installer-release-2026-09-23.md) ·
+  [Prompt](promts/CLAUDE_RELEASE_GATE_AND_WINDOWS_INSTALLER_PROMPT_2026-09-23.md).
+
 - **21 Eylül son kullanıcı GUI revizyonu uygulandı; kullanıcı kabulü açık.**
   [Kararlar](knowledge/decisions/studio-gui-user-revision-2026-09-21.md) ·
   [Uygulama ve doğrulama](knowledge/reports/studio-gui-user-revision-validation-2026-09-21.md) ·
@@ -15,10 +22,23 @@ ilgili bağlantıyı aç. Tarihsel arşivi topluca yükleme.
   satırında ve bağlıyken yeşil; işleme iki container'ı aynı hizada; etiketleme
   editörü iki yatay hat ve ilk açılışta hareket kipi; yalnız Etiket özeti
   sekmesi çubuksuz kaydırıyor. Ölçüm 1920×1080, %100 ölçek. Görsel kabul açık.
-  **22 Eylül düzeltmesi:** yakalama sağ container'ı önizlemeyle aynı kutu
+  **22 Eylül düzeltmeleri:** yakalama sağ container'ı önizlemeyle aynı kutu
   (aynı üst/alt/yükseklik), kazanılan yer blokların arasına dağıtılıyor;
   etiketleme bandı ızgara oldu ve Başlangıç/Bitiş kutuları yeni sınıf metin
-  kutusunun tam altında, aynı sol ve sağ kenarda.
+  kutusunun tam altında, aynı sol ve sağ kenarda; kapalı gezinme adımı artık
+  **devre dışı değil sönük** (devre dışı düğme click göndermediği için uyarı
+  hiç çıkmıyordu); üst şeritteki kayıt göstergesi/süre/durdur kaldırıldı; iş
+  kuyruğu tablosu container'a sığıyor ve son sütun "…" ile kısalıyor, kuyrukta
+  yalnız **İptal + Yeniden dene** kaldı, "Ayrıntılar" katlanır profil bloğu
+  kaldırıldı; **Veri Seti** sağ yarısı dört istatistik bloğu oldu (hareket
+  sınıfı, hata sınıfı, hazırlık durumu, katılımcı başına kapsam) ve liste
+  daraltılıp eylemleri kendi üstüne alındı.
+  **22 Eylül üçüncü tur:** bantta "Hata aralığı ekle" kaldırıldı; eylemler alt
+  satırda sağa yaslı — hareket: çöp · Diğer sınıflar · Sınıfsızlara uygula;
+  hata: çöp · Diğer sınıflar · Eklemleri düzenle · Harekete dön · Not; Diğer
+  sınıflar her zaman görünür. 3B ızgara **ölçülmüş zeminde kameraya
+  merkezleniyordu** (sporcu 3,03 m, ızgara ±3 m); artık ayak pivotunda
+  (0,00 m, gerçek sürümde ölçüldü).
 
 - **İş kuyruğu düğmeleri çalışıyor; sorun servis değil seçimdi.**
   `RowTableModel.set_rows` modeli sıfırlar, sıfırlama tablonun seçimini siler ve
@@ -122,6 +142,9 @@ Ana görünüm: [KineCapture wiki](knowledge/index.md)
   [Denetim ve nedenler](knowledge/audits/studio-gui-acceptance-audit-2026-09-20.md) ·
   [Yeni karar/fikir haritası](knowledge/decisions/studio-gui-repair-2026-09-20.md) ·
   [Claude düzeltme görevi](promts/CLAUDE_STUDIO_GUI_ACCEPTANCE_REPAIR_PROMPT_2026-09-20.md)
+- Yayın kapısı ve Windows kurucusu:
+  [Karar](knowledge/decisions/windows-installer-release-2026-09-23.md) ·
+  [Prompt](promts/CLAUDE_RELEASE_GATE_AND_WINDOWS_INSTALLER_PROMPT_2026-09-23.md)
 - Commit geçmişi:
   [Git kilometre taşları](knowledge/milestones/git-history.md)
 - Studio F0–F15 faz özeti:

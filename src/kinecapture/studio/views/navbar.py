@@ -117,11 +117,23 @@ class NavBar(QFrame):
         make the workflow look shorter than it is and leave somebody wondering
         where the step they were told about went. They are dimmed, and their
         tooltip says what is missing rather than repeating the subtitle.
+
+        **A gated button is dimmed, not disabled.** Qt sends no ``clicked``
+        from a disabled widget, so pressing Yakalama with no participant
+        chosen did nothing at all - no movement, no message, nothing to read.
+        The refusal already existed and said the right thing; it never got the
+        chance to fire. Now the press reaches
+        :meth:`ShellViewModel.navigate`, which refuses it and raises the card
+        that says which step is missing.
         """
         self._gated = dict(reasons)
         for key, button in self._buttons.items():
             reason = self._gated.get(key, "")
-            button.setEnabled(not reason)
+            button.setProperty("kcGated", "true" if reason else None)
+            style = button.style()
+            if style is not None:
+                style.unpolish(button)
+                style.polish(button)
             item = destination_for(key)
             index = self.keys.index(key) + 1 if key in self.keys else 0
             button.setToolTip(

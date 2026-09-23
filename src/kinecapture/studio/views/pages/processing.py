@@ -136,11 +136,17 @@ def _job_columns() -> tuple[Column[Job], ...]:
             lambda j: (f"{j.progress.rate_fps:.1f} FPS" if j.progress.rate_fps else "—"),
             numeric=True,
         ),
+        # Deliberately *not* sized to its contents. An issue list is a
+        # sentence or several, and a column as wide as its longest one pushed
+        # the table past the container and put a horizontal scrollbar under
+        # it. This one takes whatever width is left and elides; the whole text
+        # is in the tooltip, where a paragraph belongs.
         Column(
             "issues",
             "Bulgular",
             lambda j: " · ".join(j.progress.issue_texts) or "—",
             tooltip=lambda j: "\n".join(j.progress.issue_texts) or "Bulgu yok",
+            minimum=160,
         ),
     )
 
@@ -187,8 +193,6 @@ class ProcessingPage(StudioPage):
         self.start_button.clicked.connect(self._start_selected)
         self.start_all_button.clicked.connect(self._start_all)
         self.refresh_button.clicked.connect(self._refresh)
-        self.pause_button.clicked.connect(self._pause_selected)
-        self.resume_button.clicked.connect(self._resume_selected)
         self.cancel_button.clicked.connect(self._cancel_selected)
         self.retry_button.clicked.connect(self._retry_selected)
         self.job_view.selectionModel().selectionChanged.connect(self._job_selected)
@@ -282,28 +286,19 @@ class ProcessingPage(StudioPage):
         self.selection_summary.setProperty("kcRole", "pageSubtitle")
         foot_column.addWidget(self.selection_summary)
 
+        # One line, and only one. The "Ayrıntılar" fold that used to sit at
+        # the end of this row opened a technical list *inside* a band whose
+        # height is matched to the other column's, so the two buttons under it
+        # were pushed off the bottom of the page - reported on 22 September,
+        # and removed rather than made to fit: the same profile is stated in
+        # full on Ayarlar, which is where it is changed.
         profile_row = QHBoxLayout()
         profile_row.setSpacing(tokens.metric("KcSpacingSm"))
         profile_row.addWidget(label("ETKİN PROFİL", role="sectionTitle"))
         self.profile_label = ElidedLabel("")
         self.profile_label.setProperty("kcRole", "pageSubtitle")
         profile_row.addWidget(self.profile_label, 1)
-        self.profile_button = QPushButton("Ayrıntılar")
-        self.profile_button.setProperty("kcVariant", "quiet")
-        self.profile_button.setCheckable(True)
-        self.profile_button.setIcon(
-            iconset.icon("expand", tokens, size=tokens.metric("KcIconSize"))
-        )
-        self.profile_button.toggled.connect(self._toggle_profile)
-        profile_row.addWidget(self.profile_button)
         foot_column.addLayout(profile_row)
-        # The long technical list stays folded away: it is wanted exactly when
-        # something looks wrong, and never while choosing what to queue.
-        self.profile_detail = QLabel("")
-        self.profile_detail.setProperty("kcRole", "mono")
-        self.profile_detail.setWordWrap(True)
-        self.profile_detail.hide()
-        foot_column.addWidget(self.profile_detail)
 
         actions = QHBoxLayout()
         actions.setSpacing(tokens.metric("KcSpacingMd"))
@@ -356,6 +351,14 @@ class ProcessingPage(StudioPage):
         head_column.addLayout(counts)
 
         self.job_model, self.job_view = self._make_table(_job_columns(), "İşler")
+        # The last column absorbs the leftover width rather than demanding its
+        # own, and the table never scrolls sideways: a queue that is wider
+        # than its container is the 22 September report. Cells elide with an
+        # ellipsis, which is all the reader needs to know the text goes on.
+        self.job_view.horizontalHeader().setStretchLastSection(True)
+        self.job_view.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
         column.addWidget(self.job_view, 1)
 
         foot = QWidget(panel)
@@ -375,14 +378,19 @@ class ProcessingPage(StudioPage):
         self.progress.hide()
         foot_column.addWidget(self.progress)
 
+        # Two actions, not four. The 22 September user decision removes
+        # Duraklat and Devam et: holding a job and letting it go again is a
+        # thing this screen could do and nobody wanted, and every press of
+        # either was one more state to reason about. What is left is the pair
+        # that answers a real question - stop this, or run it again - and
+        # cancelling still never touches the raw recording.
+        #
+        # Pausing itself is not gone from the product: a live recording still
+        # hands the GPU back by pausing every running job
+        # (``ProcessingViewModel.pause_for_recording``) and resuming
+        # afterwards. It is simply not a button any more.
         job_actions = QHBoxLayout()
         job_actions.setSpacing(tokens.metric("KcSpacingMd"))
-        self.pause_button = QPushButton("Duraklat")
-        self.pause_button.setToolTip(
-            "Seçili işi olduğu yerde tutar. Yapılan iş korunur."
-        )
-        self.resume_button = QPushButton("Devam et")
-        self.resume_button.setToolTip("Duraklatılan işi kaldığı yerden sürdürür.")
         self.cancel_button = QPushButton("İptal")
         self.cancel_button.setToolTip(CANCEL_NOTE)
         self.retry_button = QPushButton("Yeniden dene")
@@ -391,8 +399,6 @@ class ProcessingPage(StudioPage):
             "olduğu gibi kalır."
         )
         for button in (
-            self.pause_button,
-            self.resume_button,
             self.cancel_button,
             self.retry_button,
         ):
@@ -440,7 +446,6 @@ class ProcessingPage(StudioPage):
         self.bind(viewmodel.jobs, self._show_jobs)
         self.bind(viewmodel.summary, self.summary.setText)
         self.bind(viewmodel.busy, self._show_busy)
-        self.bind(viewmodel.can_pause, self._show_pause_support)
         self.bind(viewmodel.profile_summary, self.profile_label.setText)
         self.bind(viewmodel.profile_rows, self._show_profile_rows)
         self.bind_event(viewmodel.message, self.show_message)
@@ -467,20 +472,34 @@ class ProcessingPage(StudioPage):
 
         Re-run on every resize because a wrapped label changes a band's
         requested height with the window's width.
+
+        The progress bar is made visible for the measurement and put back
+        afterwards. A hidden widget asks a layout for nothing, so a band sized
+        while it was hidden had no room for it - and the moment a job started
+        running, the bar was drawn straight through İptal and Yeniden dene.
         """
-        for left, right in (
-            (self.sources_head, self.queue_head),
-            (self.sources_foot, self.queue_foot),
-        ):
-            wanted = max(
-                left.sizeHint().height(),
-                right.sizeHint().height(),
-                left.minimumSizeHint().height(),
-                right.minimumSizeHint().height(),
-            )
-            for band in (left, right):
-                if band.minimumHeight() != wanted or band.maximumHeight() != wanted:
+        was_visible = self.progress.isVisible()
+        self.progress.setVisible(True)
+        try:
+            for left, right in (
+                (self.sources_head, self.queue_head),
+                (self.sources_foot, self.queue_foot),
+            ):
+                for band in (left, right):
+                    band.setMinimumHeight(0)
+                    band.setMaximumHeight(16777215)
+                    band.layout().invalidate()
+                    band.layout().activate()
+                wanted = max(
+                    left.sizeHint().height(),
+                    right.sizeHint().height(),
+                    left.minimumSizeHint().height(),
+                    right.minimumSizeHint().height(),
+                )
+                for band in (left, right):
                     band.setFixedHeight(wanted)
+        finally:
+            self.progress.setVisible(was_visible)
 
     #: The source list's share at rest. The queue carries stage, progress,
     #: rate and time-remaining per row and needs the wider half.
@@ -529,21 +548,18 @@ class ProcessingPage(StudioPage):
         )
         self.open_note.show()
 
-    def _toggle_profile(self, shown: bool) -> None:
-        self.profile_detail.setVisible(shown)
-
     def _show_profile_rows(self, rows: tuple[tuple[str, str], ...]) -> None:
-        self.profile_detail.setText(
-            "\n".join(f"{name:<20}{value}" for name, value in rows)
+        """The full profile as the row tooltip, and nowhere on the page.
+
+        It is still worth having somewhere a pointer can reach - which model,
+        which depth mode - just not as a fold that grows this band.
+        """
+        self.profile_label.setToolTip(
+            "\n".join(f"{name}: {value}" for name, value in rows)
         )
         # The one-line summary is part of what the selection block says, so it
         # is repeated there whenever the profile changes under it.
         self._take_selected()
-
-    def _show_pause_support(self, supported: bool) -> None:
-        self.pause_button.setToolTip(
-            "" if supported else "Bu makinede duraklatma desteklenmiyor."
-        )
 
     @staticmethod
     def _keep_selection(view, key_of):  # noqa: ANN001, ANN205
@@ -712,42 +728,31 @@ class ProcessingPage(StudioPage):
         return takes[0] if takes else None
 
     def _job_selected(self, *_args) -> None:
-        """Which of the four apply to the selected job, and why not the rest.
+        """Which of the two apply to the selected job, and why not the other.
 
-        Each answer is a state, not a guess: RUNNING can be paused and
-        cancelled, PAUSED can be resumed and cancelled, QUEUED can be
+        Each answer is a state, not a guess: anything still going can be
         cancelled, and anything finished can be run again. A button that is
-        off says what would turn it on, in :attr:`action_note` - the
-        21 September report was partly that these four looked broken, and a
-        greyed control with no sentence beside it is indistinguishable from
-        one that is.
+        off says what would turn it on, in :attr:`action_note` - a greyed
+        control with no sentence beside it is indistinguishable from a broken
+        one, which is what the 21 September report said about these.
         """
         job = self._selected_job()
         state = job.progress.state if job else None
-        running = state is JobState.RUNNING
-        paused = state is JobState.PAUSED
-        queued = state is JobState.QUEUED
+        unfinished = state in (JobState.RUNNING, JobState.PAUSED, JobState.QUEUED)
         finished = bool(state and state.is_finished)
-        can_pause = bool(self.viewmodel and self.viewmodel.can_pause.value)
-        self.pause_button.setEnabled(running and can_pause)
-        self.resume_button.setEnabled(paused)
-        # A queued job holds a child process too, so it can be cancelled -
-        # and cancelling one before it starts is the cheapest moment to.
-        self.cancel_button.setEnabled(running or paused or queued)
+        # A queued or paused job holds a child process too, so it can be
+        # cancelled - and cancelling one before it starts is the cheapest
+        # moment to.
+        self.cancel_button.setEnabled(bool(unfinished))
         self.retry_button.setEnabled(finished)
 
         if job is None:
             note = "Bir iş seçin; eylemler seçili işe uygulanır."
-        elif running:
+        elif unfinished:
             note = (
-                "İş çalışıyor: duraklatılabilir veya iptal edilebilir."
-                if can_pause
-                else "İş çalışıyor: iptal edilebilir. Bu makinede duraklatma yok."
+                f"İş {_STATE_TEXT.get(state, '')}: iptal edilebilir. "
+                "İptal ham kaydı silmez."
             )
-        elif paused:
-            note = "İş duraklatıldı: devam ettirilebilir veya iptal edilebilir."
-        elif queued:
-            note = "İş sırada: iptal edilebilir."
         elif finished:
             note = f"İş bitti ({_STATE_TEXT.get(state, '')}): yeniden denenebilir."
         else:
@@ -770,16 +775,6 @@ class ProcessingPage(StudioPage):
     def _start_all(self) -> None:
         if self.viewmodel is not None:
             self.viewmodel.start_all()
-
-    def _pause_selected(self) -> None:
-        job = self._selected_job()
-        if job and self.viewmodel:
-            self.viewmodel.pause(job.key)
-
-    def _resume_selected(self) -> None:
-        job = self._selected_job()
-        if job and self.viewmodel:
-            self.viewmodel.resume(job.key)
 
     def _cancel_selected(self) -> None:
         job = self._selected_job()

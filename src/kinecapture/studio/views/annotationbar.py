@@ -18,10 +18,18 @@ both modes:
 
 * The **class line** comes first, because choosing a class is what this
   editor is mostly for. Creating one is at the far left in both modes, then
-  the classes in use as chips, then - only when they do not all fit - one
-  button named "Diğer sınıflar" holding the rest.
+  the classes in use as chips.
 * The **interval line** carries what is selected, its frame range, and the
-  actions that belong to it, left to right in one flow.
+  actions that belong to it, left to right in one flow. The actions close
+  the line at its right edge, in the order the user gave on 22 September:
+  delete first, then "Diğer sınıflar", then what only this mode does.
+
+**"Diğer sınıflar" is an action, not the end of the chip row.** It used to
+sit on the class line and appear only when a chip did not fit, so the line
+changed shape with the vocabulary. It is on the interval line in both modes
+now, always shown, and the chips get the width it took. "Hata aralığı ekle"
+is gone: a fault is drawn with the timeline's own tool, and a second button
+for that in this band was one that did nothing new.
 
 **The chips are bounded by measurement, not by a constant.** How many fit is
 computed from this band's real width and these class names' real widths, so
@@ -87,7 +95,7 @@ NEW_NAME_WIDTH = 220
 #: it whole.
 MAX_CHIP_CHARS = 22
 
-#: What the overflow button is called. Named by the user, so it is a constant
+#: What the picker button is called. Named by the user, so it is a constant
 #: rather than an f-string somebody can drift.
 BROWSE_TEXT = "Diğer sınıflar"
 
@@ -95,10 +103,12 @@ BROWSE_TEXT = "Diğer sınıflar"
 #: is still waiting for, and what the number keys do.
 HINT_MIN_WIDTH = 84
 
-#: The one label on the band that may give up almost all of its width. It is
-#: a secondary note ("Bu harekette hata yok") beside two buttons whose words
-#: have to stay readable, and at the narrowest window this screen supports the
-#: three of them are competing for the same forty pixels.
+#: The labels on the band that may give up almost all of their width. Each is
+#: a secondary note ("Bu harekette hata yok", "2 eklem · sınıftan") beside
+#: buttons whose words have to stay readable, and at the narrowest window this
+#: screen supports they are competing for the same forty pixels. The fault
+#: line got its note on 22 September, when "Diğer sınıflar" joined its
+#: actions and the line's minimum passed the band's.
 NOTE_MIN_WIDTH = 32
 
 #: A floor under the band's left block - the class field over the two frame
@@ -287,9 +297,11 @@ class ClassStrip(QWidget):
     with forty classes does not turn this band into a scrolling list or a
     second row of buttons.
 
-    Creating a class is :class:`ClassCreator`, which this object builds and
-    owns but does not lay out: the band puts it in the left block. The signals
-    and the ``new_name`` / ``add_button`` attributes stay here, so everything
+    Creating a class is :class:`ClassCreator` and reaching every class is
+    :attr:`browse_button`. This object builds and owns both but lays out
+    neither: the band puts the creator in the left block and the button among
+    the interval line's actions. The signals and the ``new_name`` /
+    ``add_button`` / ``browse_button`` attributes stay here, so everything
     that drives a class strip still has one place to talk to.
     """
 
@@ -365,16 +377,17 @@ class ClassStrip(QWidget):
         self._ruler.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self._ruler.hide()
 
-        # Everything that did not fit, by the name the user gave it.
-        self.browse_button = QPushButton(BROWSE_TEXT)
+        # Every class, by the name the user gave it. Built here and placed by
+        # the band, like the creator: it stands among the interval line's
+        # actions rather than at the end of this row. Never hidden - the
+        # 22 September request fixes where it is in both modes, and a button
+        # that came and went with the chip count would move the delete
+        # button next to it.
+        self.browse_button = QPushButton(BROWSE_TEXT, parent)
         self.browse_button.setAccessibleName(BROWSE_TEXT)
-        self.browse_button.setToolTip(
-            "Banda sigmayan siniflar. Aramali listede hepsine ulasilir."
-        )
         self.browse_button.setMinimumHeight(tokens.metric("KcControlHeightLarge"))
         self.browse_button.clicked.connect(self.browse_requested.emit)
-        self.browse_button.hide()
-        row.addWidget(self.browse_button, 0)
+        self._describe_browse()
 
         # Room kept for the hint, and kept *by the layout*. An ``ElidedLabel``
         # asks for an ignored width, and a layout that is ignoring a widget's
@@ -536,21 +549,20 @@ class ClassStrip(QWidget):
         this method gave: reading it back and subtracting the same fixed
         things again shrank the count on every pass.
 
-        The overflow button is the one thing whose presence depends on the
-        answer, so the sum is taken twice: once assuming everything fits, and
-        - only if it did not - again with room kept for "Diğer sınıflar". That
-        way the button can never be what pushes the last chip off the row, and
-        its width is not reserved when there is nothing to hide behind it.
+        One pass. "Diğer sınıflar" used to share this row and appear only on
+        an overflow, so its width depended on the answer and the sum had to be
+        taken twice. It is on the interval line now, and nothing on this row
+        depends on how many chips there are.
         """
         options = self.ordered
         if not options:
             return 0
         gap = self._tokens.metric("KcSpacingMd")
         # The strip *is* the chooser now: the name field and Ekle live in the
-        # band's left block, not in this row. What shares the row with the
-        # chips is the hint line and, when there is an overflow, the button
-        # for it - and both are subtracted before anything is counted.
-        available = self.width() - HINT_MIN_WIDTH - gap * 2
+        # band's left block and "Diğer sınıflar" on the interval line. What
+        # shares this row with the chips is the hint line, one gap away, and
+        # it is subtracted before anything is counted.
+        available = self.width() - HINT_MIN_WIDTH - gap
         if available <= 0:
             # The strip has not been given a real width yet - it is being
             # built, or it is off screen. There is nothing honest to measure
@@ -558,12 +570,7 @@ class ClassStrip(QWidget):
             # answering "one" here would leave a strip that was never laid
             # out showing a single chip for good.
             return min(MIN_VISIBLE_CLASSES, len(options))
-        count = self._fit(options, available)
-        if count >= len(options):
-            return count
-        return self._fit(
-            options, available - self.browse_button.sizeHint().width() - gap
-        )
+        return self._fit(options, available)
 
     def _shown(self) -> tuple[tuple[str, str], ...]:
         """Which classes get a chip.
@@ -635,13 +642,16 @@ class ClassStrip(QWidget):
             button.setMinimumWidth(button.sizeHint().width())
             self._chips.insertWidget(position, button)
             self._buttons[code] = button
+        self._describe_browse()
+
+    def _describe_browse(self) -> None:
+        """Say what is behind the picker. Only the words change, never the place."""
         hidden = self.hidden_count
-        self.browse_button.setVisible(hidden > 0)
-        if hidden:
-            self.browse_button.setText(BROWSE_TEXT)
-            self.browse_button.setToolTip(
-                f"Banda sığmayan {hidden} sınıf. Aramalı listede hepsine ulaşılır."
-            )
+        self.browse_button.setToolTip(
+            f"Banda sığmayan {hidden} sınıf. Aramalı listede hepsine ulaşılır."
+            if hidden
+            else "Bütün sınıflar bantta. Aramalı listede de hepsine ulaşılır."
+        )
 
     def resizeEvent(self, event) -> None:  # noqa: ANN001, N802 - Qt naming
         """Re-count the chips for the width the band actually got.
@@ -862,35 +872,34 @@ class AnnotationEditorBar(QWidget):
 
         interval.addStretch(1)
 
-        self.add_error_button = QPushButton("Hata aralığı ekle")
-        self.add_error_button.setToolTip(
-            "Oynatma çizgisinin çevresine bir hata aralığı koyar"
-        )
-        self.apply_all_button = QPushButton("Sınıfsızlara uygula")
-        self.apply_all_button.setToolTip(
-            "Bu sınıfı henüz sınıfı olmayan bütün hareketlere ver. "
-            "Sınıfı olanlar değişmez."
-        )
+        # The actions, against the right edge, in the order the user gave on
+        # 22 September: delete, every class, then what only a movement does.
         self.delete_movement_button = QToolButton()
         self.delete_movement_button.setAccessibleName("Hareketi sil")
         self.delete_movement_button.setToolTip("Hareketi sil")
         self.delete_movement_button.setIcon(
             iconset.icon("delete", tokens, size=tokens.metric("KcIconSize"))
         )
+        self.apply_all_button = QPushButton("Sınıfsızlara uygula")
+        self.apply_all_button.setToolTip(
+            "Bu sınıfı henüz sınıfı olmayan bütün hareketlere ver. "
+            "Sınıfı olanlar değişmez."
+        )
         for button in (
-            self.add_error_button,
-            self.apply_all_button,
             self.delete_movement_button,
+            self.exercise_classes.browse_button,
+            self.apply_all_button,
         ):
             button.setMinimumHeight(tokens.metric("KcControlHeightLarge"))
             interval.addWidget(button, 0)
         grid.addLayout(interval, 1, 2)
 
+        # "Diğer sınıflar" is not here: like the chips it stays live with
+        # nothing selected, because choosing a class is not editing one.
         self._movement_controls = (
             self.movement_start,
             self.movement_end,
             self.exclude_box,
-            self.add_error_button,
             self.delete_movement_button,
         )
         return page
@@ -933,47 +942,45 @@ class AnnotationEditorBar(QWidget):
 
         interval.addWidget(separator(Qt.Orientation.Vertical))
 
-        # The joints: a summary and one button, in the flow. They used to have
-        # a column of their own roughly 900 px wide, holding one button and a
-        # line saying "Eklem seçilmedi".
+        # The joints: a summary in the flow. They used to have a column of
+        # their own roughly 900 px wide, holding one button and a line saying
+        # "Eklem seçilmedi"; the button is with the other actions now.
         self.joint_summary = BandLabel(DETAIL_MIN_WIDTH, page)
         self.joint_summary.setText("Eklem seçilmedi")
         self.joint_summary.setProperty("kcRole", "contextValue")
         self.joint_summary.setToolTip("Bu aralık için işaretlenen eklemler")
         interval.addWidget(self.joint_summary, 0)
-        self.joint_origin = BandLabel(INFO_MIN_WIDTH, page)
+        self.joint_origin = BandLabel(NOTE_MIN_WIDTH, page)
         self.joint_origin.setProperty("kcRole", "pageSubtitle")
         interval.addWidget(self.joint_origin, 0)
-        self.edit_joints_button = QPushButton("Eklemleri düzenle")
-        self.edit_joints_button.setToolTip(
-            "Yalnız bu aralık için eklem kanıtını değiştirir; sınıfın "
-            "varsayılanı olduğu gibi kalır."
-        )
-        interval.addWidget(self.edit_joints_button, 0)
 
         interval.addStretch(1)
 
-        self.back_to_movement_button = QPushButton("Harekete dön")
-        self.error_note_button = QPushButton("Not…")
-        self.error_note_button.setToolTip("Bu aralığın notunu ayrı pencerede aç")
+        # The movement editor's order, so switching modes leaves delete and
+        # "Diğer sınıflar" where they were: delete, every class, then what
+        # only a fault does - the order the user gave on 22 September.
         self.delete_error_button = QToolButton()
         self.delete_error_button.setAccessibleName("Hatayı sil")
         self.delete_error_button.setToolTip("Hatayı sil")
         self.delete_error_button.setIcon(
             iconset.icon("delete", tokens, size=tokens.metric("KcIconSize"))
         )
+        self.edit_joints_button = QPushButton("Eklemleri düzenle")
+        self.edit_joints_button.setToolTip(
+            "Yalnız bu aralık için eklem kanıtını değiştirir; sınıfın "
+            "varsayılanı olduğu gibi kalır."
+        )
+        self.back_to_movement_button = QPushButton("Harekete dön")
+        self.error_note_button = QPushButton("Not…")
+        self.error_note_button.setToolTip("Bu aralığın notunu ayrı pencerede aç")
         for button in (
+            self.delete_error_button,
+            self.error_classes.browse_button,
             self.edit_joints_button,
             self.back_to_movement_button,
             self.error_note_button,
-            self.delete_error_button,
         ):
             button.setMinimumHeight(tokens.metric("KcControlHeightLarge"))
-        for button in (
-            self.back_to_movement_button,
-            self.error_note_button,
-            self.delete_error_button,
-        ):
             interval.addWidget(button, 0)
         grid.addLayout(interval, 1, 2)
         return page

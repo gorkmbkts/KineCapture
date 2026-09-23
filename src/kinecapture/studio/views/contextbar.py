@@ -50,8 +50,15 @@ class ContextBar(QFrame):
 
         # A continuous state, so it lives in a region whose size never changes
         # rather than in a message that appears and pushes things about.
+        # Built, wired and kept - but not put on the bar. The 22 September
+        # user decision takes the recording indicator, its clock and its stop
+        # button off the top of the window: all three are on the Yakalama
+        # screen, a second stop button beside the first one is a second thing
+        # to think about, and the window title already carries "RECORDING".
+        # The widget stays so the shell's wiring, its shortcut and the tests
+        # that read the wording all keep one definition.
         self.recording = RecordingStrip(tokens, self)
-        self._layout.addWidget(self.recording)
+        self.recording.hide()
 
         self.theme_button = QPushButton()
         self.theme_button.setProperty("kcVariant", "quiet")

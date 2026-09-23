@@ -302,7 +302,6 @@ class ReviewPage(StudioPage):
         self.movement_end = bar.movement_end
         self.exclude_box = bar.exclude_box
         self.apply_all_button = bar.apply_all_button
-        self.add_error_button = bar.add_error_button
         self.delete_movement_button = bar.delete_movement_button
         self.error_title = bar.error_title
         self.error_start = bar.error_start
@@ -316,7 +315,6 @@ class ReviewPage(StudioPage):
         self.error_end.valueChanged.connect(self._error_bounds_typed)
         self.exclude_box.toggled.connect(self._excluded_toggled)
         self.apply_all_button.clicked.connect(self._apply_to_unlabelled)
-        self.add_error_button.clicked.connect(self._add_error_here)
         self.delete_movement_button.clicked.connect(self._delete_movement)
         self.back_to_movement_button.clicked.connect(self._back_to_movement)
         self.delete_error_button.clicked.connect(self._delete_error)
@@ -1470,10 +1468,12 @@ class ReviewPage(StudioPage):
         for widget in (
             self.snap_button,
             self.next_gap_button,
-            self.add_error_button,
             self.delete_movement_button,
             self.apply_all_button,
             self.editor_bar.exercise_classes,
+            # Laid out on the interval line, so no longer a child of the strip
+            # and no longer switched off with it.
+            self.editor_bar.exercise_classes.browse_button,
             self.movement_start,
             self.movement_end,
             self.exclude_box,
@@ -1487,7 +1487,7 @@ class ReviewPage(StudioPage):
         # Having a version open is necessary, not sufficient. The band shows
         # the movement editor from the moment the screen opens, and with
         # nothing selected its interval controls must stay off - otherwise a
-        # press on "Hata aralığı ekle" is a control that looks live and
+        # press on the delete button is a control that looks live and
         # silently does nothing, which is what the 21 September review calls
         # meaningless.
         self.editor_bar.set_movement_enabled(
@@ -2238,18 +2238,6 @@ class ReviewPage(StudioPage):
         viewmodel = self.viewmodel
         if viewmodel is not None and viewmodel.selected_movement.value:
             viewmodel.remove_movement(viewmodel.selected_movement.value)
-
-    def _add_error_here(self) -> None:
-        viewmodel = self.viewmodel
-        if viewmodel is None:
-            return
-        row = viewmodel.movement_row(viewmodel.selected_movement.value)
-        if row is None:
-            return
-        position = viewmodel.position.value
-        span = max(1, (row.end - row.start) // 10)
-        start = max(row.start, min(row.end, position))
-        viewmodel.add_error(start, min(row.end, start + span))
 
     def _error_class_chosen(self, code: str) -> None:
         """Pressing a known class applies it *and* the joints it declares.

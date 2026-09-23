@@ -15,7 +15,7 @@ No Qt.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -34,6 +34,13 @@ from .observable import Event, Observable
 from .tasks import InlineRunner, TaskRunner
 
 #: What a row is waiting on, in the order it has to be dealt with.
+#: The bucket a repetition or an interval with no class of its own falls in.
+#: Kept as a real entry rather than dropped: "how much is still unclassified"
+#: is the most useful thing a distribution can say about a dataset in
+#: progress, and leaving it out would make the chart look finished.
+UNCLASSED = "__unclassed__"
+UNCLASSED_TEXT = "sınıfsız"
+
 BLOCKER_TEXT = {
     "no_subject_data": "kişi seçilmeden işlenmiş",
     "athlete": "sporcu seçilmemiş",
@@ -64,6 +71,21 @@ class DatasetRow:
     open_questions: int
     has_subject_data: bool
     blockers: tuple[str, ...]
+    #: Movement class -> how many repetitions of it this version holds, and
+    #: fault class -> how many intervals. Counted here rather than on the
+    #: screen because this is the one place the sidecars are read at all, and
+    #: reading them again per chart would be the same disk work twice.
+    #: Excluded repetitions are left out of both: a repetition kept out of the
+    #: dataset is not part of the dataset's distribution.
+    exercise_counts: dict[str, int] = field(default_factory=dict)
+    error_counts: dict[str, int] = field(default_factory=dict)
+    #: Display names for whatever codes appear above, so a chart can print a
+    #: class without a second look at the schema.
+    class_labels: dict[str, str] = field(default_factory=dict)
+    #: Each class's place in the project's own vocabulary. A chart ranks by
+    #: count, so without this a class's colour would change with its rank -
+    #: and a class keeps its colour for the life of the project.
+    class_order: dict[str, int] = field(default_factory=dict)
 
     @property
     def looks_ready(self) -> bool:
@@ -156,6 +178,19 @@ class DatasetViewModel:
         self._runner.run(work, done, failed)
 
 
+def _position(codes: tuple[str, ...], code: str) -> int:
+    """Where ``code`` sits in its vocabulary, or -1 for the unclassed bucket.
+
+    A class the schema has forgotten still gets a place rather than an error:
+    the annotation is on disk either way, and refusing to chart it would be
+    hiding it.
+    """
+    try:
+        return codes.index(code)
+    except ValueError:
+        return -1
+
+
 def _summarise(row: VersionRow, schema: LabelSchema) -> DatasetRow:
     """Read one version's sidecars. Never opens the version itself."""
     take_dir = Path(row.take_directory)
@@ -179,11 +214,30 @@ def _summarise(row: VersionRow, schema: LabelSchema) -> DatasetRow:
     known = schema.exercise_codes()
     ready = excluded = errors = 0
     states: set[str] = set()
+    fault_codes = schema.error_type_codes()
+    exercise_counts: dict[str, int] = {}
+    error_counts: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    orders: dict[str, int] = {}
     for sample in document.samples:
         errors += len(sample.errors)
         if sample.excluded:
             excluded += 1
             continue
+        code = sample.exercise or UNCLASSED
+        exercise_counts[code] = exercise_counts.get(code, 0) + 1
+        labels.setdefault(
+            code, UNCLASSED_TEXT if code == UNCLASSED else schema.label_for_exercise(code)
+        )
+        orders.setdefault(code, _position(known, code))
+        for error in sample.errors:
+            fault = error.error_class or UNCLASSED
+            error_counts[fault] = error_counts.get(fault, 0) + 1
+            labels.setdefault(
+                fault,
+                UNCLASSED_TEXT if fault == UNCLASSED else schema.label_for_error(fault),
+            )
+            orders.setdefault(fault, _position(fault_codes, fault))
         readiness = sample.readiness(known)
         if readiness is Readiness.READY:
             ready += 1
@@ -222,7 +276,102 @@ def _summarise(row: VersionRow, schema: LabelSchema) -> DatasetRow:
         open_questions=len(subject.unanswered),
         has_subject_data=has_data,
         blockers=tuple(dict.fromkeys(blockers)),
+        exercise_counts=exercise_counts,
+        error_counts=error_counts,
+        class_labels=labels,
+        class_order=orders,
     )
 
 
-__all__ = ["BLOCKER_TEXT", "DatasetRow", "DatasetTotals", "DatasetViewModel"]
+def aggregate(rows) -> "DatasetStats":
+    """Roll a list of versions up into the numbers the charts draw.
+
+    A plain function over the rows the screen already has, so what is on a
+    chart and what is in the table can never disagree, and filtering the list
+    is all it takes to re-draw the charts for a subset.
+    """
+    exercises: dict[str, int] = {}
+    errors: dict[str, int] = {}
+    labels: dict[str, str] = {}
+    orders: dict[str, int] = {}
+    people: dict[str, list[int]] = {}
+    ready = blocked = unlabelled = 0
+    for row in rows:
+        labels.update(row.class_labels)
+        orders.update(row.class_order)
+        for code, count in row.exercise_counts.items():
+            exercises[code] = exercises.get(code, 0) + count
+        for code, count in row.error_counts.items():
+            errors[code] = errors.get(code, 0) + count
+        if not row.movements:
+            unlabelled += 1
+        elif row.looks_ready:
+            ready += 1
+        else:
+            blocked += 1
+        seen = people.setdefault(row.participant_id or "—", [0, 0, 0])
+        seen[0] += 1
+        seen[1] += row.movements
+        seen[2] += int(row.duration_s)
+    return DatasetStats(
+        exercises=exercises,
+        errors=errors,
+        labels=labels,
+        orders=orders,
+        ready=ready,
+        blocked=blocked,
+        unlabelled=unlabelled,
+        participants={name: tuple(values) for name, values in sorted(people.items())},
+    )
+
+
+@dataclass(frozen=True)
+class DatasetStats:
+    """What the whole (filtered) dataset looks like, in numbers."""
+
+    exercises: dict[str, int] = field(default_factory=dict)
+    errors: dict[str, int] = field(default_factory=dict)
+    labels: dict[str, str] = field(default_factory=dict)
+    orders: dict[str, int] = field(default_factory=dict)
+    ready: int = 0
+    blocked: int = 0
+    unlabelled: int = 0
+    #: participant -> (versions, movements, seconds)
+    participants: dict[str, tuple[int, int, int]] = field(default_factory=dict)
+
+    def label_for(self, code: str) -> str:
+        return self.labels.get(code, code)
+
+    def order_of(self, code: str) -> int:
+        """The class's place in the project vocabulary, or -1."""
+        return self.orders.get(code, -1)
+
+    def ranked(self, counts: dict[str, int]) -> tuple[tuple[str, int], ...]:
+        """Largest first, with the unclassed bucket always last.
+
+        It is not a class, so it does not compete for the top of the chart -
+        but it is never hidden either, because how much is unclassified is
+        the number somebody labelling a dataset most wants to see.
+        """
+        named = sorted(
+            ((c, n) for c, n in counts.items() if c != UNCLASSED),
+            key=lambda pair: (-pair[1], self.label_for(pair[0])),
+        )
+        rest = counts.get(UNCLASSED, 0)
+        return tuple(named + ([(UNCLASSED, rest)] if rest else []))
+
+    @property
+    def is_empty(self) -> bool:
+        return not (self.exercises or self.errors or self.participants)
+
+
+__all__ = [
+    "BLOCKER_TEXT",
+    "UNCLASSED",
+    "UNCLASSED_TEXT",
+    "DatasetRow",
+    "DatasetStats",
+    "DatasetTotals",
+    "DatasetViewModel",
+    "aggregate",
+]

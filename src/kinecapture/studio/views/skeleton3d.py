@@ -533,13 +533,19 @@ class Skeleton3DView(QOpenGLWidget):
                 # :attr:`floor_source`. It is emphatically not a claim that
                 # the floor was detected, and because it is fixed once it does
                 # not rise when the athlete jumps.
-                self._grid_data = ground_grid(
-                    self.camera.up_axis,
-                    height=pivot[self.camera.up_axis],
-                    centre=pivot,
-                )
                 self._reference_floor = float(pivot[self.camera.up_axis])
-                self._grid_dirty = True
+            # Under the athlete whichever way the height was found. A measured
+            # floor says how *high* the grid is and nothing about where; that
+            # still comes from the feet. Centring used to happen only without
+            # a measured floor, so a version with one kept the grid on the
+            # recording's origin - the camera, measured 3.03 m from the
+            # athlete on 22 September against a 3 m half-width - and the
+            # athlete stood on its edge. A second version opened in the same
+            # view kept the first one's centre instead.
+            self._grid_data = ground_grid(
+                self.camera.up_axis, height=self.floor_height, centre=pivot
+            )
+            self._grid_dirty = True
         body = body_target(window, hips)
         if body is not None:
             self._body = body

@@ -1,7 +1,7 @@
 ---
 type: source-index
 status: current
-updated: 2026-09-21
+updated: 2026-09-23
 ---
 
 # Prompt dizini
@@ -12,6 +12,7 @@ repository kökündeki `AGENTS.md` ve `CLAUDE.md` dosyalarındadır.
 
 ## Güncel görev
 
+- [23 Eylül yayın kapısı (export + ölçek testleri) ve temiz Windows kurucusu](CLAUDE_RELEASE_GATE_AND_WINDOWS_INSTALLER_PROMPT_2026-09-23.md)
 - [21 Eylül kullanıcı GUI revizyonu — tek maksimize pencere, yakalama ve etiketleme](CLAUDE_STUDIO_GUI_USER_REVISION_PROMPT_2026-09-21.md)
 
 Bu görev önceki GUI işlerine otomatik dönüş istemez. Aşağıdaki görevler tarihsel bağlamdır; yeni görevle çelişen tercihleri sürdürme.

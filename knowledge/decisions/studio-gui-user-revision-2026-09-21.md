@@ -2,7 +2,7 @@
 type: decision
 status: decision
 applied: 2026-09-21
-updated: 2026-09-21
+updated: 2026-09-22
 tags:
   - studio
   - gui
@@ -35,6 +35,33 @@ tags:
 10. Etiketleme bandında hareket ve hata aralığının **başlangıç/bitiş sayı
     kutuları, sınıf eklemek için olan metin kutusunun altında** ve onunla üst
     alt hizalı olacak.
+11. Projeler'de katılımcı seçmeden Yakalama'ya geçilmek istenirse, önce
+    katılımcı seçilmesi ya da oluşturulması gerektiği **popup bildirimle**
+    söylenecek.
+12. Yakalama sırasında GUI'nin üstündeki **ikinci kaydı durdur düğmesi ve süre
+    metni kaldırılacak**; aynı içerik sekmenin altında zaten var. Kullanıcı
+    kararı: şeridin tamamı kalksın.
+13. İş kuyruğu tablosu container'a sığacak; en sağdaki hücrenin taşan metni
+    **"…" ile kısaltılacak**. Kuyruk düğmelerinden **Duraklat ve Devam et
+    kaldırılacak**; **Yeniden dene** ve (kullanıcı kararı) **İptal** kalacak,
+    Yeniden dene'nin çalıştığı doğrulanacak.
+14. İşleme ekranındaki **"Ayrıntılar" katlanır profil bloğu kaldırılacak**:
+    açıldığında içerik sayfadan taşıyor ve orada görülmesi gerekmiyor.
+15. **Veri Seti sayfasına amaç kazandırılacak.** Soldaki kayıt listesi
+    daraltılacak; "Yenile" ve "Etiketlemede aç" listenin üstündeki arama
+    satırına taşınacak; açılan sağ alana veri setinin kendi istatistikleri
+    konacak. Kullanıcı seçimi: **hareket sınıfı dağılımı, hata sınıfı
+    dağılımı, hazırlık durumu ve katılımcı başına kapsam**.
+16. Etiketleme bandının **"Hata aralığı ekle" düğmesi kaldırılacak**; hata
+    zaten zaman çizelgesinin kendi aracıyla çiziliyor. Bandın alt satırındaki
+    eylemler, yine container'ın **sağına yaslı**, soldan sağa:
+    hareket kipi **çöp kutusu · Diğer sınıflar · Sınıfsızlara uygula**; hata
+    kipi **çöp kutusu · Diğer sınıflar · Eklemleri düzenle · Harekete dön ·
+    Not**. Kullanıcıya sorulup yanıtlanan iki nokta: hata kipinde Diğer
+    sınıflar **çöpün hemen sağında**; Diğer sınıflar **her zaman görünür**
+    (yalnız sınıf taşınca değil).
+17. Etiketleme 3B görünümünde iskelet zemin ızgarasının **ortasında** duracak,
+    kenarında değil.
 
 ## Kalıcı kullanıcı kararları
 
@@ -46,6 +73,7 @@ tags:
 6. Etiketleme sağ panelinde dar ikon şeridi, dengeli preset/sporcu içerikleri; pusula kaldırılacak, diğer işlevler korunacak.
 7. **Yalnız Etiket özeti sekmesinde çubuksuz kaydırmaya izin var.** Diğer panel içeriklerinde kaydırma yasağı sürüyor; satırlar çoğaldıkça ezilmeyecek.
 8. Hareket/hata editörü ilk açılışta hareket içeriğini gösterecek. Dört dar sütun görünümü yerine kısa/geniş banda uygun akış; solda yeni sınıf alanı, kapasiteyi aşınca Diğer sınıflar, en son kullanılan sınıf ilk sırada. Başlangıç/bitiş sayıları kırpılmayacak.
+   `superseded` (yalnız "kapasiteyi aşınca Diğer sınıflar" bakımından): 22 Eylül kararı 16 ile Diğer sınıflar sınıf satırından alt satıra indi ve her zaman görünür.
 
 **Tasarım önerisi, kullanıcı kararı değil:** Codex; sınıf oluşturma ve hızlı sınıf seçimine öncelik veren, aralık ve bağlamsal eylemleri aynı banda yerleştiren bir veya iki yatay hat önerdi. Uygulama tekniği Claude'a bırakıldı; ayrıntılı zorunlu sonuçlar promptta.
 

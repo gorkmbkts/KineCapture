@@ -113,8 +113,9 @@ class ShellViewModel:
                         else "needs_project"
                     ),
                     detail=(
-                        "Projeler ekranından katılımcıyı seçin; kayıt o "
-                        "katılımcının klasörüne yazılır."
+                        "Projeler ekranından bir katılımcı seçin, ya da "
+                        "\u201cKatılımcı ekle\u201d ile yeni bir tane "
+                        "oluşturun. Kayıt o katılımcının klasörüne yazılır."
                         if key == "capture"
                         else "Projeler ekranından bir proje açın."
                     ),
