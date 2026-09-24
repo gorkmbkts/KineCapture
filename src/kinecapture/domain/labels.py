@@ -23,12 +23,12 @@ so nothing is destroyed, but nothing in the application offers it any more.
 from __future__ import annotations
 
 import unicodedata
-from dataclasses import dataclass, field
-from typing import Any, Mapping, Optional, Sequence
+from dataclasses import dataclass, field, replace
+from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from kinecapture import LABEL_SCHEMA_VERSION
 from kinecapture.core.errors import ValidationError
-from kinecapture.core.ids import slugify
+from kinecapture.core.ids import slug_is_lossless, slugify
 from kinecapture.domain.enums import Correctness
 
 
@@ -44,6 +44,43 @@ def _match_key(text: str) -> str:
     # Turkish dotted/dotless I: casefold maps these consistently enough for
     # duplicate detection, which is all this key is used for.
     return " ".join(normalised.casefold().split())
+
+
+def _same_class(name: str, candidate_code: str, option: "LabelOption") -> bool:
+    """Whether a typed ``name`` means the existing ``option``.
+
+    The normalised text deciding is the rule. Equal codes decide as well, but
+    only when neither code lost anything on the way from its name: a code is
+    cut at 48 characters and falls back to ``label`` for a name with no ASCII
+    letter in it, so two long names that part after the cut, or two names made
+    of symbols, share a code without being the same class. Refusing the second
+    one as a duplicate of the first - which is what happened - made a vocabulary
+    of a hundred classes impossible to finish.
+    """
+    if option.match_key == _match_key(" ".join((name or "").split())):
+        return True
+    return (
+        option.code == candidate_code
+        and slug_is_lossless(name, candidate_code)
+        and slug_is_lossless(option.label, option.code)
+    )
+
+
+def _unique_code(code: str, taken: Iterable[str]) -> str:
+    """``code``, or ``code-2``, ``code-3``... when it is already in use.
+
+    Only ever reached for a class that is *not* the same as the one holding
+    the code, so a suffix is what keeps two classes apart - never a rename of
+    an existing one. Kept within the 48-character slug budget.
+    """
+    taken = set(taken)
+    if code not in taken:
+        return code
+    stem = code[:44].rstrip("-")
+    number = 2
+    while f"{stem}-{number}" in taken:
+        number += 1
+    return f"{stem}-{number}"
 
 
 @dataclass(frozen=True)
@@ -211,9 +248,8 @@ class LabelSchema:
         candidate = LabelOption.from_name(name) if name.strip() else None
         if candidate is None:
             return None
-        key = candidate.match_key
         for option in self.exercises:
-            if option.match_key == key or option.code == candidate.code:
+            if _same_class(name, candidate.code, option):
                 return option
         return None
 
@@ -244,9 +280,8 @@ class LabelSchema:
         candidate = LabelOption.from_name(name) if name.strip() else None
         if candidate is None:
             return None
-        key = candidate.match_key
         for option in self.error_types:
-            if option.match_key == key or option.code == candidate.code:
+            if _same_class(name, candidate.code, option):
                 return option
         return None
 
@@ -286,6 +321,7 @@ class LabelSchema:
                 field="exercise",
                 code="exercise_duplicate",
             )
+        option = replace(option, code=_unique_code(option.code, self.exercise_codes()))
         self.exercises.append(option)
         return option
 
@@ -305,6 +341,7 @@ class LabelSchema:
                 code="error_type_duplicate",
                 details={"code": existing.code, "label": existing.label},
             )
+        option = replace(option, code=_unique_code(option.code, self.error_type_codes()))
         self.error_types.append(option)
         return option
 
@@ -347,6 +384,7 @@ class LabelSchema:
                 details={"code": existing.code, "label": existing.label},
             )
         option = LabelOption.from_name(cleaned, description, roles=chosen)
+        option = replace(option, code=_unique_code(option.code, self.error_type_codes()))
         self.error_types.append(option)
         return option
 

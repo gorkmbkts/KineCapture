@@ -69,10 +69,14 @@ def setup_logging(
     root.setLevel(level)
     root.propagate = False
 
-    console = logging.StreamHandler(stream=sys.stderr)
-    console.setLevel(level)
-    console.setFormatter(logging.Formatter(_CONSOLE_FORMAT))
-    root.addHandler(console)
+    # Started through ``pythonw.exe`` - the installed shortcut - there is no
+    # console and ``sys.stderr`` is None. The file log below is then the only
+    # log, which is the point of having one.
+    if sys.stderr is not None:
+        console = logging.StreamHandler(stream=sys.stderr)
+        console.setLevel(level)
+        console.setFormatter(logging.Formatter(_CONSOLE_FORMAT))
+        root.addHandler(console)
 
     _log_file_path = None
     if log_dir is not None:

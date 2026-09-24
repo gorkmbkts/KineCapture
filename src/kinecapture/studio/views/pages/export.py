@@ -38,7 +38,7 @@ from kinecapture.studio.viewmodels.library import LibraryViewModel
 from kinecapture.studio.viewmodels.navigation import Destination
 
 from .. import iconset
-from ..models import Column, RowTableModel, SearchProxy
+from ..models import limit_content_sizing, Column, RowTableModel, SearchProxy
 from ..widgets import ElidedLabel, label, mono_label, separator
 from .base import StudioPage
 
@@ -141,7 +141,10 @@ class ExportPage(StudioPage):
         self.model = RowTableModel(_columns())
         self.proxy = SearchProxy(self)
         self.proxy.setSourceModel(self.model)
-        self.search.textChanged.connect(self.proxy.setFilterFixedString)
+        # ``set_search``, not Qt's ``setFilterFixedString``: SearchProxy filters
+        # on its own term, so the fixed string was stored and never read and
+        # the box filtered nothing (found in the release gate, 23 September).
+        self.search.textChanged.connect(self.proxy.set_search)
         self.table = QTableView()
         self.table.setModel(self.proxy)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
@@ -151,6 +154,9 @@ class ExportPage(StudioPage):
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
+        # A thousand rows measured per column on every reset is what the
+        # sizing costs by default; see ``models.CONTENT_SIZING_ROWS``.
+        limit_content_sizing(self.table)
         self.table.horizontalHeader().setStretchLastSection(True)
         column.addWidget(self.table, 1)
 
@@ -266,8 +272,10 @@ class ExportPage(StudioPage):
         if self.viewmodel is not None:
             # EXPORT-02. Coming back to this screen after labelling is exactly
             # when a previous "hazır" stops being true, so the result is
-            # re-checked against the revisions on disk before it is believed.
-            self.viewmodel.recheck_freshness()
+            # re-checked against the revisions on disk before it is believed -
+            # on the worker, because for a large project the reads alone froze
+            # the window.
+            self.viewmodel.refresh_freshness()
             self._show_target()
 
     # --------------------------------------------------------------- slots

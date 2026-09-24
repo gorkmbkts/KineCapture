@@ -261,13 +261,11 @@ class CaptureService:
                 self._pose_error = str(exc)
                 return None
         try:
-            from kinecapture.preview.pose import CpuPosePreview
+            from kinecapture.preview.pose import CpuPosePreview, find_model_dir
 
-            directory = Path(
-                self.config.extra.get(
-                    "preview_model_dir", Path.home() / ".cache" / "kinecapture" / "models"
-                )
-            )
+            directory = find_model_dir(self.config.extra.get("preview_model_dir"))
+            if directory is None:
+                raise FileNotFoundError("preview models not found")
             processor = CpuPosePreview(directory)
         except Exception as exc:  # noqa: BLE001 - see docstring
             self._pose_error = (

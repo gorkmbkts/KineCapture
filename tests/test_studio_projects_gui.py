@@ -226,6 +226,21 @@ def test_a_failing_task_reports_instead_of_killing_the_pool(app: QApplication) -
 # --------------------------------------------------------------- projects page
 
 
+def _background_done(window, app: QApplication, timeout: float = 10.0) -> None:
+    """Let the window's worker threads finish and their results land.
+
+    The participant and session lists are read off the GUI thread (release
+    gate S12); one ``processEvents`` is no longer a promise that they arrived.
+    """
+    import time
+
+    deadline = time.monotonic() + timeout
+    while window.runner._live and time.monotonic() < deadline:
+        app.processEvents()
+        time.sleep(0.005)
+    app.processEvents()
+
+
 def test_projects_page_lists_what_was_created(open_window, app: QApplication) -> None:
     open_window.viewmodel.navigate("projects")
     app.processEvents()
@@ -236,7 +251,7 @@ def test_projects_page_lists_what_was_created(open_window, app: QApplication) ->
     viewmodel = open_window.viewmodel_for["projects"]
     viewmodel.create_project("Squat")
     viewmodel.create_participant()
-    app.processEvents()
+    _background_done(open_window, app)
 
     assert page.project_model.rowCount() == 1
     assert page.participant_model.rowCount() == 1
@@ -252,7 +267,7 @@ def test_searching_narrows_the_participant_list(open_window, app: QApplication) 
     viewmodel.create_project("Squat")
     for _ in range(4):
         viewmodel.create_participant()
-    app.processEvents()
+    _background_done(open_window, app)
 
     assert page.participant_proxy.rowCount() == 4
     page.search.setText("P0003")

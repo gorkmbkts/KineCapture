@@ -20,7 +20,7 @@ from kinecapture.capture.subject_lock import SubjectLock
 from kinecapture.core.fingerprint import hash_file, hash_payload, checksum_manifest
 from kinecapture.core.ids import utc_now_iso
 from kinecapture.core.jsonio import read_json, read_jsonl, write_json, JsonlWriter
-from kinecapture.core.paths import long_path, ensure_dir, path_exists
+from kinecapture.core.paths import long_path, ensure_dir, iter_files, path_exists
 from kinecapture.dataset.workspace import TakePaths
 from kinecapture.domain.project import CaptureProfile, Take
 from kinecapture.features.base import SourceField
@@ -181,9 +181,10 @@ def _optional_body_arrays(selected: Sequence[Any]) -> dict[str, Optional[np.ndar
 
 
 def source_identity(paths: TakePaths, take: Take) -> dict:
-    raw = Path(long_path(paths.raw_dir))
-    files = {p.relative_to(raw).as_posix(): {"sha256": hash_file(p), "bytes": p.stat().st_size}
-             for p in sorted(raw.rglob("*")) if p.is_file()}
+    # Walked in the extended form so a file past MAX_PATH is hashed rather
+    # than silently left out of the fingerprint.
+    files = {name: {"sha256": hash_file(p), "bytes": p.stat().st_size}
+             for name, p in iter_files(paths.raw_dir)}
     if not files:
         raise ValueError("No immutable raw source")
     return {"files": files, "fingerprint": hash_payload(files), "origin": take.origin.value,
@@ -618,8 +619,8 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
                                "gap_std_ms": float(gaps.std()) if gaps.size else None,
                                "gaps_over_1_5_intervals": int((gaps > 1500/processing_info.target_fps).sum())}
         checkpoint()
-        manifest = checksum_manifest({p.relative_to(Path(long_path(stage))).as_posix(): p
-            for p in Path(long_path(stage)).rglob("*") if p.is_file() and p.name != "checksums.json"})
+        manifest = checksum_manifest({name: p for name, p in iter_files(stage)
+            if name != "checksums.json"})
         write_json(stage / "checksums.json", manifest)
         # Publication is decided by usability, not by perfection. A version
         # that carries recorded caveats is still a version; one that cannot be
@@ -644,8 +645,12 @@ def process_take(take_dir: Path, config: Optional[ProcessingConfig] = None, *,
 
 
 def restart_job(job_dir: Path, **kwargs) -> Path:
+    from .review import run_take_dir
+
     old = read_json(Path(job_dir) / "job.json")
-    paths = TakePaths(Path(old["take_dir"]))
+    # The take the attempt sits in now, not the path it was produced under:
+    # a moved project would otherwise be reprocessed from its old location.
+    paths = TakePaths(run_take_dir(Path(job_dir), old))
     take = Take.from_dict(read_json(paths.metadata))
     if source_identity(paths, take) != old["source"]:
         raise ValueError("Restart refused: source fingerprint/provenance changed")

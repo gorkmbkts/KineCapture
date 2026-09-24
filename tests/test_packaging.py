@@ -93,6 +93,37 @@ def test_the_wheel_carries_the_logo(source_copy):
     assert data == asset_bytes(YTU_LOGO), "the wheel copy must not be re-encoded"
 
 
+def test_the_wheel_carries_every_runtime_resource(source_copy):
+    """Release gate A4: an installed application reads nothing from a checkout.
+
+    Every data file the application loads at runtime - the default settings,
+    the theme, the brand font, the icons and their licences - has to be in the
+    wheel, because the wheel is what the installer ships.
+    """
+    wheel = build("wheel", source_copy)
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+    wanted = {
+        "kinecapture/resources/default.yaml",
+        "kinecapture/studio/theme/tokens.json",
+        "kinecapture/studio/theme/studio.qss.tmpl",
+        "kinecapture/studio/views/fonts/SpaceGrotesk[wght].ttf",
+        "kinecapture/studio/views/fonts/OFL.txt",
+        "kinecapture/studio/views/icons/LICENSE.lucide.txt",
+        "kinecapture/preview/vendor/LICENSE",
+        "kinecapture/preview/vendor/NOTICE.md",
+    }
+    assert wanted - names == set()
+    icons = {n for n in names if n.startswith("kinecapture/studio/views/icons/") and n.endswith(".svg")}
+    on_disk = {
+        f"kinecapture/studio/views/icons/{p.name}"
+        for p in (ROOT / "src" / "kinecapture" / "studio" / "views" / "icons").glob("*.svg")
+    }
+    assert icons == on_disk
+    # And nothing that is not the application: no tests, no notes, no data.
+    assert not [n for n in names if n.startswith(("tests/", "knowledge/", "promts/"))]
+
+
 def test_the_sdist_carries_the_logo(source_copy):
     sdist = build("sdist", source_copy)
     with tarfile.open(sdist) as archive:

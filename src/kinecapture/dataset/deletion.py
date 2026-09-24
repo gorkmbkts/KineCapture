@@ -190,15 +190,16 @@ def inspect_target(
             resolved,
         )
 
-    # The repository this application is running from is never a project.
-    source_root = Path(__file__).resolve().parents[3]
-    if resolved == source_root or source_root.is_relative_to(resolved):
-        return TargetReport(
-            False,
-            "Hedef uygulamanın kaynak klasörünü içeriyor; reddedildi.",
-            "delete_target_is_source_root",
-            resolved,
-        )
+    # The application itself is never a project: not the checkout it runs
+    # from, not the folder it is installed in, not the Python it runs on.
+    for protected in _application_roots():
+        if resolved == protected or protected.is_relative_to(resolved):
+            return TargetReport(
+                False,
+                "Hedef uygulamanın kendi klasörünü içeriyor; reddedildi.",
+                "delete_target_is_source_root",
+                resolved,
+            )
 
     manifest = resolved / PROJECT_FILE
     if not manifest.is_file():
@@ -232,6 +233,30 @@ def inspect_target(
         )
 
     return TargetReport(True, resolved=resolved, manifest_project_id=found)
+
+
+def _application_roots() -> tuple[Path, ...]:
+    """Folders a project delete may never be, or contain.
+
+    The checkout the code runs from, when it runs from one; the folder the
+    package is installed in; and the Python installation itself. This used to
+    be ``parents[3]`` of this file only - the repository root in development,
+    but ``<env>/Lib`` once installed from a wheel, which protected nothing that
+    mattered.
+    """
+    import sys
+
+    package = Path(__file__).resolve().parents[1]
+    roots = {package.parent}
+    checkout = package.parent.parent
+    if (checkout / "pyproject.toml").is_file():
+        roots.add(checkout)
+    for prefix in (sys.prefix, sys.base_prefix, sys.exec_prefix):
+        try:
+            roots.add(Path(prefix).resolve())
+        except (OSError, RuntimeError):  # pragma: no cover - odd interpreter
+            continue
+    return tuple(sorted(roots))
 
 
 def _is_reparse_point(path: Path) -> bool:

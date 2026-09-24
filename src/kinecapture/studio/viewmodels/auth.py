@@ -50,6 +50,19 @@ class AuthViewModel:
         self.message: Event[Message] = Event()
         self.signed_in: Event[object] = Event()
         self.remembered_username: str = session.config.last_username or ""
+        #: Shown once, when the form first appears: what the installer's owner
+        #: seed did (or declined to do) on this start.
+        self.startup_notice: Optional[Message] = None
+        notice = session.startup_notice
+        if notice is not None:
+            self.startup_notice = Message(
+                headline=notice.headline,
+                detail=notice.detail,
+                severity=Severity.WARNING if notice.is_warning else Severity.INFO,
+                code=f"owner_seed_{notice.outcome.value}",
+            )
+            if notice.username and not self.remembered_username:
+                self.remembered_username = notice.username
 
     # ------------------------------------------------------------------ mode
     def set_mode(self, mode: AuthMode) -> None:

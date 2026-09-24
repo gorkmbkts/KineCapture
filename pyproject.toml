@@ -38,6 +38,9 @@ where = ["src"]
 # to the checkout: an installed application has no repository to look in.
 [tool.setuptools.package-data]
 "kinecapture.gui.assets" = ["*.png"]
+# The shipped default configuration. Package data, not a file next to the
+# checkout, for the same reason as the logo above.
+"kinecapture.resources" = ["*.yaml"]
 "kinecapture.preview.vendor" = ["LICENSE", "NOTICE.md"]
 # Design tokens are data, not code: one file generates the Qt stylesheet today
 # and can generate a WinUI ResourceDictionary later.

@@ -1,7 +1,7 @@
 ---
 type: open-questions
 status: current
-updated: 2026-09-21
+updated: 2026-09-24
 tags:
   - open
 ---
@@ -33,6 +33,43 @@ Bu turdan kalan açıklar:
 Eski açık işlere otomatik dönüş yok; aşağıdaki kayıtlar tarihsel bağlam ve
 ayrı bekleyen işlerdir.
 
+## 23–24 Eylül yayın kapısı ve kurucudan kalan açıklar
+
+[Faz A](reports/release-gate-phase-a-2026-09-23.md) ·
+[Faz B](reports/release-installer-phase-b-2026-09-23.md) ·
+[Karar](decisions/windows-installer-release-2026-09-23.md)
+
+- ~~Tohumlu kurucu~~ — **kapandı** (24 Eylül sabahı): kullanıcı tohumu kendi
+  terminalinde üretti, kurucu `gorkembektas` ile geliyor ve doğrulandı.
+- **Ayrı fiziksel/temiz bilgisayarda deneme** — kontrol listesi Faz B
+  raporunda; Windows Sandbox bu makinede yok.
+- **Tema değişimi** GUI thread'ini 912–1066 widget'ta 1,4–3,2 s bloklar
+  (> 250 ms ölçütü): kalan maliyet Qt'nin uygulama geneli stil sayfasını
+  yeniden uygulaması; nadir, açık bir kullanıcı eylemi. Kabul mü, stil
+  sayfası/yazı tipi kuralının yeniden düzenlenmesi mi — karar `open`.
+- **30k kayıtta liste ekranları GUI'yi bloklar** (`verified`, 24 Eylül,
+  gerçek `windows` platformu): ağır okumalar iş parçacığında olsa da 30 000
+  satırın tablo modeline aktarılması ve süzülmesi GUI thread'inde — Projeler
+  636 ms, İşlenen Videolar 593 ms, Veri Seti 770 ms, iş kuyruğu 773 ms, Dışa
+  Aktarım 479 ms, Dışa Aktarım'a dönüş 1815 ms en uzun blok; Veri Seti
+  aramasında tuş başına 0,3–0,8 s; 600 hareketli sürümde etiket düzenleme
+  ~350 ms. ~300 sürümde bunlar < 100 ms. Artımlı model, gecikmeli arama ve
+  arka planda süzme, istatistiklerin iş parçacığına alınması, zaman
+  çizelgesinde değişmeyen katmanın önbelleği gerekir — `open`.
+- **30k kayıtta doğrusalın üstünde büyüme** (`observed`): 10k → 30k'da soğuk
+  indeks ×7, ısınmış Veri Seti satırları ×26, export ×4,5; hepsi iş
+  parçacığında, ama Veri Seti ziyareti dakikalar, export yarım saatten fazla.
+  Neden `hypothesis` (dosya sistemi meta veri önbelleği/Defender).
+- `rehab24_6_mocap` yalnız eski `ReleaseBuilder`'da; Studio'nun kanonik
+  paketinde yok — ürün kararı `open`. Kanonik export sentetik kaydı dışlamıyor,
+  artık işaretliyor (`origin`) — değiştirilmesi istenirse karar gerekir.
+- Kurucu düğmeleri UI Automation'da "Pane" görünüyor (erişilebilirlik gözlemi).
+- `verified`: `test_studio_polish.py`'nin offscreen'de atlanan yazı tipi
+  testleri `windows` platformunda koşunca **5'i başarısız** (dizüstü %125/%150
+  ölçeklemesinde ekran genişlikleri); `24c1509`'da da aynı — önceden var.
+  21 Eylül "yalnız maksimize pencere" kararına göre testler mi güncellenecek,
+  yerleşim mi daraltılacak: karar `open`.
+
 ## Önceki öncelik kaydı — güncel görev olarak sürdürülmez
 
 20 Eylül akşamı gerçek kullanımda: etkin veri kökü Claude test dizinine
@@ -58,7 +95,12 @@ editörü ve kaydırmasız üst panel yeni karar olarak kaydedildi.
    ortaya çıkamaz. Durum: `verified` açık (18 Eylül 2026 kod denetimi —
    `processing/subject_review.py:391-407`, `export/canonical.py:246`,
    `processing/jobs.py:534`).
-3. Gerçek kayıtla kanonik export paketinin uçtan uca doğrulanması.
+3. Gerçek kayıtla kanonik export paketinin uçtan uca doğrulanması —
+   **kısmen kapandı** (23 Eylül, yayın kapısı A2): gerçek kayıtlardan dört
+   sürümün kopyası üzerinde export + bağımsız oracle; bir sürüm 2 örnekle
+   pakete girdi, üçü kurala uygun reddedildi, orijinaller değişmedi. Açık kalan:
+   **hata aralığı içeren gerçek bir örnek** pakete girmedi (etiketler
+   tamamlanmamış). [Faz A raporu](reports/release-gate-phase-a-2026-09-23.md).
 4. İki kişinin aynı kadrajda olduğu gerçek subject-lock testi.
 
 ## 21 Eylül kayıt/takip/GUI onarımından kalan açıklar

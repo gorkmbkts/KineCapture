@@ -24,9 +24,17 @@ başka ortama düşmez, durup ne yapılacağını söyler.
 - **Tam `pytest` tek süreçte bitmiyor.** F1'de yaklaşık 28 dakikada
   tamamlanmadı; dosya dosya koşuda 39 dosyanın 38'i yaklaşık 6 dakikada yeşildi.
   Sonraki bütün turlarda kabul koşusu **dosya dosya** yapıldı ve proje kuralı
-  hâline geldi. Neden bulunmadı; `status: open`. 19 Eylül 2026'da yeniden
-  doğrulandı: tek süreçte 20+ dakikada bitmedi, dosya dosya 83 dosya
-  **1786 s**'de yeşildi.
+  hâline geldi. 19 Eylül 2026'da yeniden doğrulandı: tek süreçte 20+ dakikada
+  bitmedi, dosya dosya 83 dosya **1786 s**'de yeşildi.
+- `verified` **Neden** (23 Eylül 2026, yayın kapısı A1): testlerin kapatıp
+  silmediği pencereler süreçte birikiyor (kimlik testlerine gelindiğinde 322
+  üst düzey pencere, 15 527 widget) ve her `build_window` uygulama geneli stil
+  sayfasını uyguluyor; bu maliyet canlı widget sayısıyla doğrusal (0 / 1 960 /
+  3 920 / 7 889 / 15 827 widget için 0,02 / 0,76 / 1,52 / 3,17 / 6,64 s), toplam
+  süre ikinci dereceden büyüyor. Ürün tek pencereyle çalıştığı için bu bir test
+  düzeneği sorunu. `scripts/run_tests.ps1` artık **varsayılan olarak dosya
+  dosya** koşar (`-Files`, `-Report`, `-LogDir`; eski davranış
+  `-SingleProcess`). [Faz A raporu](../reports/release-gate-phase-a-2026-09-23.md).
 - Tek dosyalık ve hedefli koşular normal biçimde çalışır.
 
 ## Qt platformu
@@ -161,10 +169,10 @@ düşebiliyor. Bir turda düştüklerinde önce izole koşuyla ayırt edin.
 
 ## Açık çelişki
 
-`scripts/run_tests.ps1` hâlâ `QT_QPA_PLATFORM = 'offscreen'` ayarlıyor ve tek
-süreçte `pytest` çağırıyor; yani betik yukarıdaki iki kuralın ikisine de
-uymuyor. Betik bu denetimde değiştirilmedi. Kabul koşusu yapacak olan, betiği
-kullanmak yerine dosya dosya ve `windows` platformuyla koşmalıdır.
+`scripts/run_tests.ps1` 23 Eylül'den beri dosya dosya koşar; ama hâlâ
+`QT_QPA_PLATFORM = 'offscreen'` ayarlar (testlerin varsayılanı da odur). Font ve
+yerleşim ölçen **GUI kabul** koşuları `windows` platformuyla yapılmalıdır; genel
+regresyon koşusu için betik yeterlidir.
 
 İlgili: [Veri bütünlüğü ve kanıt](../concepts/data-integrity.md),
 [AI hafıza iş akışı](ai-memory-workflow.md),

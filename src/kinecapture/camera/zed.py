@@ -62,6 +62,48 @@ _sl_module: Any = None
 _sl_import_error: Optional[str] = None
 _sl_lock = threading.Lock()
 
+#: Where the ZED SDK installer puts its DLLs when ``ZED_SDK_ROOT_DIR`` is unset.
+_DEFAULT_SDK_ROOT = Path(r"C:\Program Files (x86)\ZED SDK")
+#: Kept for the life of the process: closing it would take the SDK's folder
+#: out of the DLL search again.
+_sdk_dll_directory: Any = None
+
+
+def sdk_bin_directory() -> Optional[Path]:
+    """The ZED SDK's own ``bin`` folder, or ``None`` when there is none."""
+    candidates = []
+    root = os.environ.get("ZED_SDK_ROOT_DIR")
+    if root:
+        candidates.append(Path(root) / "bin")
+    candidates.append(_DEFAULT_SDK_ROOT / "bin")
+    for candidate in candidates:
+        if (candidate / "sl_zed64.dll").is_file():
+            return candidate
+    return None
+
+
+def _add_sdk_dll_directory() -> None:
+    """Let ``pyzed`` load ``sl_zed64.dll`` from the SDK, not from a copy.
+
+    Python 3.8+ resolves an extension module's DLLs from the module's own
+    folder, the system folders and directories added with
+    ``os.add_dll_directory`` - never ``PATH``. A development environment gets
+    away with copies of the SDK's DLLs beside ``pyzed``; an installed release
+    carries none, so the SDK the installer's preflight verified is the one
+    that is loaded. Where a copy does sit beside ``pyzed`` it still wins, so a
+    development environment behaves exactly as before.
+    """
+    global _sdk_dll_directory
+    if _sdk_dll_directory is not None or not hasattr(os, "add_dll_directory"):
+        return
+    directory = sdk_bin_directory()
+    if directory is None:
+        return
+    try:
+        _sdk_dll_directory = os.add_dll_directory(str(directory))
+    except OSError as exc:
+        logger.info("ZED SDK DLL klasörü eklenemedi (%s): %s", directory, exc)
+
 
 def _import_sl() -> Any:
     """Import ``pyzed.sl`` lazily. Returns ``None`` when unavailable."""
@@ -69,6 +111,7 @@ def _import_sl() -> Any:
     with _sl_lock:
         if _sl_module is not None or _sl_import_error is not None:
             return _sl_module
+        _add_sdk_dll_directory()
         try:
             import pyzed.sl as sl  # noqa: PLC0415 - deliberate lazy import
         except Exception as exc:  # ImportError, or a DLL load failure on Windows
@@ -830,7 +873,7 @@ class ZedCameraBackend(CameraBackend):
                 f"karakter (sınır {MAX_PATH}).",
                 code="zed_recording_path_too_long",
                 remedy=(
-                    "Veri klasörünü daha kısa bir yola alın (örn. C:\KineCapture). "
+                    "Veri klasörünü daha kısa bir yola alın (örn. C:\\KineCapture). "
                     "Uygulamanın kendi dosyaları uzun yolu kullanabiliyor, SDK "
                     "kullanamıyor."
                 ),

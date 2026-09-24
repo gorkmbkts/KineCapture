@@ -30,6 +30,9 @@ from .observable import Event, Observable
 from .tasks import InlineRunner, TaskRunner
 
 
+_Lists = tuple[tuple[ParticipantRow, ...], tuple[SessionRow, ...]]
+
+
 class ProjectsViewModel:
     def __init__(
         self,
@@ -63,6 +66,14 @@ class ProjectsViewModel:
         #: The user the current list belongs to. A list loaded for nobody is
         #: not a list of no projects.
         self._loaded_for: Optional[str] = None
+        #: Every read of the participant and session lists - a rescan or a
+        #: new selection - takes a number, and only the newest read reaches
+        #: the screen. Rescans run in a thread pool and can finish out of
+        #: order: four participants added in a row once showed three
+        #: (release gate A1, 24 September 2026).
+        self._reads = 0
+        self._last_selection_read = 0
+        self._scans = 0
 
     @property
     def loaded_for(self) -> Optional[str]:
@@ -85,6 +96,7 @@ class ProjectsViewModel:
         if self._session.user is None:
             self._loaded_for = None
             self.projects.force(())
+            self._next_read()
             self.participants.force(())
             self.sessions.force(())
             self.state.set("signed_out")
@@ -106,6 +118,7 @@ class ProjectsViewModel:
             self.open_project(rows[0].project_id)
         elif not rows:
             self.selected_project.set("")
+            self._next_read()
             self.participants.force(())
             self.sessions.force(())
             self.state.set("empty")
@@ -161,40 +174,81 @@ class ProjectsViewModel:
         if workspace is None:
             return
         self.busy.set(True)
+        self._scans += 1
+        scan = self._scans
+        read = self._next_read()
+        wanted = self.selected_participant.value or None
 
-        def work() -> TakeIndex:
-            return self._service.refresh_index(workspace, force=force)
+        def work() -> tuple[TakeIndex, _Lists]:
+            index = self._service.refresh_index(workspace, force=force)
+            return index, self._read_lists(workspace, index, wanted)
 
-        def done(index: TakeIndex) -> None:
-            self._index = index
-            self.busy.set(False)
-            self._refill()
+        def done(result: tuple[TakeIndex, _Lists]) -> None:
+            index, lists = result
+            newest_scan = scan == self._scans
+            if newest_scan:
+                self._index = index
+                self.busy.set(False)
+            if read == self._reads:
+                self._apply(lists)
+            elif newest_scan and self._last_selection_read > read:
+                # A participant was chosen while this scan ran; that read used
+                # the old index, so read again with the new one.
+                self._refill()
 
         def failed(exc: BaseException) -> None:
-            self.busy.set(False)
+            if scan == self._scans:
+                self.busy.set(False)
             self.message.emit(
                 from_error(exc, headline="Proje içeriği okunamadı.")
             )
 
         self._runner.run(work, done, failed)
 
+    def _next_read(self) -> int:
+        self._reads += 1
+        return self._reads
+
+    def _read_lists(
+        self, workspace, index: Optional[TakeIndex], participant_id: Optional[str]  # noqa: ANN001
+    ) -> "_Lists":
+        """Participants and sessions from disk - on the runner's thread.
+
+        Every participant and every session is its own JSON file, and with no
+        participant chosen the session list is every session in the project:
+        at 30 000 takes that kept the GUI thread for seconds (release gate A3,
+        23 September 2026).
+        """
+        participants = tuple(self._service.participants(workspace, index))
+        sessions = tuple(self._service.sessions(workspace, participant_id, index))
+        return participants, sessions
+
+    def _apply(self, lists: "_Lists") -> None:
+        participants, sessions = lists
+        self.participants.force(participants)
+        self.sessions.force(sessions)
+        self.summary.set(self._summary_text(participants))
+
     def _refill(self) -> None:
         workspace = self._session.workspace
         if workspace is None:
             return
-        try:
-            participants = tuple(self._service.participants(workspace, self._index))
-            sessions = tuple(
-                self._service.sessions(
-                    workspace, self.selected_participant.value or None, self._index
-                )
-            )
-        except KineCaptureError as exc:
+        wanted = self.selected_participant.value or None
+        index = self._index
+        read = self._next_read()
+        self._last_selection_read = read
+
+        def work() -> _Lists:
+            return self._read_lists(workspace, index, wanted)
+
+        def done(lists: _Lists) -> None:
+            if read == self._reads:
+                self._apply(lists)
+
+        def failed(exc: BaseException) -> None:
             self.message.emit(from_error(exc, headline="Katılımcılar okunamadı."))
-            return
-        self.participants.force(participants)
-        self.sessions.force(sessions)
-        self.summary.set(self._summary_text(participants))
+
+        self._runner.run(work, done, failed)
 
     def _summary_text(self, participants: tuple[ParticipantRow, ...]) -> str:
         takes = sum(row.take_count for row in participants)
@@ -327,6 +381,7 @@ class ProjectsViewModel:
             if self.selected_project.value == project_id:
                 self._session.close_project()
                 self.selected_project.set("")
+                self._next_read()
                 self.participants.force(())
                 self.sessions.force(())
             self.reload_projects()

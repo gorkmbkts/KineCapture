@@ -145,12 +145,15 @@ class LibraryViewModel:
             return
         self.busy.set(True)
 
-        def work() -> TakeIndex:
-            return self._service.refresh_index(workspace.root, force=force)
+        def work() -> tuple[TakeIndex, tuple[VersionRow, ...]]:
+            index = self._service.refresh_index(workspace.root, force=force)
+            # The rows are built here, on the worker: each one asks the disk
+            # whether its version has labels, and thirty thousand of those
+            # asked on the GUI thread froze the window (release gate A3).
+            return index, tuple(self._service.versions(index))
 
-        def done(index: TakeIndex) -> None:
-            self._index = index
-            self._all = tuple(self._service.versions(index))
+        def done(result: tuple[TakeIndex, tuple[VersionRow, ...]]) -> None:
+            self._index, self._all = result
             self.busy.set(False)
             self._apply_filter()
 

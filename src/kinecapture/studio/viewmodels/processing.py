@@ -9,6 +9,7 @@ No Qt.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Optional
 
 from kinecapture.dataset.summary_index import TakeIndex, TakeSummary, build_index
@@ -45,7 +46,9 @@ class ProcessingViewModel:
         settings: Optional[SettingsService] = None,
     ) -> None:
         self._session = session
-        self.service = service or ProcessingService()
+        self.service = service or ProcessingService(
+            log_dir=Path(session.config.log_dir) / "processing"
+        )
         self._runner: TaskRunner = runner or InlineRunner()
         self._settings = settings or SettingsService(session.config)
         self._index: Optional[TakeIndex] = None
@@ -106,7 +109,7 @@ class ProcessingViewModel:
         )
 
     # --------------------------------------------------------------- loading
-    def reload(self, *, force: bool = False) -> None:
+    def reload(self, *, force: bool = False, reread: tuple[str, ...] = ()) -> None:
         """Find the takes that have no finished version yet."""
         workspace = self._session.workspace
         if workspace is None:
@@ -116,7 +119,7 @@ class ProcessingViewModel:
         self.busy.set(True)
 
         def work() -> TakeIndex:
-            return build_index(workspace.root, force=force)
+            return build_index(workspace.root, force=force, reread=reread)
 
         def done(index: TakeIndex) -> None:
             self._index = index
@@ -253,7 +256,10 @@ class ProcessingViewModel:
         self.job_finished.emit(job)
         if state in (JobState.COMPLETE, JobState.PARTIAL):
             self._report_result(job)
-            self.reload(force=True)
+            # Only the take the job belongs to is re-read unconditionally: a
+            # folder clock on a coarse file system may not have moved yet, and
+            # nothing else in the project did.
+            self.reload(reread=(job.take.directory,))
             return
         if state is JobState.FAILED:
             self.message.emit(

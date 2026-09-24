@@ -74,25 +74,42 @@ def is_safe_id(value: str) -> bool:
     return stem not in _RESERVED_WINDOWS_NAMES
 
 
+_TRANSLITERATION = str.maketrans(
+    {
+        "ç": "c", "Ç": "c", "ğ": "g", "Ğ": "g", "ı": "i", "İ": "i",
+        "ö": "o", "Ö": "o", "ş": "s", "Ş": "s", "ü": "u", "Ü": "u",
+        "â": "a", "î": "i", "û": "u", "é": "e", "è": "e", "ñ": "n",
+    }
+)
+
+
+def _full_slug(text: str) -> str:
+    lowered = (text or "").translate(_TRANSLITERATION).lower()
+    return re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+
+
 def slugify(text: str, *, fallback: str = "item", max_length: int = 48) -> str:
     """Turn free text into a safe, lowercase identifier fragment.
 
     Non-ASCII letters (Turkish included) are transliterated where an obvious
     ASCII equivalent exists, then anything else collapses to ``-``.
     """
-    table = str.maketrans(
-        {
-            "ç": "c", "Ç": "c", "ğ": "g", "Ğ": "g", "ı": "i", "İ": "i",
-            "ö": "o", "Ö": "o", "ş": "s", "Ş": "s", "ü": "u", "Ü": "u",
-            "â": "a", "î": "i", "û": "u", "é": "e", "è": "e", "ñ": "n",
-        }
-    )
-    lowered = (text or "").translate(table).lower()
-    cleaned = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
-    cleaned = cleaned[:max_length].strip("-")
+    cleaned = _full_slug(text)[:max_length].strip("-")
     if not cleaned or not is_safe_id(cleaned):
         return fallback
     return cleaned
+
+
+def slug_is_lossless(text: str, slug: str) -> bool:
+    """True when ``slug`` is all of ``text`` - not cut short, not a fallback.
+
+    Two names that differ only after the length cut, or that are made of
+    symbols with no ASCII letter in them, produce the same slug without being
+    the same thing. A caller that treats equal slugs as equal names has to ask
+    this first.
+    """
+    full = _full_slug(text)
+    return bool(full) and full == slug
 
 
 __all__ = [
@@ -100,6 +117,7 @@ __all__ = [
     "is_safe_id",
     "new_id",
     "participant_code",
+    "slug_is_lossless",
     "slugify",
     "timestamped_id",
     "utc_now",

@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence
 
 from kinecapture.core.errors import KineCaptureError
 from kinecapture.domain.labels import LabelSchema
@@ -120,6 +120,7 @@ class ExportViewModel:
         #: checked. Read back from disk to decide whether the result still
         #: describes the data, rather than trusting a flag nobody updated.
         self._checked: dict[str, tuple[int, int]] = {}
+        self._freshness_pending = False
         self.options: Observable[CanonicalExportOptions] = Observable(
             CanonicalExportOptions(), name="options"
         )
@@ -157,14 +158,17 @@ class ExportViewModel:
         self.summary.set(CHECK_STATE_TEXT[CheckState.CHECKING])
         schema = self.schema
 
+        progress = self._progress_reporter(CHECK_STATE_TEXT[CheckState.CHECKING])
+
         def work() -> list[VersionReport]:
             reports: list[VersionReport] = []
-            for row in versions:
+            for position, row in enumerate(versions, start=1):
                 report, opened = inspect_version(Path(row.directory), schema)
                 if opened is not None:
                     opened["dataset"].close()
                     report.samples_written = len(opened["ready"])
                 reports.append(report)
+                progress(position, len(versions))
             return reports
 
         def done(reports: list[VersionReport]) -> None:
@@ -235,13 +239,42 @@ class ExportViewModel:
         """
         if not self._checked or self.busy.value:
             return True
-        for directory, (annotations, subject) in self._checked.items():
-            if current_revisions(Path(directory)) != (annotations, subject):
-                self.state.set(CheckState.STALE)
-                self.summary.set(CHECK_STATE_TEXT[CheckState.STALE])
-                self.can_build.set(False)
-                return False
+        if _any_changed(dict(self._checked)):
+            self._mark_stale()
+            return False
         return True
+
+    def refresh_freshness(self) -> None:
+        """:meth:`recheck_freshness`, off the GUI thread. What a visit calls.
+
+        Three small reads per checked version is nothing for ten versions and
+        a frozen window for thirty thousand: measured at 660 ms for 500
+        versions, on the GUI thread, every time the screen was opened
+        (release gate A3, 23 September 2026). The answer arrives a moment
+        later; until it does the previous one stands, which is what it did
+        before as well.
+        """
+        if not self._checked or self.busy.value or self._freshness_pending:
+            return
+        checked = dict(self._checked)
+        self._freshness_pending = True
+
+        def done(changed: bool) -> None:
+            self._freshness_pending = False
+            # Only if nothing was checked again meanwhile: a newer result
+            # describes the disk better than this one does.
+            if changed and self._checked == checked and not self.busy.value:
+                self._mark_stale()
+
+        def failed(_exc: BaseException) -> None:
+            self._freshness_pending = False
+
+        self._runner.run(lambda: _any_changed(checked), done, failed)
+
+    def _mark_stale(self) -> None:
+        self.state.set(CheckState.STALE)
+        self.summary.set(CHECK_STATE_TEXT[CheckState.STALE])
+        self.can_build.set(False)
 
     # -------------------------------------------------------------- build
     def build(self) -> None:
@@ -252,29 +285,7 @@ class ExportViewModel:
                 Message(headline="Önce bir proje açın.", severity=Severity.WARNING)
             )
             return
-        if not self.recheck_freshness():
-            self.message.emit(
-                Message(
-                    headline="Kontrolden sonra etiketler değişti.",
-                    severity=Severity.WARNING,
-                    detail=(
-                        "Paket her sürümü yeniden denetleyerek yazılır, ama "
-                        "ekrandaki sonuç artık diskteki veriyi anlatmıyor. "
-                        "Tekrar kontrol edin."
-                    ),
-                )
-            )
-            return
         accepted = [r for r in self.rows.value if r.accepted]
-        if not accepted:
-            self.message.emit(
-                Message(
-                    headline="Dışa aktarılacak hazır sürüm yok.",
-                    severity=Severity.WARNING,
-                    detail="Listedeki nedenleri giderdikten sonra tekrar kontrol edin.",
-                )
-            )
-            return
 
         self.busy.set(True)
         schema = self.schema
@@ -284,18 +295,54 @@ class ExportViewModel:
         # result is shown to the user, never trusted as a substitute for the
         # check that actually guards the write.
         directories = [Path(r.directory) for r in self.rows.value]
+        checked = dict(self._checked)
+        progress = self._progress_reporter("Paket yazılıyor…")
 
-        def work() -> ExportReport:
+        def work() -> Optional[ExportReport]:
+            # Whether the result on screen still describes the disk, asked
+            # here on the worker rather than on the GUI thread first: for a
+            # large project the question alone froze the window.
+            if checked and _any_changed(checked):
+                return None
+            if not accepted:
+                return _NOTHING_READY
             return build_release(
                 directories,
                 releases,
                 schema,
                 options=options,
                 operator=operator,
+                progress=progress,
             )
 
-        def done(report: ExportReport) -> None:
+        def done(report: Optional[ExportReport]) -> None:
             self.busy.set(False)
+            if report is _NOTHING_READY:
+                # Asked after the freshness question on purpose: when the
+                # labels changed, "nothing is ready" may no longer be true,
+                # and re-checking is the more useful thing to say.
+                self.message.emit(
+                    Message(
+                        headline="Dışa aktarılacak hazır sürüm yok.",
+                        severity=Severity.WARNING,
+                        detail="Listedeki nedenleri giderdikten sonra tekrar kontrol edin.",
+                    )
+                )
+                return
+            if report is None:
+                self._mark_stale()
+                self.message.emit(
+                    Message(
+                        headline="Kontrolden sonra etiketler değişti.",
+                        severity=Severity.WARNING,
+                        detail=(
+                            "Paket her sürümü yeniden denetleyerek yazılır, ama "
+                            "ekrandaki sonuç artık diskteki veriyi anlatmıyor. "
+                            "Tekrar kontrol edin."
+                        ),
+                    )
+                )
+                return
             self._show(report.versions)
             self.last_release.set(str(report.release_dir or ""))
             self.finished.emit(report)
@@ -321,10 +368,43 @@ class ExportViewModel:
 
         self._runner.run(work, done, failed)
 
+    def _progress_reporter(self, text: str):  # noqa: ANN202 - Callable[[int, int], None]
+        """``(done, total)`` into the summary line, at most four times a second.
+
+        Called from the worker; the summary reaches the screen through the
+        bridge's queued signal. Checking or writing ten thousand versions took
+        minutes on the gate machine, and a line that only says "checking" for
+        that long is indistinguishable from a hang.
+        """
+        import time
+
+        last = [0.0]
+
+        def report(done: int, total: int) -> None:
+            now = time.monotonic()
+            if done < total and now - last[0] < 0.25:
+                return
+            last[0] = now
+            self.summary.set(f"{text} {done}/{total} sürüm")
+
+        return report
+
     def set_option(self, **changes) -> None:  # noqa: ANN003
         from dataclasses import replace
 
         self.options.set(replace(self.options.value, **changes))
+
+
+#: What the build's worker returns when the check left nothing to write.
+_NOTHING_READY: Any = object()
+
+
+def _any_changed(checked: dict[str, tuple[int, int]]) -> bool:
+    """Whether any checked version's revisions moved on disk. Reads only."""
+    return any(
+        current_revisions(Path(directory)) != revisions
+        for directory, revisions in checked.items()
+    )
 
 
 __all__ = [

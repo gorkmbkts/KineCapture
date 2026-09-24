@@ -233,7 +233,7 @@ tanılama ekranı eksiği açıkça bildirir.
 .\scripts\run_app.ps1                 # GUI
 .\scripts\run_app.ps1 -Backend zed    # ZED backend seçili açılır
 .\scripts\diagnose.ps1                # ortam + SDK + kamera + iskelet tablosu
-.\scripts\run_tests.ps1               # testler
+.\scripts\run_tests.ps1               # testler, dosya dosya (tek süreç: -SingleProcess)
 ```
 
 Betikler `KineSynth` bulunamazsa başka bir environment'a düşmez; ne yapılması
@@ -245,8 +245,34 @@ Doğrudan CLI:
 conda run -n KineSynth python -m kinecapture --diagnose
 conda run -n KineSynth python -m kinecapture --list-devices
 conda run -n KineSynth python -m kinecapture --self-test
+conda run -n KineSynth python -m kinecapture --self-check --report selfcheck.json
 conda run -n KineSynth python -m kinecapture --backend mock
 ```
+
+`--self-check` kurulumun açılabildiğini **konsolsuz ve pencere göstermeden**
+denetler (paket, ayar, tema/yazı tipi/ikon kaynakları, Qt eklentisi, sandbox'ta
+kurulan Studio penceresi, kullanıcı klasörleri, önizleme modelleri, ZED SDK) ve
+sonucu JSON raporuna yazar; `pythonw.exe` ile de çalışır. `--expect-zed-sdk
+5.4.1` ve `--require-preview-models` bu iki maddeyi zorunlu yapar.
+
+### Windows kurucusu
+
+Tek komutla (hiçbir şey indirmez; KineSynth'e dokunmaz, onu `C:\KCBuild\env`
+altına klonlayıp çalışma zamanı paketlerine budar):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\release\build_installer.ps1 -NoOwnerSeed
+```
+
+Çıktı `dist\KineCapture-Setup-<sürüm>.exe` ve yanında içerik manifesti ile
+tarama sonucu. Kurucu önce bilgisayarı denetler (ZED SDK birebir 5.4.1, NVIDIA
+sürücüsü ≥ 580, CUDA/VC++ bileşenleri, disk, yol uzunluğu) ve uygun değilse
+hiçbir şey değiştirmez; `/checkonly` yalnız denetler. Hazır sistem sahibi
+hesabıyla gelen kurucu için önce kendi terminalinizde
+`python scripts\release\make_owner_seed.py --title "<unvan>"` (parola iki kez
+sorulur, yalnız özeti `dist\owner_seed.json`'a yazılır), sonra `-Fresh` ile
+derleyin. Ayrıntı ve doğrulama:
+[Faz B raporu](knowledge/reports/release-installer-phase-b-2026-09-23.md).
 
 ---
 

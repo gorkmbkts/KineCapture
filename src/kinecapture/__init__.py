@@ -2,7 +2,7 @@
 
 This module is the single place where product identity and the versioned data
 contracts are defined. Renaming the product means editing ``APP_NAME`` here (and,
-optionally, ``app_name`` in ``configs/default.yaml``); nothing else in the code
+optionally, ``app_name`` in ``kinecapture/resources/default.yaml``); nothing else in the code
 base hard-codes the display name.
 
 Schema versions are part of the on-disk contract. Every JSON document written by

@@ -216,6 +216,11 @@ class ReviewViewModel:
             (), name="error_classes"
         )
         self.message: Event[Message] = Event()
+        #: Fired once after ``movements`` and ``errors`` have both been
+        #: replaced. A screen that redraws from the two together listens here:
+        #: listening to each rebuilt the timeline and the summary cards twice
+        #: per edit, 184 ms an edit at 100 repetitions (release gate A3).
+        self.labels_changed: Event[None] = Event()
         self.frame_changed: Event[int] = Event()
         #: Fired once the version is really loaded, carrying its directory.
         #: Everything a screen has to prepare hangs off this, never off a
@@ -412,6 +417,7 @@ class ReviewViewModel:
         self.store = None
         self.movements.force(())
         self.errors.force(())
+        self.labels_changed.emit(None)
         self.selected_movement.set("")
         self.selected_error.set("")
         self.playing.set(False)
@@ -622,19 +628,23 @@ class ReviewViewModel:
 
     # -------------------------------------------------------------- selection
     def select_movement(self, sample_id: str) -> None:
+        # A selection changes what is selected, not what is labelled: the
+        # screen follows ``selected_movement`` / ``selected_error`` directly.
+        # Rebuilding every row here made each click on the timeline redo the
+        # whole label list and, through it, the timeline and the summary
+        # cards twice - measured at 176 ms a click with 100 repetitions and
+        # growing with every one added (release gate A3, 23 September 2026).
         self.selected_movement.set(sample_id)
         if sample_id and self.store is not None:
             current = self.selected_error.value
             if current and self._owner_of(current) != sample_id:
                 self.selected_error.set("")
-        self._refresh()
 
     def select_error(self, interval_id: str) -> None:
         self.selected_error.set(interval_id)
         owner = self._owner_of(interval_id)
         if owner:
             self.selected_movement.set(owner)
-        self._refresh()
 
     def select_at(self, position: int) -> None:
         if self.store is None:
@@ -805,6 +815,13 @@ class ReviewViewModel:
             return
         movements: list[MovementRow] = []
         errors: list[ErrorRow] = []
+        # Looked up once per refresh, not once per row: with a vocabulary of
+        # two hundred classes the per-row scans were the bulk of the work.
+        known = frozenset(self._schema.exercise_codes())
+        exercise_labels = {o.code: o.label for o in self._schema.exercises}
+        error_labels = {o.code: o.label for o in self._schema.error_types}
+        exercise_order = {o.code: i for i, o in enumerate(self._schema.exercises)}
+        error_order = {o.code: i for i, o in enumerate(self._schema.error_types)}
         for sample in store.document.samples:
             try:
                 start, end = store.sample_bounds(sample.sample_id)
@@ -813,14 +830,18 @@ class ReviewViewModel:
                 # take the whole screen down.
                 logger.warning("Hareket sınırı çözülemedi: %s", sample.sample_id)
                 continue
-            readiness = sample.readiness(self._schema.exercise_codes())
+            readiness = sample.readiness(known)
             movements.append(
                 MovementRow(
                     sample_id=sample.sample_id,
                     start=start,
                     end=end,
                     exercise=sample.exercise,
-                    exercise_label=self._exercise_label(sample.exercise) if sample.exercise else "",
+                    exercise_label=(
+                        exercise_labels.get(sample.exercise, sample.exercise)
+                        if sample.exercise
+                        else ""
+                    ),
                     readiness=readiness,
                     correctness=sample.correctness,
                     error_count=len(sample.errors),
@@ -828,7 +849,7 @@ class ReviewViewModel:
                         1 for i in sample.errors if not i.is_classified
                     ),
                     excluded=sample.excluded,
-                    colour_index=self.class_index(sample.exercise),
+                    colour_index=exercise_order.get(sample.exercise, -1),
                 )
             )
             for interval in sample.errors:
@@ -844,7 +865,7 @@ class ReviewViewModel:
                         end=last,
                         error_class=interval.error_class,
                         error_label=(
-                            self._schema.label_for_error(interval.error_class)
+                            error_labels.get(interval.error_class, interval.error_class)
                             if interval.error_class
                             else ""
                         ),
@@ -852,15 +873,14 @@ class ReviewViewModel:
                         roles=interval.affected_roles,
                         roles_origin=interval.roles_origin,
                         note=interval.note,
-                        colour_index=self.class_index(
-                            interval.error_class, fault=True
-                        ),
+                        colour_index=error_order.get(interval.error_class, -1),
                     )
                 )
         movements.sort(key=lambda row: row.start)
         errors.sort(key=lambda row: row.start)
         self.movements.force(tuple(movements))
         self.errors.force(tuple(errors))
+        self.labels_changed.emit(None)
         ready, total = store.progress()
         self.progress.set(f"{ready}/{total} hareket hazır" if total else "Henüz hareket yok")
         self.can_undo.set(store.can_undo)

@@ -38,3 +38,6 @@ releases/
 .DS_Store
 Thumbs.db
 .idea/
+
+# Release: the System Owner seed is build output only (digest, never committed)
+owner_seed*.json

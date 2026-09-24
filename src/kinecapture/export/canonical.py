@@ -32,21 +32,24 @@ No Qt, no SDK.
 
 from __future__ import annotations
 
+import hashlib
+import io
 import logging
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Iterable, Optional, Sequence
+from typing import Any, Callable, Iterable, Optional, Sequence
 
 import numpy as np
 
 from kinecapture import APP_VERSION
 from kinecapture.core.errors import KineCaptureError
-from kinecapture.core.fingerprint import hash_payload
+from kinecapture.core.fingerprint import hash_file, hash_payload
 from kinecapture.core.jsonio import read_json, write_json
-from kinecapture.core.paths import ensure_dir, long_path, path_exists
+from kinecapture.core.paths import ensure_dir, iter_files, long_path, path_exists
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.processing.annotations import (
     CANONICAL_ANNOTATION_SCHEMA_VERSION,
@@ -58,7 +61,7 @@ from kinecapture.processing.annotations import (
     load_annotations,
     validate_document,
 )
-from kinecapture.processing.review import ReviewDataset
+from kinecapture.processing.review import ReviewDataset, run_take_dir
 from kinecapture.processing.subject_review import (
     SUBJECT_REVIEW_SCHEMA_VERSION,
     load_subject_review,
@@ -73,7 +76,20 @@ logger = logging.getLogger(__name__)
 #: before the distinction existed carries ``unknown``, which is neither
 #: "inherited" nor "reviewed" - nothing recorded how those joints were chosen,
 #: and a release must not resolve that by guessing.
-CANONICAL_RELEASE_SCHEMA_VERSION = "1.1.0"
+#:
+#: 1.2.0 makes the package describe itself (release gate, 23 September 2026).
+#: Every sample and every version now names its ``participant_id``,
+#: ``session_id``, ``project_id``, data ``origin`` and ``skeleton_format``; the
+#: manifest carries each skeleton's joint layout, the projects by name, and
+#: participant and synthetic-sample counts; and ``checksums.json`` covers every
+#: file in the package. Before this a package could not be split by
+#: participant, did not say which joint order its arrays used - three body
+#: formats with 18, 34 and 38 joints can share one package - and exported
+#: synthetic recordings unmarked. Additive: no existing field changed.
+CANONICAL_RELEASE_SCHEMA_VERSION = "1.2.0"
+
+#: Written last, over every other file in the package.
+CHECKSUMS_FILE = "checksums.json"
 
 #: Arrays copied per sample when the version has them. Anything absent stays
 #: absent: a missing signal is reported in the manifest, never zero-filled.
@@ -110,6 +126,17 @@ class Refusal(str, Enum):
     ANNOTATION_INVALID = "annotation_invalid"
     NO_READY_SAMPLES = "no_ready_samples"
     OPEN_ERRORS = "open_errors"
+    #: The take's own ``take.json`` could not be read, so nothing says whose
+    #: movement this is. A sample nobody can attribute cannot be split by
+    #: participant, and a split by participant is the first thing a training
+    #: set is used for.
+    PARTICIPANT_UNKNOWN = "participant_unknown"
+    #: A repetition id already written by another version of this package.
+    #: Writing it would put this version's arrays on top of the other's.
+    DUPLICATE_SAMPLE = "duplicate_sample"
+    #: A skeleton name this package already describes, with another joint
+    #: layout. One name has to mean one joint order inside a package.
+    SKELETON_MISMATCH = "skeleton_mismatch"
 
 
 REFUSAL_TEXT = {
@@ -121,6 +148,9 @@ REFUSAL_TEXT = {
     Refusal.ANNOTATION_INVALID: "Etiket dosyası bu sürümle tutarlı değil.",
     Refusal.NO_READY_SAMPLES: "Dışa aktarılacak hazır hareket yok.",
     Refusal.OPEN_ERRORS: "Sınıfsız hata aralığı olan hareket var.",
+    Refusal.PARTICIPANT_UNKNOWN: "Kaydın katılımcısı okunamadı (take.json).",
+    Refusal.DUPLICATE_SAMPLE: "Hareket kimliği pakete giren başka bir sürümde de var.",
+    Refusal.SKELETON_MISMATCH: "Aynı iskelet adı farklı bir eklem düzeniyle geldi.",
 }
 
 
@@ -162,11 +192,24 @@ class VersionReport:
     annotation_revision: int = 0
     subject_revision: int = 0
     source_fingerprint: str = ""
+    #: Whose movement this is, read from the take's own ``take.json``.
+    participant_id: str = ""
+    session_id: str = ""
+    project_id: str = ""
+    #: ``synthetic`` or ``real``, as the raw source recorded it.
+    origin: str = ""
+    #: The joint layout of every array this version contributes.
+    skeleton_format: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "run_id": self.run_id,
             "take_id": self.take_id,
+            "participant_id": self.participant_id,
+            "session_id": self.session_id,
+            "project_id": self.project_id,
+            "origin": self.origin,
+            "skeleton_format": self.skeleton_format,
             "directory": self.directory,
             "accepted": self.accepted,
             "refusals": [r.value for r in self.refusals],
@@ -222,7 +265,7 @@ def current_revisions(directory: Path | str) -> tuple[int, int]:
     directory = Path(directory)
     try:
         job = read_json(directory / "job.json")
-        take_dir = Path(job["take_dir"])
+        take_dir = run_take_dir(directory, job)
     except (KineCaptureError, KeyError, ValueError, OSError):
         return (-1, -1)
     run_id = directory.name
@@ -283,6 +326,16 @@ def inspect_version(
         report.run_id = dataset.run_id
         report.take_id = str(dataset.job.get("take_id", ""))
         report.source_fingerprint = dataset.source_fingerprint
+        report.origin = str((dataset.job.get("source") or {}).get("origin", ""))
+        report.skeleton_format = str(dataset.job.get("skeleton_format") or "")
+        try:
+            take = dict(read_json(dataset.take_dir / "take.json"))
+            report.participant_id = str(take["participant_id"])
+            report.session_id = str(take.get("session_id", ""))
+            report.project_id = str(take.get("project_id", ""))
+        except (KineCaptureError, KeyError, TypeError, ValueError, OSError) as exc:
+            refusals.append(Refusal.PARTICIPANT_UNKNOWN)
+            detail.append(str(exc))
 
         if str(dataset.job.get("subject_status", "")) == "needs_subject_selection":
             # Every array in such a run is NaN. Nothing downstream can use it,
@@ -367,13 +420,18 @@ def build_release(
     verify: bool = True,
     name: Optional[str] = None,
     operator: str = "",
+    progress: Optional[Callable[[int, int], None]] = None,
 ) -> ExportReport:
     """Write one dataset package from the given processing versions.
 
     Built in a staging directory and moved into place at the end, so an
     interrupted export leaves no half-written release for someone to train on.
+    ``progress(done, total)`` is called after each version, accepted or not:
+    ten thousand versions took eight minutes on the gate machine, and a screen
+    that can only say "writing" for that long reads as a hang.
     """
     options = options or CanonicalExportOptions()
+    directories = list(directories)
     releases_dir = Path(releases_dir)
     ensure_dir(releases_dir)
     report = ExportReport(started_at=_utc_now())
@@ -392,29 +450,58 @@ def build_release(
     }
 
     entries: list[dict[str, Any]] = []
+    #: Skeleton name -> its spec, as the first version carrying it wrote it.
+    skeletons: dict[str, dict[str, Any]] = {}
+    #: Project id -> name, for every project a written sample came from.
+    projects: dict[str, str] = {}
+    written_ids: set[str] = set()
+    #: Package path -> (size, checksum) of every array, from the written bytes.
+    checksums: dict[str, tuple[int, str]] = {}
     try:
-        for directory in directories:
-            version_report, opened = inspect_version(directory, schema, verify=verify)
-            report.versions.append(version_report)
-            if opened is None:
-                continue
-            dataset = opened["dataset"]
+        total = len(directories)
+        for position, directory in enumerate(directories, start=1):
             try:
-                written = _write_version(
-                    dataset,
-                    opened["ready"],
-                    samples_dir,
-                    entries,
-                    exercise_index=exercise_index,
-                    error_index=error_index,
-                    options=options,
-                    subject=opened["subject"],
-                    document=opened["document"],
-                )
-                version_report.samples_written = written
-                report.samples += written
+                version_report, opened = inspect_version(directory, schema, verify=verify)
+                report.versions.append(version_report)
+                if version_report.project_id and version_report.project_id not in projects:
+                    # Refused versions too: the manifest lists them by project,
+                    # and a refusal is only actionable if you can find the project.
+                    projects[version_report.project_id] = _project_name(
+                        Path(directory), version_report.project_id
+                    )
+                if opened is None:
+                    continue
+                dataset = opened["dataset"]
+                try:
+                    refusal = _package_conflict(
+                        dataset, opened["ready"], version_report, skeletons, written_ids
+                    )
+                    if refusal is not None:
+                        version_report.accepted = False
+                        version_report.refusals = (refusal[0],)
+                        version_report.detail = (refusal[1],)
+                        continue
+                    written = _write_version(
+                        dataset,
+                        opened["ready"],
+                        samples_dir,
+                        entries,
+                        exercise_index=exercise_index,
+                        error_index=error_index,
+                        options=options,
+                        subject=opened["subject"],
+                        document=opened["document"],
+                        version=version_report,
+                        checksums=checksums,
+                    )
+                    version_report.samples_written = written
+                    report.samples += written
+                    written_ids.update(sample.sample_id for sample in opened["ready"])
+                finally:
+                    dataset.close()
             finally:
-                dataset.close()
+                if progress is not None:
+                    progress(position, total)
 
         manifest = _manifest(
             release_name,
@@ -424,15 +511,18 @@ def build_release(
             error_index,
             options,
             operator,
+            skeletons=skeletons,
+            projects=projects,
         )
         write_json(staging / "manifest.json", manifest)
         write_json(staging / "samples.json", {"samples": entries})
+        # Last, over everything else: a package whose files do not match this
+        # list has been changed since it was built, or was never finished.
+        write_json(staging / CHECKSUMS_FILE, _package_checksums(staging, checksums))
 
         final = releases_dir / release_name
         if path_exists(final):
             raise FileExistsError(f"Bu isimde bir sürüm zaten var: {release_name}")
-        import os
-
         os.rename(long_path(staging), long_path(final))
         report.release_dir = final
     except Exception:
@@ -440,6 +530,93 @@ def build_release(
         raise
     report.finished_at = _utc_now()
     return report
+
+
+def _package_conflict(
+    dataset: ReviewDataset,
+    ready: Sequence[MovementSample],
+    version: VersionReport,
+    skeletons: dict[str, dict[str, Any]],
+    written_ids: set[str],
+) -> Optional[tuple[Refusal, str]]:
+    """What would make this version contradict what the package already holds.
+
+    Checked before a single file of the version is written, so a refused
+    version leaves nothing behind. Records the version's skeleton when it is
+    the first to carry that name.
+    """
+    clash = sorted({sample.sample_id for sample in ready} & written_ids)
+    if clash:
+        return (
+            Refusal.DUPLICATE_SAMPLE,
+            f"{len(clash)} hareket kimliği başka bir sürümde de var: {', '.join(clash[:3])}",
+        )
+    name = version.skeleton_format
+    spec_path = dataset.directory / "skeleton_spec.json"
+    if name and path_exists(spec_path):
+        spec = dict(read_json(spec_path))
+        known = skeletons.get(name)
+        if known is not None and known != spec:
+            return (
+                Refusal.SKELETON_MISMATCH,
+                f"'{name}' bu pakette başka bir eklem düzeniyle zaten var.",
+            )
+        skeletons.setdefault(name, spec)
+    return None
+
+
+def _project_name(run_dir: Path, project_id: str) -> str:
+    """The project's display name, from the ``project.json`` the version sits in.
+
+    ``<project>/participants/<P>/sessions/<S>/takes/<T>/derived/processing/<run>``.
+    Empty when it cannot be read or belongs to another project: the id is the
+    authority, and a name is only written when it provably goes with it.
+    """
+    parents = Path(run_dir).parents
+    candidate = parents[8] / "project.json" if len(parents) > 8 else None
+    if candidate is None or not path_exists(candidate):
+        return ""
+    try:
+        payload = dict(read_json(candidate))
+    except (KineCaptureError, ValueError, TypeError, OSError):
+        return ""
+    return str(payload.get("name", "")) if payload.get("project_id") == project_id else ""
+
+
+def _package_checksums(
+    staging: Path, known: Optional[dict[str, tuple[int, str]]] = None
+) -> dict[str, Any]:
+    """``checksums.json`` for every file already in the package.
+
+    Same shape as a processing version's own ``checksums.json``. The sample
+    arrays were hashed from the bytes as they were written (``known``);
+    reopening 240 000 small files to read them back measured as half of the
+    whole export on Windows. Everything on disk is still walked, in the
+    extended form - a staging folder short enough to be opened unprefixed can
+    hold sample files past ``MAX_PATH`` - so a file nothing recorded is hashed
+    rather than left out.
+    """
+    known = known or {}
+    entries: dict[str, Any] = {}
+    for name, path in iter_files(staging):
+        if name == CHECKSUMS_FILE:
+            continue
+        if name in known:
+            size, digest = known[name]
+        else:
+            size, digest = os.stat(path).st_size, hash_file(path)
+        entries[name] = {"present": True, "size_bytes": size, "checksum": digest}
+    return {"algorithm": "sha256", "files": dict(sorted(entries.items()))}
+
+
+def _save_array(path: Path, array: np.ndarray) -> tuple[int, str]:
+    """Write one ``.npy`` and return its size and checksum, from the same bytes."""
+    buffer = io.BytesIO()
+    np.save(buffer, array, allow_pickle=False)
+    data = buffer.getvalue()
+    with open(long_path(path), "wb") as stream:
+        stream.write(data)
+    return len(data), "sha256:" + hashlib.sha256(data).hexdigest()
 
 
 def _write_version(
@@ -453,7 +630,10 @@ def _write_version(
     options: CanonicalExportOptions,
     subject: Any,
     document: Any,
+    version: Optional[VersionReport] = None,
+    checksums: Optional[dict[str, tuple[int, str]]] = None,
 ) -> int:
+    version = version or VersionReport(run_id=dataset.run_id, directory=str(dataset.directory))
     store = dataset.array_store
     available = set(store.keys)
     written = 0
@@ -494,13 +674,22 @@ def _write_version(
 
         sample_dir = ensure_dir(samples_dir / sample.sample_id)
         for key, array in payload.items():
-            with open(long_path(sample_dir / f"{key}.npy"), "wb") as stream:
-                np.save(stream, array, allow_pickle=False)
+            recorded = _save_array(sample_dir / f"{key}.npy", array)
+            if checksums is not None:
+                checksums[f"samples/{sample.sample_id}/{key}.npy"] = recorded
 
         entries.append({
             "sample_id": sample.sample_id,
             "run_id": dataset.run_id,
             "take_id": str(dataset.job.get("take_id", "")),
+            # Who, where and what: enough to split by participant, to tell a
+            # synthetic example from a measured one and to know which joint
+            # order the arrays use - without opening anything but this file.
+            "participant_id": version.participant_id,
+            "session_id": version.session_id,
+            "project_id": version.project_id,
+            "origin": version.origin,
+            "skeleton_format": version.skeleton_format,
             "source_fingerprint": dataset.source_fingerprint,
             # What the version's own job file recorded about itself. A package
             # that says "1645 of 1648 recorded frames were matched" can be
@@ -602,6 +791,9 @@ def _manifest(
     error_index: dict[str, int],
     options: CanonicalExportOptions,
     operator: str,
+    *,
+    skeletons: Optional[dict[str, dict[str, Any]]] = None,
+    projects: Optional[dict[str, str]] = None,
 ) -> dict[str, Any]:
     accepted = [v.to_dict() for v in report.accepted]
     refused = [v.to_dict() for v in report.refused]
@@ -618,7 +810,16 @@ def _manifest(
             "versions_accepted": len(accepted),
             "versions_refused": len(refused),
             "samples": len(entries),
+            "participants": len({e["participant_id"] for e in entries}),
+            # Never folded into the rest: a model trained on generated
+            # movement has to be able to tell it was.
+            "samples_synthetic": sum(1 for e in entries if e["origin"] == "synthetic"),
         },
+        "projects": dict(sorted((projects or {}).items())),
+        # Each skeleton's joint order, verbatim from the version that produced
+        # it. ``joints.npy`` is ``[T, J, 3]`` in exactly this order.
+        "skeletons": dict(sorted((skeletons or {}).items())),
+        "checksums_file": CHECKSUMS_FILE,
         "label_mapping": mapping,
         "error_mapping": {
             "classes": sorted(error_index, key=error_index.get),
@@ -673,6 +874,7 @@ def _next_name(releases_dir: Path) -> str:
 
 __all__ = [
     "CANONICAL_RELEASE_SCHEMA_VERSION",
+    "CHECKSUMS_FILE",
     "CanonicalExportOptions",
     "ExportReport",
     "JOINT_STATUS_CODES",

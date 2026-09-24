@@ -67,6 +67,44 @@ def safe_external_path(path: Path | str) -> str:
     return os.path.abspath(str(path)) if IS_WINDOWS else str(path)
 
 
+def extended_path(path: Path | str) -> str:
+    """The ``\\\\?\\`` form on Windows, however *short* the path is.
+
+    :func:`long_path` decides on the length of the path it is given, which is
+    right for opening that path and wrong for walking below it: a folder of
+    210 characters is handed back unprefixed, and every file more than 50
+    characters deeper is then past ``MAX_PATH`` - where ``Path.rglob`` and
+    ``is_file`` do not raise, they just do not see it. A package's checksum
+    list missed exactly those files (release gate, 23 September 2026).
+    """
+    text = str(path)
+    if not IS_WINDOWS or text.startswith(_EXTENDED_PREFIX):
+        return text
+    absolute = os.path.abspath(text)
+    if absolute.startswith("\\\\"):
+        return _UNC_PREFIX + absolute[2:]
+    return _EXTENDED_PREFIX + absolute
+
+
+def iter_files(root: Path | str):  # noqa: ANN201 - Iterator[tuple[str, Path]]
+    """Every file below ``root`` as ``(posix relative name, path)``, sorted.
+
+    Walks in the extended form, so nothing is skipped for being deep, and with
+    ``os.walk``, whose directory entries carry the type the listing already
+    returned - ``rglob`` plus ``is_file`` stats every entry a second time.
+    """
+    base = extended_path(root).rstrip("\\/")
+    cut = len(base) + 1
+    found: list[tuple[str, Path]] = []
+    for directory, subdirectories, names in os.walk(base):
+        subdirectories.sort()
+        for name in names:
+            full = os.path.join(directory, name)
+            found.append((full[cut:].replace("\\", "/"), Path(full)))
+    found.sort(key=lambda item: item[0])
+    yield from found
+
+
 def ensure_dir(path: Path) -> Path:
     """``mkdir -p`` that works past ``MAX_PATH``."""
     os.makedirs(long_path(path), exist_ok=True)
@@ -81,7 +119,9 @@ __all__ = [
     "IS_WINDOWS",
     "MAX_PATH",
     "ensure_dir",
+    "extended_path",
     "is_too_long_for_external_tools",
+    "iter_files",
     "long_path",
     "path_exists",
     "safe_external_path",

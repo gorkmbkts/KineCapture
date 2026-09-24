@@ -33,6 +33,7 @@ from kinecapture.studio.services.camera_presets import (  # noqa: E402
     camera_for_preset,
 )
 from kinecapture.studio.services.skeleton3d import OrbitCamera  # noqa: E402
+from conftest import enter_the_workspace  # noqa: E402
 
 
 @pytest.fixture(scope="module")
@@ -62,6 +63,11 @@ def window(app, tmp_path, monkeypatch):
         password_confirm="kinecapture1",
     )
     app.processEvents()
+    # Since 20 September every screen but Projeler needs an open project, and
+    # a refused ``navigate`` never activates or leaves a page - which made the
+    # tests below pass or fail without exercising what they are about
+    # (release gate A1, 23 September 2026).
+    enter_the_workspace(shell, app)
     yield shell, app
     shell.close()
 

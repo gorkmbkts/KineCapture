@@ -55,7 +55,7 @@ from kinecapture.studio.viewmodels.navigation import Destination
 
 from .. import iconset
 from ..charts import BarRows, Proportion
-from ..models import ROW_ROLE, Column, RowTableModel, SearchProxy
+from ..models import limit_content_sizing, ROW_ROLE, Column, RowTableModel, SearchProxy
 from ..widgets import ElidedLabel, label, separator
 from .base import StudioPage
 
@@ -188,6 +188,9 @@ class DatasetPage(StudioPage):
         self.table.horizontalHeader().setSectionResizeMode(
             QHeaderView.ResizeMode.ResizeToContents
         )
+        # A thousand rows measured per column on every reset is what the
+        # sizing costs by default; see ``models.CONTENT_SIZING_ROWS``.
+        limit_content_sizing(self.table)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.doubleClicked.connect(lambda _i: self._open_selected())
 

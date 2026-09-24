@@ -1186,8 +1186,13 @@ class ReviewPage(StudioPage):
         self.bind(self.subject.blocker, lambda _b: self._show_subject_status())
         self.bind_event(self.subject.message, self.show_message)
         self.bind_event(self.subject.go_to, self._seek)
-        self.bind(viewmodel.movements, self._movements_changed)
-        self.bind(viewmodel.errors, self._errors_changed)
+        # One redraw per change of labels, not one per list: the two lists
+        # are always replaced together, and each redraw rebuilds the timeline
+        # and the summary cards.
+        self.bind_event(viewmodel.labels_changed, lambda _none: self._labels_changed())
+        # ``bind`` drew the empty state on attach; an event does not, so it is
+        # drawn here once.
+        self._labels_changed()
         self.bind(viewmodel.selected_movement, lambda _key: self._selection_changed())
         self.bind(viewmodel.selected_error, lambda _key: self._selection_changed())
         self.bind(viewmodel.progress, self.progress_label.setText)
@@ -1831,6 +1836,13 @@ class ReviewPage(StudioPage):
             finally:
                 self._suppress = False
             viewmodel.select_movement(key)
+            # When this movement was already the selected one - it owned the
+            # fault that was open - nothing above changed value, so nothing
+            # announced the new state. The editor is told directly. (It used
+            # to happen as a side effect of every selection rebuilding every
+            # row, which is what made each click cost 176 ms at 100
+            # repetitions.)
+            self._selection_changed()
         elif key:
             viewmodel.select_error(key)
 
@@ -1843,15 +1855,10 @@ class ReviewPage(StudioPage):
             self.timeline.zoom_to(row.start, row.end)
 
     # ----------------------------------------------------------------- lists
-    def _movements_changed(self, _rows: tuple[MovementRow, ...]) -> None:
+    def _labels_changed(self) -> None:
         # No list to refill. The movements are boxes on the timeline and cards
         # in the summary; a third copy above every editor was the thing that
         # spent a third of the panel's height on one row.
-        self._push_intervals()
-        self._show_summary()
-        self._selection_changed()
-
-    def _errors_changed(self, _rows: tuple[ErrorRow, ...]) -> None:
         self._push_intervals()
         self._show_summary()
         self._selection_changed()

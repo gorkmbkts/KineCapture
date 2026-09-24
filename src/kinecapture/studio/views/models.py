@@ -303,6 +303,23 @@ class SearchProxy(QSortFilterProxyModel):
         return not self._needle or self._needle in haystack
 
 
+#: How many rows a content-sized column is measured over. Qt's default is a
+#: thousand: every reset, filter, sort and style change then asked the model
+#: for a thousand rows' worth of text, colours and alignment, per column, in
+#: Python. Switching the theme with the list screens built made 490 000 such
+#: calls and held the GUI thread for 8.9 s; each keystroke in a search box
+#: paid a share of the same (release gate A3, 23 September 2026). The columns
+#: sized this way hold fixed-shape values - ids, dates, counts, states - so the
+#: first screenful says how wide they need to be; text of unknown length lives
+#: in the stretch column.
+CONTENT_SIZING_ROWS = 64
+
+
+def limit_content_sizing(view) -> None:  # noqa: ANN001 - QTableView
+    """Measure content-sized columns over :data:`CONTENT_SIZING_ROWS` rows."""
+    view.horizontalHeader().setResizeContentsPrecision(CONTENT_SIZING_ROWS)
+
+
 def configure_columns(  # noqa: ANN001
     view, columns: Sequence[Column], *, fill: bool = True
 ) -> None:
@@ -316,6 +333,7 @@ def configure_columns(  # noqa: ANN001
     from PySide6.QtWidgets import QHeaderView
 
     header = view.horizontalHeader()
+    limit_content_sizing(view)
     # Off: with it on, the last column absorbs the leftover width whatever it
     # holds, which is how a date column ended up several hundred pixels wide.
     header.setStretchLastSection(False)
@@ -347,5 +365,7 @@ __all__ = [
     "Column",
     "RowTableModel",
     "SearchProxy",
+    "CONTENT_SIZING_ROWS",
     "configure_columns",
+    "limit_content_sizing",
 ]

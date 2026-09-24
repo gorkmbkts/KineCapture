@@ -50,15 +50,27 @@ def apply_application_theme(theme: str | ThemeTokens) -> ThemeTokens:
     return tokens
 
 
+#: Set on the application once the base style is in place. Once a stylesheet
+#: is applied, ``QApplication.style()`` is Qt's stylesheet wrapper, whose name
+#: is empty - so asking the style for its name said "not Fusion" on every theme
+#: change and installed Fusion again: one more re-polish of every widget,
+#: 1.1 s of a measured 8.9 s theme switch (release gate A3, 23 September 2026).
+_BASE_STYLE_PROPERTY = "kcBaseStyle"
+
+
 def _ensure_style(application) -> None:  # noqa: ANN001 - QApplication
+    if application.property(_BASE_STYLE_PROPERTY) == BASE_STYLE:
+        return
     current = application.style()
     if current is not None and current.objectName().lower() == BASE_STYLE.lower():
+        application.setProperty(_BASE_STYLE_PROPERTY, BASE_STYLE)
         return
     style = QStyleFactory.create(BASE_STYLE)
     if style is not None:
         # setStyle replaces the palette with the style's own, so it has to
         # happen before the palette is set, never after.
         application.setStyle(style)
+        application.setProperty(_BASE_STYLE_PROPERTY, BASE_STYLE)
 
 
 def repolish(widget: Optional[QWidget]) -> None:

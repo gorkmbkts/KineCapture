@@ -21,10 +21,15 @@ from __future__ import annotations
 
 import argparse
 import os
+import secrets
 import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+#: The throwaway sandbox account's password: made per run, never a literal
+#: shipped in the package (release gate B2 scan, 24 September 2026).
+_DEMO_PASSWORD = secrets.token_urlsafe(12)
 
 #: Must be decided before Qt is imported, and this tool exists to *not* be
 #: offscreen.
@@ -98,7 +103,7 @@ def _seed(config, *, frames: int):  # noqa: ANN001
     identity = IdentityService(database)
     user = identity.create_initial_owner(
         first_name="UX", last_name="Denetim", title="",
-        username="ux-denetim", password="kinecapture1",
+        username="ux-denetim", password=_DEMO_PASSWORD,
     )
     workspace = identity.create_project(
         user, Path(config.dataset_root), "UX Denetimi 15 Eylül",
@@ -220,7 +225,7 @@ def capture(output: Path, *, frames: int = 90) -> list[Path]:
     window.viewmodel.set_theme("dark")
     _settle(application, 0.6)
 
-    assert window.auth_viewmodel.sign_in("ux-denetim", "kinecapture1")
+    assert window.auth_viewmodel.sign_in("ux-denetim", _DEMO_PASSWORD)
     _settle(application, 0.6)
     size = window.size()
     print(f"pencere: {size.width()} x {size.height()} mantıksal piksel")

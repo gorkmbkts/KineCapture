@@ -360,7 +360,9 @@ class TakeIndex:
             return None
 
     # --------------------------------------------------------------- refresh
-    def refresh(self, *, force: bool = False) -> "TakeIndex":
+    def refresh(
+        self, *, force: bool = False, reread: Iterable[str] = ()
+    ) -> "TakeIndex":
         """Bring the index up to date, re-reading only what changed.
 
         A take is re-read when its own folder or its ``derived/processing``
@@ -379,6 +381,11 @@ class TakeIndex:
         """
         participants = str(Path(long_path(self.project_root / "participants")))
         by_directory = {Path(t.directory).name: t for t in self.takes.values()}
+        # Takes the caller knows have changed, re-read whatever their folders'
+        # clocks say. A finished processing job names its take: re-reading
+        # that one is what ``force`` did for the whole project, at a cost that
+        # grew with every take in it (release gate A3, 23 September 2026).
+        wanted = {Path(directory).name for directory in reread}
         found: dict[str, TakeSummary] = {}
         rescanned = 0
         directories = 0
@@ -403,6 +410,7 @@ class TakeIndex:
                     derived_mtime = _mtime_ns(take_dir / "derived" / "processing")
                     unchanged = (
                         not force
+                        and take_entry.name not in wanted
                         and existing is not None
                         and existing.take_mtime_ns == take_mtime
                         and existing.derived_mtime_ns == derived_mtime
@@ -453,14 +461,21 @@ class TakeIndex:
         return iter(self.sorted_takes())
 
 
-def build_index(project_root: Path, *, force: bool = False, save: bool = True) -> TakeIndex:
+def build_index(
+    project_root: Path,
+    *,
+    force: bool = False,
+    save: bool = True,
+    reread: Iterable[str] = (),
+) -> TakeIndex:
     """Load the cache, refresh it against the disk, and write it back if it moved.
 
     An unchanged project is not rewritten: serialising a thousand entries costs
     more than the scan that proved nothing happened, and rewriting a file to
     say "still the same" is how a cache starts costing more than it saves.
+    ``reread`` names take directories to re-read regardless of their clocks.
     """
-    index = TakeIndex.load(project_root).refresh(force=force)
+    index = TakeIndex.load(project_root).refresh(force=force, reread=reread)
     if save and (index.changed or not path_exists(index.cache_file)):
         index.save()
     return index

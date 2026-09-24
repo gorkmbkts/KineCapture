@@ -3,8 +3,9 @@
 Two kinds of setting are deliberately kept apart:
 
 * **User preferences** - window theme, preview throttle, log level, last opened
-  project. These live in ``configs/default.yaml`` plus a per-user overlay and
-  may change at any time without affecting stored data.
+  project. These live in the packaged ``kinecapture/resources/default.yaml``
+  plus a per-user overlay and may change at any time without affecting stored
+  data.
 * **Capture provenance** - resolution, fps, depth mode, body format. Those are
   copied into each take's :class:`~kinecapture.domain.project.CaptureProfile`
   at record time, so changing a preference later never rewrites the description
@@ -28,8 +29,8 @@ from kinecapture.core.errors import ConfigError
 from kinecapture.domain.enums import BackendKind
 from kinecapture.domain.project import CaptureProfile
 
-#: Location of the shipped defaults, relative to the repository root.
-DEFAULT_CONFIG_RELATIVE_PATH = Path("configs") / "default.yaml"
+#: The shipped defaults: a resource of the ``kinecapture.resources`` package.
+DEFAULT_CONFIG_RESOURCE = ("kinecapture.resources", "default.yaml")
 
 #: Where per-user overrides and the "last opened project" pointer are stored.
 USER_STATE_DIR = Path.home() / ".kinecapture"
@@ -67,13 +68,20 @@ def _is_sandbox_location(path: Optional[Path]) -> bool:
         return False
 
 
-def _project_root() -> Path:
-    """Repository root: ``src/kinecapture/core/config.py`` -> four levels up."""
-    return Path(__file__).resolve().parents[3]
-
-
 def default_config_path() -> Path:
-    return _project_root() / DEFAULT_CONFIG_RELATIVE_PATH
+    """The shipped ``default.yaml``, wherever the package is installed.
+
+    It used to be ``configs/default.yaml`` found by walking four folders up
+    from this file - the repository layout. Installed from a wheel that walk
+    ends in ``Lib/``, the file is not there, and :func:`load_config` quietly
+    fell back to the dataclass defaults: a different capture profile from the
+    one every development run used, with nothing said about it (release gate,
+    23 September 2026). As package data it travels with the code.
+    """
+    from importlib import resources
+
+    package, name = DEFAULT_CONFIG_RESOURCE
+    return Path(str(resources.files(package).joinpath(name)))
 
 
 def _resolve_user_path(value: str | Path) -> Path:
@@ -318,6 +326,15 @@ def load_config(
     payload: dict[str, Any] = {}
     if candidate.is_file():
         payload = _read_yaml(candidate)
+    elif path is None:
+        # The shipped defaults are missing: a packaging fault, not a user
+        # choice. Said out loud - and failed by ``--self-check`` - instead of
+        # running on dataclass defaults nobody chose.
+        import logging
+
+        logging.getLogger("kinecapture.config").warning(
+            "Paketle gelen varsayılan ayar dosyası bulunamadı: %s", candidate
+        )
     if include_user_state and state_path.is_file():
         overlay = _read_yaml(state_path)
         if isinstance(overlay.get("capture"), Mapping):

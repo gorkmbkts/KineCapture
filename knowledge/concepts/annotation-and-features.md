@@ -27,8 +27,12 @@ tags:
   soruyu yeniden sordurur.
 - Bir aralıktaki eklemler **miras mı yoksa bu tekrar için mi seçildi** ayrımı
   kayıtta duruyor: `RolesOrigin` = `unknown` · `class_default` · `reviewed`.
-  Sınıf varsayılanı asla "bakıldı" sayılmaz. Kanonik sidecar **1.2.0**,
-  kanonik paket **1.1.0** bu alanları taşır; eski sürümler `unknown` okunur.
+  Sınıf varsayılanı asla "bakıldı" sayılmaz. Kanonik sidecar **1.2.0** ve
+  kanonik paket (1.1.0'dan beri) bu alanları taşır; eski sürümler `unknown`
+  okunur. Kanonik paket **1.2.0** (23 Eylül, toplamsal): örnek başına
+  katılımcı/oturum/proje, köken (`synthetic`/`real`), iskelet biçimi;
+  manifestte eklem düzenleri ve `checksums.json`.
+  [Yayın kapısı Faz A](../reports/release-gate-phase-a-2026-09-23.md).
 
 ## Feature katmanı
 

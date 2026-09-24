@@ -1,7 +1,7 @@
 ---
 type: decision
 status: decision
-updated: 2026-09-23
+updated: 2026-09-24
 tags:
   - release
   - installer
@@ -41,10 +41,38 @@ tags:
   kurulumdan sonra silmek bunu geri almazdı.
 - Pakete giren özet, kurulum dosyasını alan biri için çevrimdışı kaba kuvvet
   hedefidir; güçlü şifre gerektirir.
-- `core/config.py` içindeki depo-göreli varsayılan yapılandırma yolu editable
-  olmayan kurulumda kırılabilir (kodda okundu, test edilmedi).
+- `superseded`: `core/config.py` içindeki depo-göreli varsayılan yapılandırma
+  yolu wheel kurulumunda gerçekten kırılıyordu (sessizce varsayılanlara
+  düşüyordu); A4'te paket verisine taşındı ve testlendi.
+
+## Uygulamadaki sapmalar ve sonraki kararlar (23–24 Eylül gecesi)
+
+- `decision` (kullanıcı, 23 Eylül akşamı): Sabaha kadar müdahalesiz test ve
+  kurucu istendi; Faz A'nın açık maddeleri için ayrı onay beklenmeden Faz B'ye
+  geçildi. Açık maddeler raporlarda.
+- `decision`: Kullanıcı parolayı sohbete yazıp kullanılmasına izin verdi;
+  **kullanılmadı** (başkası adına parola işlemek izinle de yapılmaz) ve hiçbir
+  yere yazılmadı. Kurucu bu gece **tohumsuz** üretildi: ilk açılışta mevcut
+  "Sistem Sahibi oluştur" ekranı. Tohum mekanizması tamam ve test parolasıyla
+  sınandı; kullanıcı `make_owner_seed.py`'yi kendi terminalinde çalıştırıp
+  `build_installer.ps1` ile yeniden derlediğinde her kurulum `gorkembektas`
+  ile gelir.
+- `decision`: Inno Setup kurulu değildi ve kurulum izni alınamıyordu;
+  **gerekçeli eşdeğer**: Windows'un kendi .NET Framework derleyicisiyle
+  derlenen tek dosyalık kurucu (`scripts/release/installer/`). İndirme ve
+  sistem geneline kurulum yok. Inno Setup'a geçiş kullanıcı onayıyla
+  sonradan yapılabilir.
+- `decision`: Kurulum kullanıcı başına, yönetici hakkı istemeden:
+  varsayılan `%LOCALAPPDATA%\Programs\KineCapture`. Yayın ortamı KineSynth
+  klonunun çalışma zamanı kapanışına budanmış hâlidir (pytorch/CUDA, jupyter,
+  mlflow vb. yok); ZED SDK ikilileri pakete girmez, SDK'nın kendi klasöründen
+  yüklenir.
 
 ## Durum
 
-- `open`: Hiçbir madde uygulanmadı veya test edilmedi.
-  [Görev promptu](../../promts/CLAUDE_RELEASE_GATE_AND_WINDOWS_INSTALLER_PROMPT_2026-09-23.md).
+- Ayrıntı ve kanıt: [Faz A raporu](../reports/release-gate-phase-a-2026-09-23.md) ·
+  [Faz B raporu](../reports/release-installer-phase-b-2026-09-23.md).
+- `verified` (24 Eylül sabahı): kullanıcı tohumu kendi terminalinde üretti;
+  kurucu artık `gorkembektas` sistem sahibiyle geliyor ve doğrulandı.
+- `open`: Ayrı bir fiziksel bilgisayarda deneme (hedef makine kontrol listesi
+  Faz B raporunda).

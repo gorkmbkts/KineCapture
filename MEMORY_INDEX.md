@@ -5,12 +5,21 @@ ilgili bağlantıyı aç. Tarihsel arşivi topluca yükleme.
 
 ## Güncel durum
 
-- **23 Eylül: yayın kapısı ve temiz Windows kurucusu planlandı, uygulanmadı.**
-  Önce export doğruluğu + ölçek testleri (≥30k segment, ≥30k run, ≥100 sınıf),
-  sonra conda-pack + preflight (ZED SDK birebir 5.4.1, NVIDIA sürücü ≥ min)
-  kurucu; sıfır veri, sistem sahibi `gorkembektas` yalnız scrypt özetiyle.
-  [Karar](knowledge/decisions/windows-installer-release-2026-09-23.md) ·
-  [Prompt](promts/CLAUDE_RELEASE_GATE_AND_WINDOWS_INSTALLER_PROMPT_2026-09-23.md).
+- **23–24 Eylül: yayın kapısı uygulandı; Windows kurucusu (sistem sahibi
+  `gorkembektas` hazır, yalnız scrypt özetiyle) üretildi ve bu makinede uçtan
+  uca doğrulandı.** Export'ta 6 hata düzeltildi, kanonik şema
+  **1.2.0** (katılımcı/oturum/proje, köken, iskelet, `checksums.json`); 30k
+  kayıt · 30k hareket · 200 sınıf ölçeğinde bağımsız oracle 0 sorun; GUI
+  darboğazları S1–S12 düzeltildi. Kurucu `dist\KineCapture-Setup-0.11.0.exe`
+  (330 MB): Windows'un .NET Framework derleyicisiyle derlenen gerekçeli eşdeğer
+  (Inno Setup kurulmadı); ön denetim ZED SDK birebir 5.4.1 + NVIDIA ≥ 580
+  (CUDA 13); kullanıcı başına kurulum; çalışma anında kurulum klasörüne yazma
+  yok; kaldırma veriyi korur. Son kodla tam koşu 103/103 (2102 test).
+  **Açık:** ayrı bilgisayarda deneme, tema değişimi > 250 ms, 30k kayıtta liste ekranlarının GUI bloğu
+  (0,5–1,8 s) ve iş parçacığındaki işlerin doğrusalın üstünde büyümesi,
+  `windows` platformunda önceden var olan 5 yerleşim testi. [Faz A](knowledge/reports/release-gate-phase-a-2026-09-23.md) ·
+  [Faz B](knowledge/reports/release-installer-phase-b-2026-09-23.md) ·
+  [Karar](knowledge/decisions/windows-installer-release-2026-09-23.md).
 
 - **21 Eylül son kullanıcı GUI revizyonu uygulandı; kullanıcı kabulü açık.**
   [Kararlar](knowledge/decisions/studio-gui-user-revision-2026-09-21.md) ·
@@ -83,7 +92,7 @@ ilgili bağlantıyı aç. Tarihsel arşivi topluca yükleme.
 - Uygulama `0.11.0`; processing **`1.3.0`** (`subject_coverage` bloğu; 1.2.0
   sürümleri `features.json`'dan okunur); canonical
   annotation **`1.2.0`** (`roles_origin`/`roles_revision`); canonical release
-  **`1.1.0`**; floor `1.0.0`; tokens **`1.3.0`**; subject association `1.2.0`;
+  **`1.2.0`** (23 Eylül: katılımcı/proje/köken/iskelet, `checksums.json`); floor `1.0.0`; tokens **`1.3.0`**; subject association `1.2.0`;
   identity şema `1`.
 - Ortam: `KineSynth`, Python 3.11.14, PySide6 6.10.1, numpy 2.4.6,
   OpenCV 4.12, ZED SDK 5.4.1 / pyzed 5.4.

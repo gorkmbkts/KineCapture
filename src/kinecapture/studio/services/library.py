@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from kinecapture.core.jsonio import read_json
-from kinecapture.core.paths import path_exists
+from kinecapture.core.paths import iter_files, path_exists
 from kinecapture.dataset.summary_index import (
     ProcessingRunSummary,
     TakeIndex,
@@ -260,9 +260,8 @@ class LibraryService:
             return None
         total = 0
         try:
-            for entry in root.rglob("*"):
-                if entry.is_file():
-                    total += entry.stat().st_size
+            for _name, entry in iter_files(root):
+                total += entry.stat().st_size
         except OSError as exc:
             logger.debug("Klasör boyutu okunamadı (%s): %s", root, exc)
             return None

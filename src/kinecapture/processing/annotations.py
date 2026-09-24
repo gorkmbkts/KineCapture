@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from kinecapture.core.errors import ValidationError
-from kinecapture.core.ids import new_id
+from kinecapture.core.ids import is_safe_id, new_id
 from kinecapture.core.jsonio import read_json, write_json
 from kinecapture.core.paths import ensure_dir, path_exists
 
@@ -444,6 +444,12 @@ def validate_document(
             note("duplicate_sample_id", "Aynı hareket kimliği iki kez var.",
                  sample=sample.sample_id)
         seen_samples.add(sample.sample_id)
+        if not is_safe_id(sample.sample_id):
+            # The id becomes a folder name in the dataset package. One that
+            # is not a plain name - a hand-edited ``..\\..\\x`` - would put a
+            # training example outside the package, or on top of another.
+            note("sample_id_unsafe", "Hareket kimliği geçerli bir klasör adı değil.",
+                 sample=sample.sample_id)
 
         try:
             start = resolve(sample.start)

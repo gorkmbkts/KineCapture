@@ -39,6 +39,27 @@ class Cancelled(RuntimeError):
     """The caller asked for this open to stop; nothing here is half-applied."""
 
 
+def run_take_dir(directory: Path, job: Any) -> Path:
+    """The take a processing version belongs to - where it is *now*.
+
+    ``job.json`` records, as an absolute path, the take directory the version
+    was produced in. A project that has since been copied or moved - to another
+    disk, to another computer - still carries that old path, and following it
+    read labels from, and wrote labels into, a project that was no longer this
+    one (release gate, 23 September 2026). A version published in place sits at
+    ``<take>/derived/processing/<run>``, so its take is the folder three levels
+    up whenever that folder really is a take. Only a version written elsewhere
+    with ``--output-root`` falls back to the recorded path.
+    """
+    directory = Path(directory)
+    parent = directory.parent
+    if parent.name == "processing" and parent.parent.name == "derived":
+        candidate = parent.parent.parent
+        if path_exists(candidate / "take.json"):
+            return candidate
+    return Path(job["take_dir"])
+
+
 class ReviewDataset:
     def __init__(
         self,
@@ -236,7 +257,8 @@ class ReviewDataset:
 
     @property
     def take_dir(self) -> Path:
-        return Path(self.job["take_dir"])
+        """Where this version's labels live. See :func:`run_take_dir`."""
+        return run_take_dir(self.directory, self.job)
 
     def anchor_at(self, position: int) -> Anchor:
         """The canonical identity of one frame: raw source, position and time."""
@@ -335,4 +357,5 @@ __all__ = [
     "AnnotationDocument",
     "Cancelled",
     "ReviewDataset",
+    "run_take_dir",
 ]

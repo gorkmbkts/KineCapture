@@ -24,6 +24,7 @@ from kinecapture.domain.labels import LabelSchema
 from kinecapture.domain.project import Participant, Project, Session, Take
 from kinecapture.gui.theme import Theme, get_theme
 from kinecapture.identity import IdentityDatabase, IdentityService, ProjectAccess, User
+from kinecapture.identity.seed import apply_owner_seed
 
 logger = get_logger(__name__)
 
@@ -47,6 +48,9 @@ class AppState(QObject):
         super().__init__(parent)
         self.config = config
         self.identity = IdentityService(IdentityDatabase(config.identity_db_path))
+        # The installer's owner seed applies to either interface; the result
+        # is logged by apply_owner_seed, and the Studio also shows it.
+        apply_owner_seed(self.identity)
         self._theme = get_theme(config.theme)
         self._current_user: Optional[User] = None
         self._workspace: Optional[ProjectWorkspace] = None

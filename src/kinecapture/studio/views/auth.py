@@ -268,6 +268,8 @@ class AuthView(QWidget, BoundView):
 
         self.bind(viewmodel.state, self._render)
         self.bind_event(viewmodel.message, self.messages.show_message)
+        if viewmodel.startup_notice is not None:
+            self.messages.show_message(viewmodel.startup_notice)
 
     # ---------------------------------------------------------------- theming
     def apply_tokens(self, tokens: ThemeTokens) -> None:

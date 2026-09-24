@@ -19,6 +19,7 @@ from kinecapture.core.config import AppConfig, save_user_state
 from kinecapture.dataset.workspace import ProjectWorkspace
 from kinecapture.identity.database import IdentityDatabase
 from kinecapture.identity.models import ProjectAccess, User
+from kinecapture.identity.seed import SeedResult, apply_owner_seed
 from kinecapture.identity.service import IdentityService
 
 from .context import (
@@ -96,14 +97,31 @@ class SessionService:
     #: The participant every screen means when it says "the current one".
     #: Set from Projects or from Capture; read by both.
     selected_participant_id: str = ""
+    #: What the installer's owner seed did on this start, when that is worth
+    #: telling the person at the sign-in form. ``None`` for an ordinary start.
+    startup_notice: Optional[SeedResult] = None
     _listeners: list[Listener] = field(default_factory=list, repr=False)
 
     # ------------------------------------------------------------- lifecycle
     @classmethod
-    def open(cls, config: AppConfig) -> "SessionService":
+    def open(
+        cls, config: AppConfig, *, owner_seed: Optional[Path] = None
+    ) -> "SessionService":
+        """Open the identity database; on a first run, apply the owner seed.
+
+        ``owner_seed`` names the seed file; by default it is the one inside the
+        installed environment (:func:`kinecapture.identity.seed.default_owner_seed_path`).
+        A checkout has none, and starts exactly as before.
+        """
         database = IdentityDatabase(config.identity_db_path)
         database.initialize()
-        return cls(config=config, identity=IdentityService(database))
+        identity = IdentityService(database)
+        seeded = apply_owner_seed(identity, owner_seed)
+        return cls(
+            config=config,
+            identity=identity,
+            startup_notice=seeded if seeded.headline else None,
+        )
 
     def close(self) -> None:
         self.user = None

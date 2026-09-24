@@ -6,6 +6,7 @@ python -m kinecapture --backend zed      # preselect a backend
 python -m kinecapture --diagnose         # environment report, no GUI
 python -m kinecapture --list-devices     # ZED cameras, no GUI
 python -m kinecapture --self-test        # headless end-to-end on synthetic data
+pythonw -m kinecapture --self-check      # can this installation start? (JSON report)
 ```
 
 Error handling policy: the user sees a short, actionable message on stderr; the
@@ -46,7 +47,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--config",
         type=Path,
         default=None,
-        help="YAML ayar dosyası yolu (varsayılan: configs/default.yaml)",
+        help="YAML ayar dosyası yolu (varsayılan: paketle gelen kinecapture/resources/default.yaml)",
     )
     parser.add_argument(
         "--dataset-root",
@@ -83,6 +84,31 @@ def build_parser() -> argparse.ArgumentParser:
             "sentetik backend ile uçtan uca akışı GUI'siz çalıştır "
             "(geçici klasöre yazar, sonra siler)"
         ),
+    )
+    parser.add_argument(
+        "--self-check",
+        action="store_true",
+        help=(
+            "kurulumun açılabildiğini konsolsuz ve pencere göstermeden denetle; "
+            "JSON rapor yaz (varsayılan: log klasöründe self_check.json)"
+        ),
+    )
+    parser.add_argument(
+        "--report",
+        type=Path,
+        default=None,
+        help="--self-check raporunun yazılacağı dosya",
+    )
+    parser.add_argument(
+        "--expect-zed-sdk",
+        default=None,
+        metavar="SÜRÜM",
+        help="--self-check: pyzed bu ZED SDK sürümünü bildirmezse başarısız say",
+    )
+    parser.add_argument(
+        "--require-preview-models",
+        action="store_true",
+        help="--self-check: önizleme modelleri yoksa başarısız say",
     )
     parser.add_argument(
         "--legacy-gui",
@@ -422,6 +448,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logger.debug("Etkin ayarlar: %s", config.to_dict())
 
     try:
+        if args.self_check:
+            from kinecapture.tools.self_check import run_self_check
+
+            return run_self_check(
+                args.report or (Path(config.log_dir) / "self_check.json"),
+                expect_zed_sdk=args.expect_zed_sdk,
+                require_preview_models=args.require_preview_models,
+            )
         if args.list_devices:
             return list_devices()
         if args.diagnose:

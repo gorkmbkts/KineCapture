@@ -25,6 +25,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -300,6 +301,8 @@ class Job:
     attempt_dir: Optional[Path] = None
     requested_cancel: bool = False
     requested_pause: bool = False
+    #: Everything the child printed. See :meth:`ProcessingService.start`.
+    log_path: Optional[Path] = None
 
     @property
     def key(self) -> str:
@@ -313,9 +316,13 @@ class Job:
 class ProcessingService:
     """Starts, pauses, cancels and follows offline processing jobs."""
 
-    def __init__(self, *, python: Optional[str] = None) -> None:
+    def __init__(
+        self, *, python: Optional[str] = None, log_dir: Optional[Path] = None
+    ) -> None:
         self._python = python or sys.executable
         self._jobs: dict[str, Job] = {}
+        #: Where each child's stdout and stderr go. See :meth:`start`.
+        self._log_dir = Path(log_dir) if log_dir is not None else _default_log_dir()
 
     # ------------------------------------------------------------------ queue
     @property
@@ -343,6 +350,49 @@ class ProcessingService:
         existing = self._jobs.get(take.take_id)
         if existing is not None and existing.is_running:
             return existing
+        command = self._command(take, parameters)
+
+        # The child's output goes to a file, never to a pipe. Nothing reads a
+        # pipe while the child runs, so a child that printed more than the
+        # pipe holds - the ZED SDK reporting model optimisation, a run of
+        # warnings - blocked on its next write and stayed "running" for ever
+        # (measured: a 1 MB write, still blocked after 20 s; release gate,
+        # 23 September 2026). A file never fills up that way, and it is the
+        # place the reason for a failure can be read afterwards.
+        # The working directory is the log folder: short, the user's own, and
+        # never an installation folder a ``-m`` import could be shadowed from.
+        directory = Path(self._log_dir)
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            # A log folder that cannot be made must not cost the job.
+            import tempfile
+
+            directory = Path(tempfile.gettempdir()) / "kinecapture-processing"
+            directory.mkdir(parents=True, exist_ok=True)
+        log_path = directory / f"{take.take_id}_{time.strftime('%Y%m%dT%H%M%S')}.log"
+        logger.info("İşleme başlatılıyor: %s (çıktı: %s)", take.take_id, log_path)
+        with open(log_path, "ab") as log:
+            process = subprocess.Popen(  # noqa: S603 - our own module, fixed argv
+                command,
+                stdin=subprocess.DEVNULL,
+                stdout=log,
+                stderr=subprocess.STDOUT,
+                cwd=str(directory),
+                env=_child_environment(),
+                creationflags=_creation_flags(),
+            )
+        job = Job(
+            take=take,
+            process=process,
+            progress=JobProgress(state=JobState.RUNNING),
+            log_path=log_path,
+        )
+        self._jobs[take.take_id] = job
+        return job
+
+    def _command(self, take: TakeSummary, parameters: Optional[dict]) -> list[str]:
+        """The child's argv: this interpreter, the processing module, the take."""
         command = [self._python, "-B", "-m", "kinecapture.processing", str(take.directory)]
         for flag, key in (
             ("--body-format", "body_format"),
@@ -356,18 +406,7 @@ class ProcessingService:
             command.append("--no-depth")
         if (parameters or {}).get("store_proxy") is False:
             command.append("--no-proxy")
-
-        logger.info("İşleme başlatılıyor: %s", take.take_id)
-        process = subprocess.Popen(  # noqa: S603 - our own module, fixed argv
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=str(Path.cwd()),
-            creationflags=_creation_flags(),
-        )
-        job = Job(take=take, process=process, progress=JobProgress(state=JobState.RUNNING))
-        self._jobs[take.take_id] = job
-        return job
+        return command
 
     # ----------------------------------------------------------------- control
     def cancel(self, take_id: str) -> bool:
@@ -503,13 +542,9 @@ class ProcessingService:
             job.progress = _replace_state(job.progress, JobState.PARTIAL)
             return
         # A child that died without writing a state is a failure, and saying so
-        # is better than leaving a row spinning forever.
-        detail = ""
-        try:
-            _out, err = job.process.communicate(timeout=1)
-            detail = (err or b"").decode("utf-8", "replace").strip()[-400:]
-        except Exception:  # noqa: BLE001 - best effort
-            detail = ""
+        # is better than leaving a row spinning forever. Why it died is the
+        # end of what it printed.
+        detail = _tail(job.log_path)
         job.progress = _replace_state(
             job.progress, JobState.FAILED, error=detail or f"çıkış kodu {code}"
         )
@@ -557,8 +592,56 @@ def _replace_state(progress: JobProgress, state: JobState, *, error: str = "") -
 
 
 def _creation_flags() -> int:
-    """Windows: own process group, so a terminate does not hit this process."""
-    return getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    """Windows: own process group, and no console window.
+
+    The group keeps a terminate aimed at the child from reaching this process.
+    ``CREATE_NO_WINDOW`` matters once the application runs as ``pythonw.exe``
+    from its shortcut: a console child of a console-less parent otherwise gets
+    a console window of its own, flashing up for every processing job.
+    """
+    return getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(
+        subprocess, "CREATE_NO_WINDOW", 0
+    )
+
+
+def _default_log_dir() -> Path:
+    """Next to the application log when there is one, else the temp folder."""
+    from kinecapture.core.logging import log_file_path
+
+    active = log_file_path()
+    if active is not None:
+        return active.parent / "processing"
+    import tempfile
+
+    return Path(tempfile.gettempdir()) / "kinecapture-processing"
+
+
+def _child_environment() -> dict[str, str]:
+    """The child's environment: this one, with its output in UTF-8.
+
+    Redirected to a file, Python writes in the locale's code page - cp1254 on
+    a Turkish Windows - and :func:`_tail` reads UTF-8, so the child's own
+    Turkish messages reached the screen as "Dosya bulunamad�" (release gate
+    B6, 23 September 2026).
+    """
+    environment = dict(os.environ)
+    environment["PYTHONIOENCODING"] = "utf-8"
+    return environment
+
+
+def _tail(path: Optional[Path], limit: int = 400) -> str:
+    """The last ``limit`` characters a child printed, or an empty string."""
+    if path is None:
+        return ""
+    try:
+        with open(path, "rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            size = stream.tell()
+            stream.seek(max(0, size - 4 * limit))
+            text = stream.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    return text.strip()[-limit:]
 
 
 def _suspend(process: Optional[subprocess.Popen]) -> bool:

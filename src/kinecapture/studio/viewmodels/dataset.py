@@ -21,7 +21,7 @@ from typing import Optional
 
 from kinecapture.core.errors import KineCaptureError
 from kinecapture.core.jsonio import read_json
-from kinecapture.core.paths import path_exists
+from kinecapture.core.paths import long_path, path_exists
 from kinecapture.dataset.summary_index import build_index
 from kinecapture.domain.labels import LabelSchema
 from kinecapture.processing.annotations import AnnotationDocument, Readiness
@@ -141,6 +141,9 @@ class DatasetViewModel:
         )
         self.busy: Observable[bool] = Observable(False, name="busy")
         self.message: Event[Message] = Event()
+        #: Version directory -> (what the row was computed from, the row).
+        #: Replaced as a whole on the GUI thread; only read by the worker.
+        self._row_cache: dict[str, tuple[tuple, DatasetRow]] = {}
 
     def reload(self, *, force: bool = False) -> None:
         workspace = self._session.workspace
@@ -151,13 +154,31 @@ class DatasetViewModel:
         self.busy.set(True)
         schema = workspace.label_schema
         root = Path(workspace.root)
+        cache = self._row_cache
 
-        def work() -> tuple[DatasetRow, ...]:
+        def work() -> tuple[tuple[DatasetRow, ...], dict[str, tuple[tuple, DatasetRow]]]:
             index = build_index(root, force=force)
             versions = self._service.versions(index)
-            return tuple(_summarise(row, schema) for row in versions)
+            # Every visit used to re-read and re-parse two sidecars per
+            # version: 12.7 s for a thousand versions on first read, 1.3 ms a
+            # version after that (release gate A3, 23 September 2026). A row
+            # is now recomputed only when something it was computed from has
+            # changed - the version's own summary, the vocabulary, or either
+            # sidecar's size or modification time.
+            vocabulary = _vocabulary_key(schema)
+            fresh: dict[str, tuple[tuple, DatasetRow]] = {}
+            rows: list[DatasetRow] = []
+            for version in versions:
+                key = _row_key(version, vocabulary)
+                known = cache.get(version.directory)
+                row = known[1] if known is not None and known[0] == key else _summarise(version, schema)
+                fresh[version.directory] = (key, row)
+                rows.append(row)
+            return tuple(rows), fresh
 
-        def done(rows: tuple[DatasetRow, ...]) -> None:
+        def done(result) -> None:  # noqa: ANN001
+            rows, fresh = result
+            self._row_cache = fresh
             self.busy.set(False)
             self.rows.force(rows)
             self.totals.force(
@@ -176,6 +197,36 @@ class DatasetViewModel:
             self.message.emit(from_error(exc, headline="Veri seti okunamadı."))
 
         self._runner.run(work, done, failed)
+
+
+def _sidecars(row: VersionRow) -> tuple[Path, Path]:
+    folder = Path(row.take_directory) / "annotations" / "processing"
+    return folder / f"{row.run_id}.json", folder / f"{row.run_id}.subject.json"
+
+
+def _stamp(path: Path) -> Optional[tuple[int, int]]:
+    """Size and modification time, or ``None`` for a file that is not there."""
+    import os
+
+    try:
+        status = os.stat(long_path(path))
+    except OSError:
+        return None
+    return (int(status.st_size), int(status.st_mtime_ns))
+
+
+def _vocabulary_key(schema: LabelSchema) -> tuple:
+    """What a row's class labels and colours depend on in the schema."""
+    return (
+        tuple((o.code, o.label) for o in schema.exercises),
+        tuple((o.code, o.label) for o in schema.error_types),
+    )
+
+
+def _row_key(row: VersionRow, vocabulary: tuple) -> tuple:
+    """Everything :func:`_summarise` reads, reduced to what can be compared."""
+    annotations, subject = _sidecars(row)
+    return (row, vocabulary, _stamp(annotations), _stamp(subject))
 
 
 def _position(codes: tuple[str, ...], code: str) -> int:

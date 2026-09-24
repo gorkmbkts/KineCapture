@@ -20,7 +20,13 @@ from kinecapture.dataset.workspace import PROJECT_FILE, ProjectWorkspace
 from kinecapture.domain.project import CaptureProfile
 from kinecapture.identity.database import IdentityDatabase
 from kinecapture.identity.models import ProjectAccess, User, UserRole, UserSummary
-from kinecapture.identity.passwords import hash_password, validate_password, verify_password
+from kinecapture.identity.passwords import (
+    ALGORITHM,
+    PasswordDigest,
+    hash_password,
+    validate_password,
+    verify_password,
+)
 from kinecapture.identity.repository import IdentityRepository
 
 _USERNAME = re.compile(r"^[A-Za-z0-9._-]{3,64}$")
@@ -87,11 +93,13 @@ class IdentityService:
         last_name: str,
         title: str,
         username: str,
-        password: str,
+        password: Optional[str] = None,
         role: UserRole,
         must_change_password: bool = False,
         actor_user_id: Optional[str] = None,
         require_empty: bool = False,
+        digest: Optional[PasswordDigest] = None,
+        origin: str = "",
     ) -> User:
         first, last, job, shown, normalized = _validate_profile(
             first_name=first_name,
@@ -99,7 +107,10 @@ class IdentityService:
             title=title,
             username=username,
         )
-        digest = hash_password(password)
+        if digest is None:
+            if password is None:
+                raise TypeError("_insert_user needs a password or a digest")
+            digest = hash_password(password)
         user_id = new_id("usr")
         now = utc_now_iso()
         try:
@@ -123,13 +134,16 @@ class IdentityService:
                     now=now,
                     must_change_password=must_change_password,
                 )
+                metadata = {"role": role.value}
+                if origin:
+                    metadata["origin"] = origin
                 self.repository.audit(
                     connection,
                     "user_created",
                     now,
                     actor_user_id=actor_user_id or user_id,
                     target_user_id=user_id,
-                    metadata={"role": role.value},
+                    metadata=metadata,
                 )
         except sqlite3.IntegrityError as exc:
             message = str(exc).lower()
@@ -152,6 +166,30 @@ class IdentityService:
     def create_initial_owner(self, **fields: str) -> User:
         return self._insert_user(
             **fields, role=UserRole.OWNER, require_empty=True
+        )
+
+    def create_initial_owner_from_digest(
+        self, digest: PasswordDigest, **fields: str
+    ) -> User:
+        """The first System Owner from a ready-made digest - never a password.
+
+        The installer's path (:mod:`kinecapture.identity.seed`): the password
+        was typed and hashed on the owner's own terminal and only its digest
+        travels with the release. Everything else is what
+        :meth:`create_initial_owner` enforces - an empty database, the same
+        profile rules - and the audit log records where the account came from.
+        """
+        if digest.algorithm != ALGORITHM:
+            raise ValidationError(
+                "Parola özeti tanınmayan bir algoritmayla üretilmiş.",
+                code="owner_seed_algorithm",
+            )
+        return self._insert_user(
+            **fields,
+            digest=digest,
+            role=UserRole.OWNER,
+            require_empty=True,
+            origin="owner_seed",
         )
 
     def self_register(self, **fields: str) -> User:
